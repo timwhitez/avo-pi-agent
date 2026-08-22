@@ -10,6 +10,7 @@ import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
+import { TrajectoryRecorder } from './trajectory/recorder.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
 
@@ -102,6 +103,10 @@ async function runPublic(args) {
   const results = [];
   const environment = new ArcBridgeClient({ python: config.python });
   const progress = createProgressStatusReporter();
+  const runId = process.env.AVO_REAL_RUN_ID || `public-${Date.now()}`;
+  const trajectoryRoot = process.env.AVO_TRAJECTORY_DIR
+    || path.join('runs', 'private', runId, 'trajectory');
+  let activeTrajectory = null;
   let aggregateScorecard = null;
   let selected = [];
   let runError = null;
@@ -124,15 +129,26 @@ async function runPublic(args) {
         maxActions: actionBudget.total,
         maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
       };
+      activeTrajectory = new TrajectoryRecorder({ root: trajectoryRoot, runId, gameId });
+      activeTrajectory.record('game.start', {
+        ordinal,
+        totalGames: selected.length,
+        versionedGameId: info.game_id,
+        title: info.title ?? null,
+        actionBudget,
+        outerTurnBudget: gameConfig.maxOuterTurns,
+      });
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
+          activeTrajectory?.recordPiEvent(event);
           if (event.type === 'tool_execution_end') process.stdout.write('.');
         },
       });
       console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId });
       try {
-        await environment.open(gameId);
+        const initialFrame = await environment.open(gameId);
+        activeTrajectory.record('arc.open', { frame: initialFrame });
         const agent = new AvoArcAgent({
           gameId,
           environment,
@@ -146,9 +162,13 @@ async function runPublic(args) {
           outerTurnBudget: gameConfig.maxOuterTurns,
         };
         results.push(result);
+        activeTrajectory.record('game.finish', { result });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
+        activeTrajectory.record('game.error', {
+          error: error instanceof Error ? error.message : String(error),
+        });
         progress.gameFinished({
           index: ordinal,
           total: selected.length,
@@ -156,6 +176,8 @@ async function runPublic(args) {
           result: { state: 'ERROR', levelsCompleted: 0, winLevels: 0, actions: 0, error: true },
         });
         throw error;
+      } finally {
+        activeTrajectory = null;
       }
     }
   } catch (error) {
