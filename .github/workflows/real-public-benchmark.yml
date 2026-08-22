@@ -115,6 +115,8 @@ jobs:
       - name: Run fail-closed real public benchmark
         env:
           AVO_REAL_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          AVO_STATUS_TOKEN: ${{ github.token }}
+          AVO_STATUS_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node scripts/run-real-public.mjs
 
       - name: Upload redacted benchmark report
