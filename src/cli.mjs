@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
+import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
@@ -119,23 +120,31 @@ async function runPublic(args) {
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
 
-    const loop = await createPiSdkLoop(config, {
-      onEvent(event) {
-        activeTrajectory?.recordPiEvent(event);
-        if (event.type === 'tool_execution_end') process.stdout.write('.');
-      },
-    });
     for (const [index, info] of selected.entries()) {
       const gameId = String(info.game_id).split('-')[0];
       const ordinal = index + 1;
+      const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
+      const gameConfig = {
+        ...config,
+        maxActions: actionBudget.total,
+        maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
+      };
       activeTrajectory = new TrajectoryRecorder({ root: trajectoryRoot, runId, gameId });
       activeTrajectory.record('game.start', {
         ordinal,
         totalGames: selected.length,
         versionedGameId: info.game_id,
         title: info.title ?? null,
+        actionBudget,
+        outerTurnBudget: gameConfig.maxOuterTurns,
       });
-      console.log(`\n[${ordinal}/${selected.length}] ${gameId}`);
+      const loop = await createPiSdkLoop(gameConfig, {
+        onEvent(event) {
+          activeTrajectory?.recordPiEvent(event);
+          if (event.type === 'tool_execution_end') process.stdout.write('.');
+        },
+      });
+      console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId });
       try {
         const initialFrame = await environment.open(gameId);
@@ -144,14 +153,18 @@ async function runPublic(args) {
           gameId,
           environment,
           loop,
-          config,
+          config: gameConfig,
           captureScorecard: false,
         });
-        const result = await agent.run();
+        const result = {
+          ...await agent.run(),
+          actionBudget,
+          outerTurnBudget: gameConfig.maxOuterTurns,
+        };
         results.push(result);
         activeTrajectory.record('game.finish', { result });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
-        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}`);
+        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
         activeTrajectory.record('game.error', {
           error: error instanceof Error ? error.message : String(error),
