@@ -1,0 +1,138 @@
+name: Real trajectory analyze repair rerun v4
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v3
+    paths:
+      - 'trajectory/trigger-v4/**'
+
+permissions:
+  contents: read
+  statuses: write
+
+env:
+  OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
+  OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
+  ARC_API_KEY: ''
+  AVO_ARC_AUTH_MODE: anonymous-auto
+  ARC_PYTHON: bridge/recording_python_v2.py
+  AVO_REAL_PYTHON: .venv/bin/python
+  AVO_MAX_ACTIONS: ${{ vars.AVO_MAX_ACTIONS || '1000' }}
+  AVO_MAX_OUTER_TURNS: ${{ vars.AVO_REPAIR_MAX_OUTER_TURNS || '32' }}
+  AVO_STALL_WINDOW: ${{ vars.AVO_STALL_WINDOW || '8' }}
+  AVO_REPAIR_MAX_ROUNDS: ${{ vars.AVO_REPAIR_MAX_ROUNDS || '3' }}
+
+concurrency:
+  group: real-arc-public-refs/heads/feature/real-public-benchmark
+  cancel-in-progress: false
+
+jobs:
+  repair-loop:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[trajectory-repair-v4]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+
+      - name: Validate encrypted runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "${OPENAI_BASE_URL:-}" ]] || missing+=(AVO_PROVIDER_BASE_URL)
+          [[ -n "${OPENAI_API_KEY:-}" ]] || missing+=(AVO_PROVIDER_API_KEY)
+          [[ -n "${OPENAI_MODEL:-}" ]] || missing+=(AVO_PROVIDER_MODEL)
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing required encrypted GitHub Actions secrets: $(IFS=,; echo "${missing[*]}")"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install production dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python_v2.py scripts/analyze-trajectories.mjs scripts/run-trajectory-repair-loop.mjs
+          .venv/bin/python -m py_compile bridge/arc_bridge.py bridge/recording_python_v2.py
+
+      - name: Verify detector, recorder, and repair regressions
+        run: node --test test/trajectory-analyzer-v3.test.mjs test/recording-python-v2.test.mjs
+
+      - name: Run real-provider analyze repair rerun loop
+        env:
+          AVO_REPAIR_RUN_ID: gha-repair-v4-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/run-trajectory-repair-loop.mjs --max-rounds "${AVO_REPAIR_MAX_ROUNDS}"
+
+      - name: Upload redacted repair comparison
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trajectory-repair-v4-redacted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload private trajectories, analyses, memory, and logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trajectory-repair-v4-private-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/
+            state/repair-loop/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish redacted repair status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const dir = path.join(process.cwd(), 'runs', 'public');
+          let report = null;
+          if (fs.existsSync(dir)) {
+            const files = fs.readdirSync(dir).filter((name) => /^trajectory-repair-.*\.redacted\.json$/.test(name))
+              .map((name) => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime);
+            if (files[0]) try { report = JSON.parse(fs.readFileSync(path.join(dir, files[0].name), 'utf8')); } catch {}
+          }
+          const clean = report?.status === 'complete' && report?.clean === true;
+          const rounds = Number(report?.rounds?.length || 0);
+          const findings = Number(report?.final?.openFindingCount ?? -1);
+          const score = report?.final?.officialScore?.value;
+          const description = clean
+            ? `clean rounds=${rounds} score=${String(score ?? 'unavailable').slice(0, 40)}`
+            : `not clean rounds=${rounds} open=${findings}`;
+          fs.writeFileSync('/tmp/status.json', JSON.stringify({
+            state: clean ? 'success' : 'failure',
+            context: 'trajectory-repair-v4',
+            description: description.slice(0, 140),
+            target_url: process.env.STATUS_TARGET,
+          }));
+          NODE
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" --input /tmp/status.json
