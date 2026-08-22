@@ -1,0 +1,59 @@
+name: Bootstrap CopilotKit mission control
+
+on:
+  push:
+    branches:
+      - feature/copilotkit-control-plane-v2
+    paths:
+      - '.github/workflows/bootstrap-mission-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-mission-control-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Reassemble and verify payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/mission-control.part00 \
+              bootstrap/mission-control.part01 \
+              bootstrap/mission-control.part02 \
+              bootstrap/mission-control.part03 \
+              bootstrap/mission-control.part04 > /tmp/mission-control.tar.gz.b64
+          echo '88e84e0620d03c46a9afffa36bb150cb33d1c54d607eb38c57adb397038c24cc  /tmp/mission-control.tar.gz.b64' | sha256sum -c -
+          base64 --decode /tmp/mission-control.tar.gz.b64 > /tmp/mission-control.tar.gz
+          echo '4ddab3ff43003a857a414d972b6f538171fd20f4f20e3db6e353a70c4940456d  /tmp/mission-control.tar.gz' | sha256sum -c -
+      - name: Extract mission-control application
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf apps/mission-control
+          tar -xzf /tmp/mission-control.tar.gz -C .
+          test -f apps/mission-control/package.json
+          test -f apps/mission-control/app/page.tsx
+          test -f apps/mission-control/lib/copilot-agent.ts
+      - name: Commit generated application
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add apps/mission-control
+          if git diff --cached --quiet; then
+            echo 'Mission-control application already materialized.'
+            exit 0
+          fi
+          git commit -m 'feat: add CopilotKit mission control'
+          git push origin HEAD:${GITHUB_REF_NAME}
