@@ -32,7 +32,7 @@ env:
 
 concurrency:
   group: real-arc-public-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   benchmark:
@@ -40,6 +40,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 720
     steps:
+      - name: Publish pending benchmark status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AVO_STATUS_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=pending \
+            -f context=real-public-benchmark \
+            -f description='running real-provider 25-game public benchmark' \
+            -f target_url="${AVO_STATUS_TARGET_URL}"
+
       - name: Check out requested branch
         uses: actions/checkout@v6
         with:
