@@ -1,0 +1,10 @@
+services:
+  avo-arc:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./state:/state
+      - ./environment_files:/app/environment_files
+      - ./runs:/app/runs
+    command: ["run-public", "--all"]

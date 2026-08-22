@@ -1,0 +1,24 @@
+{
+  "name": "avo-pi-arc-agi3",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A clean-room AVO-style ARC-AGI-3 agent built around the Pi agent loop.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "demo:offline": "node src/cli.mjs demo-offline --all",
+    "demo:public": "node src/cli.mjs run-public --all",
+    "provider:check": "node src/cli.mjs provider-check",
+    "security:scan": "node scripts/secret-scan.mjs",
+    "verify": "npm run test && npm run security:scan && npm run demo:offline",
+    "publish:private": "./scripts/publish-private.sh"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2"
+  },
+  "license": "MIT"
+}

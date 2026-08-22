@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+.venv
+__pycache__
+*.pyc
+.kaggle
+environment_files
+vendor
+recordings
+runs
+.avo-memory
+*.log
+coverage
+state
