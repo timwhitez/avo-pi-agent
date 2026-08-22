@@ -12,6 +12,7 @@
     "demo:offline": "node src/cli.mjs demo-offline --all",
     "demo:public": "node src/cli.mjs run-public --all",
     "provider:check": "node src/cli.mjs provider-check",
+    "trajectory:analyze": "node scripts/analyze-trajectories.mjs",
     "security:scan": "node scripts/secret-scan.mjs",
     "verify": "npm run test && npm run security:scan && npm run demo:offline",
     "publish:private": "./scripts/publish-private.sh"
