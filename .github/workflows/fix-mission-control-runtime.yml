@@ -1,0 +1,65 @@
+name: Harden mission-control runtime defaults
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/copilotkit-mission-control-v3
+    paths:
+      - 'maintenance/fix-mission-control-runtime.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-mission-control-runtime
+  cancel-in-progress: true
+
+jobs:
+  patch-test-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+
+      - name: Enable automatic ARC auth and exact recorder for UI-started runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          file = Path('apps/mission-control-v3/lib/control-plane.mjs')
+          text = file.read_text()
+          old = '''      ...process.env,\n      OPENAI_REASONING_EFFORT: options.reasoningLevel,\n      AVO_MAX_ACTIONS: String(options.actionBudget),\n      AVO_UI_RUN_ID: id,\n'''
+          new = '''      ...process.env,\n      OPENAI_REASONING_EFFORT: options.reasoningLevel,\n      ARC_API_KEY: '',\n      AVO_ARC_AUTH_MODE: 'anonymous-auto',\n      ARC_PYTHON: process.env.ARC_PYTHON || path.join(REPO_ROOT, 'bridge', 'recording_python_v3.py'),\n      AVO_REAL_PYTHON: process.env.AVO_REAL_PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python'),\n      AVO_MAX_ACTIONS: String(options.actionBudget),\n      AVO_UI_RUN_ID: id,\n'''
+          if old not in text:
+              raise SystemExit('expected child-process environment block not found; refusing ambiguous patch')
+          file.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Install, test, and build
+        working-directory: apps/mission-control-v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts
+          npm test
+          npm run build
+
+      - name: Commit verified runtime hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/mission-control-v3/lib/control-plane.mjs apps/mission-control-v3/test/frontend-contract.test.mjs
+          git commit -m "fix(ui): default to automatic ARC auth and private recorder"
+          git push origin HEAD:${GITHUB_REF_NAME}
