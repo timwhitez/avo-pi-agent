@@ -17,7 +17,12 @@ env:
   OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
   OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
   OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
-  ARC_API_KEY: ${{ secrets.ARC_API_KEY }}
+  # The official arc-agi SDK obtains a server-issued anonymous key whenever
+  # ARC_API_KEY is empty. Keep the empty value explicit so .env.example cannot
+  # replace it with a placeholder during python-dotenv loading.
+  ARC_API_KEY: ''
+  AVO_ARC_AUTH_MODE: anonymous-auto
+  AVO_MIN_PUBLIC_GAMES: ${{ vars.AVO_MIN_PUBLIC_GAMES || '25' }}
   ARC_PYTHON: .venv/bin/python
   AVO_MAX_ACTIONS: ${{ vars.AVO_MAX_ACTIONS || '1000' }}
   AVO_MAX_OUTER_TURNS: ${{ vars.AVO_MAX_OUTER_TURNS || '1000' }}
@@ -47,7 +52,7 @@ jobs:
           node-version: 22.19.0
           package-manager-cache: false
 
-      - name: Validate encrypted runtime configuration
+      - name: Validate encrypted provider configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +79,7 @@ jobs:
             echo "::error::Missing required encrypted GitHub Actions secrets: ${AVO_MISSING_SECRET_NAMES}"
             exit 1
           fi
+          echo "ARC authentication: official server-issued anonymous key (automatic, redacted)"
         env:
           AVO_REAL_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
 
