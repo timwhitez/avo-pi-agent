@@ -1,0 +1,84 @@
+name: Real ARC-AGI-3 public benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/real-public-benchmark
+    paths:
+      - 'benchmarks/trigger/**'
+
+permissions:
+  contents: read
+
+env:
+  OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
+  OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
+  ARC_API_KEY: ${{ secrets.ARC_API_KEY }}
+  ARC_PYTHON: .venv/bin/python
+  AVO_MAX_ACTIONS: ${{ vars.AVO_MAX_ACTIONS || '1000' }}
+  AVO_MAX_OUTER_TURNS: ${{ vars.AVO_MAX_OUTER_TURNS || '1000' }}
+  AVO_STALL_WINDOW: ${{ vars.AVO_STALL_WINDOW || '8' }}
+  AVO_MEMORY_DIR: state/memory
+  AVO_WORKSPACE_DIR: state/workspaces
+
+concurrency:
+  group: real-arc-public-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[real-public-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    steps:
+      - name: Check out requested branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Node dependencies
+        run: npm install --ignore-scripts
+
+      - name: Install official ARC runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+
+      - name: Run fail-closed real public benchmark
+        env:
+          AVO_REAL_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/run-real-public.mjs
+
+      - name: Upload redacted benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-public-redacted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload private trajectories and raw logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-public-private-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/private/
+          if-no-files-found: warn
+          retention-days: 7
