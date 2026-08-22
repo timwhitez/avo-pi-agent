@@ -1,0 +1,38 @@
+name: restack mission control v4
+
+on:
+  push:
+    branches:
+      - feature/copilotkit-mission-control-v3
+    paths:
+      - 'maintenance/restack-mission-control-v4.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: restack-mission-control-v4
+  cancel-in-progress: true
+
+jobs:
+  restack:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Build clean UI branch on trajectory v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feature/trajectory-repair-v3 feature/copilotkit-mission-control-v3
+          git switch --force-create feature/copilotkit-mission-control-v4 origin/feature/trajectory-repair-v3
+          git checkout origin/feature/copilotkit-mission-control-v3 -- \
+            apps/mission-control-v3 \
+            .github/workflows/mission-control-v3.yml
+          git add apps/mission-control-v3 .github/workflows/mission-control-v3.yml
+          git commit -m "feat(ui): restack CopilotKit mission control on trajectory v3"
+          git push --force-with-lease origin HEAD:feature/copilotkit-mission-control-v4
