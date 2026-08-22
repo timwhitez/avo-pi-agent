@@ -1,0 +1,169 @@
+name: Real ARC trajectory repair loop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v2
+    paths:
+      - 'trajectory/trigger/**'
+
+permissions:
+  contents: read
+  statuses: write
+
+env:
+  OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
+  OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
+  ARC_API_KEY: ''
+  AVO_ARC_AUTH_MODE: anonymous-auto
+  AVO_MIN_PUBLIC_GAMES: ${{ vars.AVO_MIN_PUBLIC_GAMES || '25' }}
+  ARC_PYTHON: bridge/recording_python.py
+  AVO_REAL_ARC_PYTHON: .venv/bin/python
+  AVO_MAX_ACTIONS: ${{ vars.AVO_MAX_ACTIONS || '1000' }}
+  AVO_MAX_OUTER_TURNS: ${{ vars.AVO_MAX_OUTER_TURNS || '1000' }}
+  AVO_STALL_WINDOW: ${{ vars.AVO_STALL_WINDOW || '8' }}
+  AVO_MEMORY_DIR: state/memory
+  AVO_WORKSPACE_DIR: state/workspaces
+  AVO_TRAJECTORY_DIR: runs/private/trajectory
+  AVO_REPAIR_ITERATIONS: ${{ vars.AVO_REPAIR_ITERATIONS || '3' }}
+
+concurrency:
+  group: real-arc-trajectory-repair-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    steps:
+      - name: Publish pending trajectory status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=pending \
+            -f context=trajectory-repair \
+            -f description='running real-provider trajectory repair loop' \
+            -f target_url="${TARGET_URL}"
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate encrypted provider configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL; do
+            [[ -n "${!name:-}" ]] || { echo "::error::Missing encrypted provider configuration: ${name}"; exit 1; }
+          done
+
+      - name: Install runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python.py
+
+      - name: Run benchmark, analyze, feed repairs, and repeat
+        id: repair
+        shell: bash
+        env:
+          AVO_STATUS_TOKEN: ${{ github.token }}
+          AVO_STATUS_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          max_iterations="${AVO_REPAIR_ITERATIONS}"
+          [[ "${max_iterations}" =~ ^[1-9][0-9]*$ ]] || { echo "AVO_REPAIR_ITERATIONS must be positive"; exit 1; }
+          clean=false
+          for iteration in $(seq 1 "${max_iterations}"); do
+            run_id="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-iter${iteration}"
+            export AVO_REAL_RUN_ID="${run_id}"
+            echo "=== REAL TRAJECTORY ITERATION ${iteration}/${max_iterations}: ${run_id} ==="
+            node scripts/run-real-public.mjs
+            node scripts/analyze-trajectories.mjs \
+              --input="${AVO_TRAJECTORY_DIR}/${run_id}" \
+              --run-id="${run_id}" \
+              --output="runs/private/${run_id}/trajectory-analysis.json" \
+              --public-output="runs/public/${run_id}-trajectory-analysis.json" \
+              --repair-output="runs/private/${run_id}/repair-plan.json" \
+              --memory-dir="${AVO_MEMORY_DIR}" \
+              --apply-memory \
+              --no-fail
+            if node -e "const r=require('./runs/public/${run_id}-trajectory-analysis.json'); process.exit(r.clean===true?0:1)"; then
+              clean=true
+              echo "clean=true" >> "${GITHUB_OUTPUT}"
+              echo "final_run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+              echo "iterations=${iteration}" >> "${GITHUB_OUTPUT}"
+              break
+            fi
+          done
+          if [[ "${clean}" != true ]]; then
+            echo "clean=false" >> "${GITHUB_OUTPUT}"
+            echo "final_run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+            echo "iterations=${max_iterations}" >> "${GITHUB_OUTPUT}"
+            echo "Trajectory quality gate remains open after ${max_iterations} real iterations."
+            exit 2
+          fi
+
+      - name: Upload redacted reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trajectory-redacted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload private trajectories and repair evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trajectory-private-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/
+            state/memory/
+            state/workspaces/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Publish final trajectory status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CLEAN: ${{ steps.repair.outputs.clean }}
+          ITERATIONS: ${{ steps.repair.outputs.iterations }}
+        run: |
+          set -euo pipefail
+          if [[ "${CLEAN:-false}" == true ]]; then
+            state=success
+            description="detector-clean after ${ITERATIONS:-1} real iteration(s)"
+          else
+            state=failure
+            description="open trajectory findings after ${ITERATIONS:-0} iteration(s)"
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="${state}" \
+            -f context=trajectory-repair \
+            -f description="${description}" \
+            -f target_url="${TARGET_URL}"
