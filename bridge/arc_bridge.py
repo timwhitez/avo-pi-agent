@@ -5,15 +5,83 @@ The bridge deliberately exposes only environment discovery, game selection,
 observation, step/reset, and scorecard operations. Provider credentials never
 enter this process. One bridge process owns one Arcade instance so a full
 public-suite run produces a cumulative scorecard.
+
+ARC authentication defaults to the official toolkit's server-issued anonymous
+key flow. The key is never emitted by this bridge: the official SDK logger is
+redirected to stderr and filtered before any record is written.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import re
 import sys
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
+
+_ANONYMOUS_KEY_LOG = re.compile(r"(Got anonymous API key:\s*).+", re.IGNORECASE)
+_SUPPORTED_AUTH_MODES = {"anonymous-auto", "registered"}
+
+
+class _RedactArcSecrets(logging.Filter):
+    """Remove server-issued ARC credentials from official SDK log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if _ANONYMOUS_KEY_LOG.search(message):
+            record.msg = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", message)
+            record.args = ()
+        return True
+
+
+def build_arc_logger() -> logging.Logger:
+    """Create a stderr-only logger so SDK messages cannot corrupt JSONL stdout."""
+
+    logger = logging.getLogger("avo.arc.bridge")
+    logger.handlers.clear()
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.addFilter(_RedactArcSecrets())
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(handler)
+    return logger
+
+
+def prepare_arc_auth() -> str:
+    """Select registered auth or the official server-issued anonymous flow.
+
+    `arc-agi` loads `.env.example` during import. Explicitly setting an empty
+    environment value before that import prevents a placeholder from shadowing
+    the SDK's anonymous-key bootstrap.
+    """
+
+    mode = os.getenv("AVO_ARC_AUTH_MODE", "anonymous-auto").strip().lower()
+    if mode not in _SUPPORTED_AUTH_MODES:
+        raise ValueError(
+            f"Unsupported AVO_ARC_AUTH_MODE={mode!r}; expected one of "
+            f"{sorted(_SUPPORTED_AUTH_MODES)}"
+        )
+    if mode == "anonymous-auto":
+        os.environ["ARC_API_KEY"] = ""
+    elif not os.getenv("ARC_API_KEY", "").strip():
+        raise ValueError("registered ARC auth requires ARC_API_KEY")
+    return mode
+
+
+def arc_auth_metadata(arcade: Any, mode: str) -> dict[str, Any]:
+    acquired = bool(str(getattr(arcade, "arc_api_key", "") or "").strip())
+    return {
+        "mode": mode,
+        "keyAcquired": acquired,
+        "keySource": (
+            "official-anonymous-endpoint" if mode == "anonymous-auto" else "environment-secret"
+        ),
+    }
 
 
 def fail(message: str) -> None:
@@ -88,6 +156,12 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        auth_mode = prepare_arc_auth()
+    except Exception as exc:
+        fail(f"ARC authentication configuration failed: {type(exc).__name__}: {exc}")
+        return 2
+
+    try:
         import arc_agi
         from arc_agi import OperationMode
         from arcengine import GameAction
@@ -99,12 +173,26 @@ def main() -> int:
         return 2
 
     try:
-        arcade = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
+        arcade = arc_agi.Arcade(
+            operation_mode=OperationMode.NORMAL,
+            logger=build_arc_logger(),
+        )
+        auth = arc_auth_metadata(arcade, auth_mode)
+        if not auth["keyAcquired"]:
+            raise RuntimeError(
+                "official ARC toolkit did not acquire an API key for the selected auth mode"
+            )
         if args.list:
-            print(json.dumps({
-                "ok": True,
-                "environments": environment_list(arcade),
-            }), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "arc_auth": auth,
+                        "environments": environment_list(arcade),
+                    }
+                ),
+                flush=True,
+            )
             return 0
         env = None
         current_game_id = None
@@ -123,7 +211,13 @@ def main() -> int:
             request = json.loads(line)
             command = request.get("command")
             if command == "list":
-                response = {"ok": True, "environments": environment_list(arcade)}
+                response = {
+                    "ok": True,
+                    "arc_auth": auth,
+                    "environments": environment_list(arcade),
+                }
+            elif command == "auth":
+                response = {"ok": True, "arc_auth": auth}
             elif command == "open":
                 requested_game = str(request.get("game_id") or "").strip()
                 if not requested_game:
@@ -155,7 +249,11 @@ def main() -> int:
                 raw = env.step(action, data=data, reasoning=reasoning)
                 response = {"ok": True, "frame": serialize_frame(raw)}
             elif command == "scorecard":
-                response = {"ok": True, "scorecard": jsonable(arcade.get_scorecard())}
+                response = {
+                    "ok": True,
+                    "arc_auth": auth,
+                    "scorecard": jsonable(arcade.get_scorecard()),
+                }
             elif command == "close":
                 print(json.dumps({"ok": True}), flush=True)
                 break
