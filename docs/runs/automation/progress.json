@@ -1,21 +1,8 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-22T18:09:41.102Z",
+  "generatedAt": "2026-08-22T18:12:24.599Z",
   "workflows": {
-    "recordedBaseline": {
-      "conclusion": "",
-      "createdAt": "2026-08-22T16:53:42Z",
-      "databaseId": 32586082233,
-      "displayTitle": "chore: run recorded real ARC public baseline [real-public-recorded-run]",
-      "event": "push",
-      "headBranch": "feature/real-public-benchmark",
-      "headSha": "38a7d392fdcb98293519bf95c866fd47714f3db9",
-      "startedAt": "2026-08-22T16:53:42Z",
-      "status": "in_progress",
-      "updatedAt": "2026-08-22T16:54:03Z",
-      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32586082233",
-      "workflowName": "Real ARC-AGI-3 public benchmark recorded"
-    },
+    "recordedBaseline": null,
     "recorderV5Promotion": {
       "conclusion": "success",
       "createdAt": "2026-08-22T18:00:52Z",

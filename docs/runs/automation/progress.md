@@ -1,10 +1,10 @@
 # Authoritative AVO execution progress v2
 
-Generated: 2026-08-22T18:09:41.102Z
+Generated: 2026-08-22T18:12:24.599Z
 
 | Workstream | Run | Branch | Status | Conclusion | Updated |
 |---|---:|---|---|---|---|
-| recordedBaseline | [32586082233](https://github.com/timwhitez/avo-pi-agent/actions/runs/32586082233) | `feature/real-public-benchmark` | in_progress | — | 2026-08-22T16:54:03Z |
+| recordedBaseline | — | — | not-found | — | — |
 | recorderV5Promotion | [32589470440](https://github.com/timwhitez/avo-pi-agent/actions/runs/32589470440) | `feature/trajectory-repair-v3` | completed | success | 2026-08-22T18:01:09Z |
 | repairV10 | [32588573100](https://github.com/timwhitez/avo-pi-agent/actions/runs/32588573100) | `feature/trajectory-repair-v3` | pending | — | 2026-08-22T17:43:01Z |
 | frontendSourceV3 | [32588994514](https://github.com/timwhitez/avo-pi-agent/actions/runs/32588994514) | `feature/copilotkit-mission-control-v3` | completed | success | 2026-08-22T17:55:49Z |
