@@ -19,7 +19,8 @@ COPY . .
 RUN npm run test && npm run security:scan
 
 ENV ARC_PYTHON=python \
-    AVO_MEMORY_DIR=/state/memory
+    AVO_MEMORY_DIR=/state/memory \
+    AVO_WORKSPACE_DIR=/state/workspaces
 VOLUME ["/state", "/app/environment_files", "/app/runs"]
 ENTRYPOINT ["node", "src/cli.mjs"]
 CMD ["run-public", "--all"]
