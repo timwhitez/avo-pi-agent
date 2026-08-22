@@ -124,13 +124,31 @@ async function runPublic(args) {
         maxActions: actionBudget.total,
         maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
       };
+      let observedActions = 0;
+      let observedLevels = 0;
+      let observedWinLevels = Number(info.level_count || 0);
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
-          if (event.type === 'tool_execution_end') process.stdout.write('.');
+          if (event.type !== 'tool_execution_end') return;
+          process.stdout.write('.');
+          if (event.toolName !== 'act') return;
+          observedActions += 1;
+          const frame = event.result?.details?.frame || {};
+          observedLevels = Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels);
+          observedWinLevels = Number(frame.winLevels ?? frame.win_levels ?? observedWinLevels);
+          progress.gameProgress({
+            index: ordinal,
+            total: selected.length,
+            gameId,
+            actions: observedActions,
+            levelsCompleted: observedLevels,
+            winLevels: observedWinLevels,
+            state: String(frame.state || 'PLAYING'),
+          });
         },
       });
       console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
-      progress.gameStarted({ index: ordinal, total: selected.length, gameId });
+      progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
         await environment.open(gameId);
         const agent = new AvoArcAgent({
@@ -153,7 +171,13 @@ async function runPublic(args) {
           index: ordinal,
           total: selected.length,
           gameId,
-          result: { state: 'ERROR', levelsCompleted: 0, winLevels: 0, actions: 0, error: true },
+          result: {
+            state: 'ERROR',
+            levelsCompleted: observedLevels,
+            winLevels: observedWinLevels,
+            actions: observedActions,
+            error: true,
+          },
         });
         throw error;
       }
