@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-22",
+  "secretScan": "passed",
+  "offlineContractDemo": {
+    "kind": "synthetic-non-official",
+    "games": 25,
+    "wins": 25,
+    "levels": 75,
+    "environmentActions": 816,
+    "officialScore": null
+  },
+  "officialPublicDemo": {
+    "executed": false,
+    "reasonCodes": [
+      "MODEL_ENDPOINT_UNREACHABLE_FROM_BUILD_SANDBOX",
+      "ARC_RUNTIME_UNAVAILABLE_DUE_TO_REGISTRY_DNS"
+    ]
+  },
+  "githubPublication": {
+    "executed": true,
+    "repository": "timwhitez/avo-pi-agent",
+    "visibility": "private",
+    "preUploadSecretScan": "passed"
+  },
+  "mockedOfficialBoundaryContract": {
+    "games": 25,
+    "wins": 25,
+    "cumulativeArcadeSession": true,
+    "aggregateScorecardCaptured": true,
+    "officialEnvironmentOrModelUsed": false
+  },
+  "nodeTests": {
+    "passed": 13,
+    "failed": 0
+  },
+  "staticChecks": {
+    "javascriptSyntaxFiles": 23,
+    "pythonBridgeCompile": true,
+    "shellSyntax": true,
+    "yamlParse": true,
+    "jsonParse": true
+  },
+  "sourcePackageAudit": {
+    "files": 48,
+    "exactPrivateValueHits": 0,
+    "genericSecretPatternHits": 0,
+    "gitFsck": "passed"
+  }
+}
