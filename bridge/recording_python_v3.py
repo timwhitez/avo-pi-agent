@@ -167,9 +167,15 @@ def watcher() -> None:
 
 
 def relay(source: TextIO, target: TextIO) -> None:
-    for line in source:
-        target.write(line)
-        target.flush()
+    try:
+        for line in source:
+            target.write(line)
+            target.flush()
+    finally:
+        try:
+            target.close()
+        except Exception:
+            pass
 
 
 def main() -> int:
