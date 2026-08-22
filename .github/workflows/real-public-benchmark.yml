@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 env:
   OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
@@ -45,6 +46,36 @@ jobs:
         with:
           node-version: 22.19.0
           package-manager-cache: false
+
+      - name: Validate encrypted runtime configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "${OPENAI_BASE_URL:-}" ]] || missing+=(AVO_PROVIDER_BASE_URL)
+          [[ -n "${OPENAI_API_KEY:-}" ]] || missing+=(AVO_PROVIDER_API_KEY)
+          [[ -n "${OPENAI_MODEL:-}" ]] || missing+=(AVO_PROVIDER_MODEL)
+          if (( ${#missing[@]} )); then
+            mkdir -p runs/public
+            export AVO_MISSING_SECRET_NAMES="$(IFS=,; echo "${missing[*]}")"
+            node <<'NODE'
+          const fs = require('node:fs');
+          const runId = process.env.AVO_REAL_RUN_ID || `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`;
+          const report = {
+            schemaVersion: 1,
+            runId,
+            status: 'failed',
+            failedStage: 'configuration',
+            failedAt: new Date().toISOString(),
+            error: `missing encrypted GitHub Actions secrets: ${process.env.AVO_MISSING_SECRET_NAMES}`,
+          };
+          fs.writeFileSync(`runs/public/${runId}.json`, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+          NODE
+            echo "::error::Missing required encrypted GitHub Actions secrets: ${AVO_MISSING_SECRET_NAMES}"
+            exit 1
+          fi
+        env:
+          AVO_REAL_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -84,3 +115,44 @@ jobs:
           path: runs/private/
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Publish redacted benchmark commit status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AVO_STATUS_TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const publicDir = path.join(process.cwd(), 'runs', 'public');
+          let report = null;
+          if (fs.existsSync(publicDir)) {
+            const files = fs.readdirSync(publicDir)
+              .filter((name) => name.endsWith('.json'))
+              .map((name) => ({ name, mtime: fs.statSync(path.join(publicDir, name)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime);
+            if (files[0]) {
+              try { report = JSON.parse(fs.readFileSync(path.join(publicDir, files[0].name), 'utf8')); } catch {}
+            }
+          }
+          const complete = report?.status === 'complete'
+            && report?.officialScore?.value !== null
+            && report?.officialScore?.value !== undefined;
+          const stage = String(report?.failedStage || (complete ? 'complete' : 'workflow'))
+            .replace(/[^A-Za-z0-9_.-]/g, '-')
+            .slice(0, 80);
+          const score = complete ? String(report.officialScore.value).slice(0, 40) : null;
+          const description = complete
+            ? `complete official score=${score}`
+            : `failed stage=${stage}`;
+          fs.writeFileSync('/tmp/avo-benchmark-status.json', JSON.stringify({
+            state: complete ? 'success' : 'failure',
+            context: 'real-public-benchmark',
+            description: description.slice(0, 140),
+            target_url: process.env.AVO_STATUS_TARGET_URL,
+          }));
+          NODE
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" --input /tmp/avo-benchmark-status.json
