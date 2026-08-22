@@ -12,6 +12,34 @@ Configure these only in GitHub repository or environment secrets:
 - `AVO_PROVIDER_MODEL`
 - `ARC_API_KEY` when the selected official runtime path requires it
 
+The current fail-closed workflow checks the first three names before installing
+benchmark dependencies. Missing values produce a redacted `configuration`
+failure, upload a safe report, and publish a `real-public-benchmark` commit
+status; values are never printed.
+
+### Secure CLI bootstrap
+
+Use a newly rotated provider key if an earlier key was pasted into chat, a shell
+command, an issue, or another non-secret channel. From a checkout of the
+benchmark branch:
+
+```bash
+git fetch origin feature/real-public-benchmark
+git switch feature/real-public-benchmark
+bash scripts/configure-actions-secrets.sh timwhitez/avo-pi-agent
+```
+
+The script prompts with terminal echo disabled, sends each value to
+`gh secret set` over standard input, and asks separately about the optional ARC
+key. It does not place values in argv, shell history, repository files, issues,
+PRs, or logs. GitHub CLI encrypts secret values locally before upload.
+
+Equivalent UI path:
+
+`Repository Settings → Secrets and variables → Actions → New repository secret`
+
+Only the secret **names** should ever be copied into troubleshooting output.
+
 Optional non-secret repository variables:
 
 - `AVO_PROVIDER_REASONING_EFFORT` — default `max`
@@ -27,11 +55,14 @@ artifacts intended for publication, or client-side frontend configuration.
 The workflow is present on `feature/real-public-benchmark` and does not require a
 merge. It can be triggered in two ways once the secrets exist:
 
-1. use GitHub's **Run workflow** action and select the branch; or
+1. use GitHub's **Run workflow** action and select the branch when the workflow
+   is visible in the Actions UI; or
 2. add/change a file under `benchmarks/trigger/` in a commit whose message
    contains `[real-public-run]`.
 
-A trigger commit contains no credential value.
+A trigger commit contains no credential value. The workflow writes a redacted
+commit status named `real-public-benchmark`, so automation can identify the
+failed stage without downloading private logs.
 
 ## Fail-closed stages
 
