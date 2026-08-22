@@ -1,0 +1,67 @@
+name: Promote method-aware full-evidence recorder v5
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v3
+    paths:
+      - 'maintenance/promote-recorder-v5.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-recorder-v5
+  cancel-in-progress: true
+
+jobs:
+  verify-promote-retrigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify method protocol, evidence boundary, and detector compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x bridge/recording_python_v5.py
+          python -m py_compile bridge/recording_python_v5.py
+          node --test test/recording-python-v5.test.mjs test/trajectory-analyzer-v3.test.mjs
+      - name: Promote v5 behind the stable v4 entry point and retrigger authoritative v10
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$GITHUB_REF_NAME"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          cat > bridge/recording_python_v4.py <<'PY'
+          #!/usr/bin/env python3
+          """Stable entry point for the method-aware full-evidence recorder v5."""
+          from recording_python_v5 import main
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+          chmod +x bridge/recording_python_v4.py
+          python -m py_compile bridge/recording_python_v4.py bridge/recording_python_v5.py
+          mkdir -p trajectory/trigger-v10
+          cat > trajectory/trigger-v10/2026-08-23-method-aware-authoritative-rerun.md <<'EOF'
+          # Method-aware authoritative four-job repair rerun
+
+          Replaces every earlier pending repair-v10 snapshot. The stable recorder v4 now delegates to tested recorder v5, which recognizes `method + params` and legacy operation shapes, records exact ARC transitions, supervisor evidence markers, durable memory/lineage hashes, and private process evidence. No credential is stored here.
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bridge/recording_python_v4.py bridge/recording_python_v5.py test/recording-python-v5.test.mjs trajectory/trigger-v10/2026-08-23-method-aware-authoritative-rerun.md
+          git commit -m "fix(trace): promote method-aware recorder and rerun [trajectory-repair-v10]"
+          git push origin HEAD:${GITHUB_REF_NAME}
