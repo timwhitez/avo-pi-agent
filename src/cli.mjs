@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
+import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
@@ -114,15 +115,21 @@ async function runPublic(args) {
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
 
-    const loop = await createPiSdkLoop(config, {
-      onEvent(event) {
-        if (event.type === 'tool_execution_end') process.stdout.write('.');
-      },
-    });
     for (const [index, info] of selected.entries()) {
       const gameId = String(info.game_id).split('-')[0];
       const ordinal = index + 1;
-      console.log(`\n[${ordinal}/${selected.length}] ${gameId}`);
+      const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
+      const gameConfig = {
+        ...config,
+        maxActions: actionBudget.total,
+        maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
+      };
+      const loop = await createPiSdkLoop(gameConfig, {
+        onEvent(event) {
+          if (event.type === 'tool_execution_end') process.stdout.write('.');
+        },
+      });
+      console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId });
       try {
         await environment.open(gameId);
@@ -130,13 +137,17 @@ async function runPublic(args) {
           gameId,
           environment,
           loop,
-          config,
+          config: gameConfig,
           captureScorecard: false,
         });
-        const result = await agent.run();
+        const result = {
+          ...await agent.run(),
+          actionBudget,
+          outerTurnBudget: gameConfig.maxOuterTurns,
+        };
         results.push(result);
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
-        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}`);
+        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
         progress.gameFinished({
           index: ordinal,
