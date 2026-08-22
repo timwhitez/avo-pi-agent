@@ -4,6 +4,7 @@ import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
+import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
@@ -99,6 +100,7 @@ async function runPublic(args) {
   const selection = parseSelection(args);
   const results = [];
   const environment = new ArcBridgeClient({ python: config.python });
+  const progress = createProgressStatusReporter();
   let aggregateScorecard = null;
   let selected = [];
   let runError = null;
@@ -119,24 +121,38 @@ async function runPublic(args) {
     });
     for (const [index, info] of selected.entries()) {
       const gameId = String(info.game_id).split('-')[0];
-      console.log(`\n[${index + 1}/${selected.length}] ${gameId}`);
-      await environment.open(gameId);
-      const agent = new AvoArcAgent({
-        gameId,
-        environment,
-        loop,
-        config,
-        captureScorecard: false,
-      });
-      const result = await agent.run();
-      results.push(result);
-      console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}`);
+      const ordinal = index + 1;
+      console.log(`\n[${ordinal}/${selected.length}] ${gameId}`);
+      progress.gameStarted({ index: ordinal, total: selected.length, gameId });
+      try {
+        await environment.open(gameId);
+        const agent = new AvoArcAgent({
+          gameId,
+          environment,
+          loop,
+          config,
+          captureScorecard: false,
+        });
+        const result = await agent.run();
+        results.push(result);
+        progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
+        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}`);
+      } catch (error) {
+        progress.gameFinished({
+          index: ordinal,
+          total: selected.length,
+          gameId,
+          result: { state: 'ERROR', levelsCompleted: 0, winLevels: 0, actions: 0, error: true },
+        });
+        throw error;
+      }
     }
   } catch (error) {
     runError = error;
   } finally {
     aggregateScorecard = await environment.scorecard().catch(() => null);
     await environment.close();
+    await progress.flush();
   }
 
   const report = makeReport('official-public-environments', results, config, {
@@ -149,7 +165,10 @@ async function runPublic(args) {
   if (runError) {
     throw new Error(`${redactRuntimeSecrets(runError?.message || runError)}; partial report: ${reportFile}`);
   }
-  if (!results.every((result) => result.won)) process.exitCode = 2;
+
+  // A complete public benchmark can legitimately score below 100. Individual
+  // non-wins are benchmark data, not a process/infrastructure failure. Exact
+  // game coverage and official score origin are validated by the outer runner.
 }
 
 function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
