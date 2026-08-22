@@ -8,7 +8,7 @@ import {
   loadMemoryByGame,
   loadTrajectoryEvents,
   redactedAnalysis,
-} from '../src/trajectory/analyzer.mjs';
+} from '../src/trajectory/analyzer-v2.mjs';
 import {
   applyRepairPlan,
   buildRepairPlan,
@@ -80,6 +80,7 @@ const record = {
   benchmarkFailedStage: benchmark?.failedStage || null,
   benchmarkReport: reportEntry ? path.relative(process.cwd(), reportEntry.file) : null,
   officialScore,
+  trajectoryIntegrity: analysis.integrity || null,
   trajectoryFileCount: loaded.files.length,
   trajectoryEventCount: loaded.events.length,
   parseErrorCount: loaded.parseErrors.length,
@@ -108,6 +109,7 @@ const publicRecord = {
   benchmarkStatus: record.benchmarkStatus,
   benchmarkFailedStage: record.benchmarkFailedStage,
   officialScore: record.officialScore,
+  trajectoryIntegrity: record.trajectoryIntegrity,
   trajectoryFileCount: record.trajectoryFileCount,
   trajectoryEventCount: record.trajectoryEventCount,
   parseErrorCount: record.parseErrorCount,
