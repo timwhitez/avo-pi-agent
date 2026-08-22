@@ -56,9 +56,11 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
   return {
     provider,
     maxActions: integer('AVO_MAX_ACTIONS', 1000),
-    maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 12),
+    maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 1000),
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
     memoryDir: process.env.AVO_MEMORY_DIR || '.avo-memory',
+    workspaceDir: process.env.AVO_WORKSPACE_DIR || '.avo-workspaces',
+    workspacePythonTimeoutMs: integer('AVO_WORKSPACE_PYTHON_TIMEOUT_MS', 10_000, 100),
     python: process.env.ARC_PYTHON || '.venv/bin/python',
   };
 }
@@ -72,5 +74,6 @@ export function publicConfigSummary(config) {
     maxOuterTurns: config.maxOuterTurns,
     stallWindow: config.stallWindow,
     memoryDir: config.memoryDir,
+    workspaceDir: config.workspaceDir,
   };
 }
