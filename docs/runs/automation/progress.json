@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-22T17:47:50.928Z",
+  "workflows": {
+    "recordedBaseline": null,
+    "repairV10": {
+      "conclusion": "",
+      "createdAt": "2026-08-22T17:43:00Z",
+      "databaseId": 32588573100,
+      "displayTitle": "chore: queue four-job full-public repair chain [trajectory-repair-v10]",
+      "event": "push",
+      "headBranch": "feature/trajectory-repair-v3",
+      "headSha": "81ba7a7655da3cc209e0e7ee2321d8e6d6d3e35a",
+      "startedAt": "2026-08-22T17:43:00Z",
+      "status": "pending",
+      "updatedAt": "2026-08-22T17:43:01Z",
+      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32588573100",
+      "workflowName": "Real trajectory multi-job repair and publish v10"
+    },
+    "frontendSourcePatch": {
+      "conclusion": "success",
+      "createdAt": "2026-08-22T17:26:35Z",
+      "databaseId": 32587738484,
+      "displayTitle": "chore(ui): harden and verify runtime defaults",
+      "event": "push",
+      "headBranch": "feature/copilotkit-mission-control-v3",
+      "headSha": "628861367fb892df2d1169c4281efabc00033f54",
+      "startedAt": "2026-08-22T17:26:35Z",
+      "status": "completed",
+      "updatedAt": "2026-08-22T17:31:13Z",
+      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32587738484",
+      "workflowName": "Harden mission-control runtime defaults"
+    },
+    "frontendRestackV6": {
+      "conclusion": "failure",
+      "createdAt": "2026-08-22T17:27:03Z",
+      "databaseId": 32587762669,
+      "displayTitle": "chore(ui): restack hardened mission control v6",
+      "event": "push",
+      "headBranch": "feature/trajectory-repair-v3",
+      "headSha": "091ba88445526314cb2d0a4b31bded8582fe647d",
+      "startedAt": "2026-08-22T17:27:03Z",
+      "status": "completed",
+      "updatedAt": "2026-08-22T17:38:01Z",
+      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32587762669",
+      "workflowName": "Restack hardened mission control v6"
+    },
+    "frontendPrV6": {
+      "conclusion": "",
+      "createdAt": "2026-08-22T17:27:46Z",
+      "databaseId": 32587798296,
+      "displayTitle": "chore(ui): open verified mission-control v6 Draft PR",
+      "event": "push",
+      "headBranch": "feature/trajectory-repair-v3",
+      "headSha": "4a18f05698cf13b09af9b25f05c9c225697553d0",
+      "startedAt": "2026-08-22T17:27:46Z",
+      "status": "in_progress",
+      "updatedAt": "2026-08-22T17:27:49Z",
+      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32587798296",
+      "workflowName": "Open verified mission-control v6 Draft PR"
+    },
+    "prAudit": {
+      "conclusion": "failure",
+      "createdAt": "2026-08-22T17:29:17Z",
+      "databaseId": 32587873755,
+      "displayTitle": "chore: publish Draft and no-Merge audit v2",
+      "event": "push",
+      "headBranch": "feature/real-public-benchmark",
+      "headSha": "cf50a65645dae3f18772d648133e5ba06afd829c",
+      "startedAt": "2026-08-22T17:29:17Z",
+      "status": "completed",
+      "updatedAt": "2026-08-22T17:29:48Z",
+      "url": "https://github.com/timwhitez/avo-pi-agent/actions/runs/32587873755",
+      "workflowName": "Audit AVO Draft PR stack v2"
+    },
+    "finalAcceptance": null
+  }
+}
