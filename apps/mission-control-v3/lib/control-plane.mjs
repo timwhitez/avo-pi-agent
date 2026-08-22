@@ -62,6 +62,10 @@ export function startRun(input = {}) {
     env: {
       ...process.env,
       OPENAI_REASONING_EFFORT: options.reasoningLevel,
+      ARC_API_KEY: '',
+      AVO_ARC_AUTH_MODE: 'anonymous-auto',
+      ARC_PYTHON: process.env.ARC_PYTHON || path.join(REPO_ROOT, 'bridge', 'recording_python_v3.py'),
+      AVO_REAL_PYTHON: process.env.AVO_REAL_PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python'),
       AVO_MAX_ACTIONS: String(options.actionBudget),
       AVO_UI_RUN_ID: id,
       AVO_MEMORY_DIR: process.env.AVO_MEMORY_DIR || path.join(REPO_ROOT, 'state', 'memory'),
