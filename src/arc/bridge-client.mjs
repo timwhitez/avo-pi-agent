@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 
+const MAX_DIAGNOSTIC_CHARS = 64 * 1024;
+
 export class ArcBridgeClient {
   constructor({ python, gameId = null, cwd = process.cwd() }) {
     this.python = python;
@@ -28,10 +30,10 @@ export class ArcBridgeClient {
     this.child = spawn(this.python, [script], {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
     this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
+    this.child.stderr.on('data', (chunk) => this.appendDiagnostic(chunk));
     this.child.on('error', (error) => this.rejectPending(error));
     this.child.on('exit', (code, signal) => {
       const suffix = this.stderr ? `: ${this.stderr.trim()}` : '';
@@ -39,16 +41,40 @@ export class ArcBridgeClient {
     });
     const lines = readline.createInterface({ input: this.child.stdout });
     lines.on('line', (line) => {
-      const item = this.pending.shift();
-      if (!item) return;
+      if (!line.trim()) return;
+
+      let response;
       try {
-        const response = JSON.parse(line);
-        if (!response.ok) item.reject(new Error(response.error || 'ARC bridge error'));
-        else item.resolve(response);
-      } catch (error) {
-        item.reject(new Error(`Invalid ARC bridge response: ${line}`, { cause: error }));
+        response = JSON.parse(line);
+      } catch {
+        // Some third-party ARC modules install stdout log handlers. Treat a
+        // non-JSON line as bounded diagnostic noise without consuming the
+        // pending request. The Python bridge also redirects known loggers, so
+        // this is defense-in-depth for future SDK versions.
+        this.appendDiagnostic(`[bridge-stdout] ${line}\n`);
+        return;
+      }
+
+      const item = this.pending.shift();
+      if (!item) {
+        this.appendDiagnostic(`[bridge-protocol] unsolicited JSON response ignored\n`);
+        return;
+      }
+      if (!response || typeof response !== 'object' || typeof response.ok !== 'boolean') {
+        item.reject(new Error('Invalid ARC bridge JSON response shape'));
+      } else if (!response.ok) {
+        item.reject(new Error(response.error || 'ARC bridge error'));
+      } else {
+        item.resolve(response);
       }
     });
+  }
+
+  appendDiagnostic(value) {
+    this.stderr += String(value ?? '');
+    if (this.stderr.length > MAX_DIAGNOSTIC_CHARS) {
+      this.stderr = this.stderr.slice(-MAX_DIAGNOSTIC_CHARS);
+    }
   }
 
   rejectPending(error) {
@@ -74,6 +100,11 @@ export class ArcBridgeClient {
   async list() {
     await this.ensureProcess();
     return (await this.request({ command: 'list' })).environments;
+  }
+
+  async auth() {
+    await this.ensureProcess();
+    return (await this.request({ command: 'auth' })).arc_auth;
   }
 
   async open(gameId) {
