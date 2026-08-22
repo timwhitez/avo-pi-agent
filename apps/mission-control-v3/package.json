@@ -1,0 +1,24 @@
+{
+  "name": "avo-pi-mission-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@copilotkit/react-core": "latest",
+    "@copilotkit/react-ui": "latest",
+    "@copilotkit/runtime": "latest",
+    "next": "^15.5.2",
+    "openai": "^6.8.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}
