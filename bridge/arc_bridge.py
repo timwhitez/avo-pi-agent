@@ -7,7 +7,7 @@ enter this process. One bridge process owns one Arcade instance so a full
 public-suite run produces a cumulative scorecard.
 
 ARC authentication defaults to the official toolkit's server-issued anonymous
-key flow. The key is never emitted by this bridge: the official SDK logger is
+key flow. The key is never emitted by this bridge: all official ARC loggers are
 redirected to stderr and filtered before any record is written.
 """
 from __future__ import annotations
@@ -37,6 +37,14 @@ class _RedactArcSecrets(logging.Filter):
         return True
 
 
+def _stderr_handler() -> logging.Handler:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.addFilter(_RedactArcSecrets())
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    return handler
+
+
 def build_arc_logger() -> logging.Logger:
     """Create a stderr-only logger so SDK messages cannot corrupt JSONL stdout."""
 
@@ -44,12 +52,31 @@ def build_arc_logger() -> logging.Logger:
     logger.handlers.clear()
     logger.propagate = False
     logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(logging.INFO)
-    handler.addFilter(_RedactArcSecrets())
-    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
-    logger.addHandler(handler)
+    logger.addHandler(_stderr_handler())
     return logger
+
+
+def redirect_official_arc_loggers() -> None:
+    """Replace stdout handlers installed by arc-agi modules.
+
+    `arc_agi.scorecard` installs its own `StreamHandler(sys.stdout)` at import
+    time and disables propagation. Passing a logger to `Arcade` therefore does
+    not cover it. Replacing every loaded `arc_agi*` logger handler here keeps
+    stdout reserved exclusively for the JSONL protocol.
+    """
+
+    names = {"arc_agi"}
+    names.update(
+        name
+        for name in logging.Logger.manager.loggerDict
+        if name == "arc_agi" or name.startswith("arc_agi.")
+    )
+    for name in names:
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.addHandler(_stderr_handler())
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
 
 
 def prepare_arc_auth() -> str:
@@ -165,6 +192,7 @@ def main() -> int:
         import arc_agi
         from arc_agi import OperationMode
         from arcengine import GameAction
+        redirect_official_arc_loggers()
     except Exception as exc:
         fail(
             "Official ARC runtime unavailable. Use Python 3.12 and run "
