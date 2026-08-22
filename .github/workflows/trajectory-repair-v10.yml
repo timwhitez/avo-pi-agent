@@ -1,0 +1,413 @@
+name: Real trajectory multi-job repair and publish v10
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v3
+    paths:
+      - 'trajectory/trigger-v10/**'
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+  statuses: write
+
+env:
+  OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
+  OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
+  ARC_API_KEY: ''
+  AVO_ARC_AUTH_MODE: anonymous-auto
+  ARC_PYTHON: bridge/recording_python_v4.py
+  AVO_REAL_PYTHON: .venv/bin/python
+  AVO_MAX_ACTIONS: ${{ vars.AVO_MAX_ACTIONS || '1000' }}
+  AVO_MAX_OUTER_TURNS: ${{ vars.AVO_REPAIR_MAX_OUTER_TURNS || '32' }}
+  AVO_STALL_WINDOW: ${{ vars.AVO_STALL_WINDOW || '8' }}
+  AVO_REPAIR_CHAIN_ID: gha-chain-${{ github.run_id }}-${{ github.run_attempt }}
+
+concurrency:
+  group: real-arc-public-refs/heads/feature/real-public-benchmark
+  cancel-in-progress: false
+
+jobs:
+  round0:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[trajectory-repair-v10]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      clean: ${{ steps.round.outputs.clean }}
+      should_continue: ${{ steps.round.outputs.should_continue }}
+      status: ${{ steps.round.outputs.status }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - name: Install and verify production stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "${OPENAI_BASE_URL:-}" ]] || missing+=(AVO_PROVIDER_BASE_URL)
+          [[ -n "${OPENAI_API_KEY:-}" ]] || missing+=(AVO_PROVIDER_API_KEY)
+          [[ -n "${OPENAI_MODEL:-}" ]] || missing+=(AVO_PROVIDER_MODEL)
+          (( ${#missing[@]} == 0 )) || { echo "::error::Missing encrypted secrets: $(IFS=,; echo "${missing[*]}")"; exit 1; }
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python_v2.py bridge/recording_python_v3.py bridge/recording_python_v4.py scripts/run-trajectory-repair-round.mjs
+          .venv/bin/python -m py_compile bridge/arc_bridge.py bridge/recording_python_v2.py bridge/recording_python_v3.py bridge/recording_python_v4.py
+          node --test test/trajectory-analyzer-v3.test.mjs test/recording-python-v2.test.mjs test/recording-python-v4.test.mjs
+      - name: Execute complete public round 0
+        id: round
+        run: node scripts/run-trajectory-repair-round.mjs --chain-id "$AVO_REPAIR_CHAIN_ID" --round 0
+      - name: Package durable repair state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf /tmp/state-r0.tgz "state/repair-chain/${AVO_REPAIR_CHAIN_ID}"
+      - name: Upload state for the next round
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-state-r0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/state-r0.tgz
+          retention-days: 7
+      - name: Upload redacted round result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-public-r0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/repair-chain-*.redacted.json
+          retention-days: 30
+      - name: Upload private round evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-private-r0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/repair-chain/${{ env.AVO_REPAIR_CHAIN_ID }}/round-0/
+            runs/private/trajectories/${{ env.AVO_REPAIR_CHAIN_ID }}-round-0/
+          if-no-files-found: warn
+          retention-days: 7
+
+  round1:
+    needs: round0
+    if: needs.round0.outputs.should_continue == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      clean: ${{ steps.round.outputs.clean }}
+      should_continue: ${{ steps.round.outputs.should_continue }}
+      status: ${{ steps.round.outputs.status }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v6
+        with:
+          name: repair-chain-state-r0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/input-state
+      - name: Restore state and install production stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf /tmp/input-state/state-r0.tgz -C .
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python_v2.py bridge/recording_python_v3.py bridge/recording_python_v4.py scripts/run-trajectory-repair-round.mjs
+      - name: Execute complete public round 1
+        id: round
+        run: node scripts/run-trajectory-repair-round.mjs --chain-id "$AVO_REPAIR_CHAIN_ID" --round 1
+      - name: Package durable repair state
+        if: always()
+        run: tar -czf /tmp/state-r1.tgz "state/repair-chain/${AVO_REPAIR_CHAIN_ID}"
+      - name: Upload state for the next round
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-state-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/state-r1.tgz
+          retention-days: 7
+      - name: Upload redacted round result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-public-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/repair-chain-*.redacted.json
+          retention-days: 30
+      - name: Upload private round evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-private-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/repair-chain/${{ env.AVO_REPAIR_CHAIN_ID }}/round-1/
+            runs/private/trajectories/${{ env.AVO_REPAIR_CHAIN_ID }}-round-1/
+          if-no-files-found: warn
+          retention-days: 7
+
+  round2:
+    needs: round1
+    if: needs.round1.outputs.should_continue == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      clean: ${{ steps.round.outputs.clean }}
+      should_continue: ${{ steps.round.outputs.should_continue }}
+      status: ${{ steps.round.outputs.status }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v6
+        with:
+          name: repair-chain-state-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/input-state
+      - name: Restore state and install production stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf /tmp/input-state/state-r1.tgz -C .
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python_v2.py bridge/recording_python_v3.py bridge/recording_python_v4.py scripts/run-trajectory-repair-round.mjs
+      - name: Execute complete public round 2
+        id: round
+        run: node scripts/run-trajectory-repair-round.mjs --chain-id "$AVO_REPAIR_CHAIN_ID" --round 2
+      - name: Package durable repair state
+        if: always()
+        run: tar -czf /tmp/state-r2.tgz "state/repair-chain/${AVO_REPAIR_CHAIN_ID}"
+      - name: Upload state for the next round
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-state-r2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/state-r2.tgz
+          retention-days: 7
+      - name: Upload redacted round result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-public-r2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/repair-chain-*.redacted.json
+          retention-days: 30
+      - name: Upload private round evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-private-r2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/repair-chain/${{ env.AVO_REPAIR_CHAIN_ID }}/round-2/
+            runs/private/trajectories/${{ env.AVO_REPAIR_CHAIN_ID }}-round-2/
+          if-no-files-found: warn
+          retention-days: 7
+
+  round3:
+    needs: round2
+    if: needs.round2.outputs.should_continue == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      clean: ${{ steps.round.outputs.clean }}
+      should_continue: ${{ steps.round.outputs.should_continue }}
+      status: ${{ steps.round.outputs.status }}
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v6
+        with:
+          name: repair-chain-state-r2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/input-state
+      - name: Restore state and install production stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf /tmp/input-state/state-r2.tgz -C .
+          npm install --ignore-scripts
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r bridge/requirements.txt
+          chmod +x bridge/recording_python_v2.py bridge/recording_python_v3.py bridge/recording_python_v4.py scripts/run-trajectory-repair-round.mjs
+      - name: Execute complete public round 3
+        id: round
+        run: node scripts/run-trajectory-repair-round.mjs --chain-id "$AVO_REPAIR_CHAIN_ID" --round 3
+      - name: Upload redacted round result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-public-r3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/repair-chain-*.redacted.json
+          retention-days: 30
+      - name: Upload private round evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: repair-chain-private-r3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runs/private/repair-chain/${{ env.AVO_REPAIR_CHAIN_ID }}/round-3/
+            runs/private/trajectories/${{ env.AVO_REPAIR_CHAIN_ID }}-round-3/
+            state/repair-chain/${{ env.AVO_REPAIR_CHAIN_ID }}/
+          if-no-files-found: warn
+          retention-days: 7
+
+  finalize:
+    needs: [round0, round1, round2, round3]
+    if: always() && needs.round0.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: true }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - name: Download every completed redacted round
+        uses: actions/download-artifact@v6
+        with:
+          pattern: repair-chain-public-r*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/repair-rounds
+          merge-multiple: true
+      - name: Aggregate the multi-job repair result
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runs/public
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const files = fs.readdirSync('/tmp/repair-rounds').filter((name) => name.endsWith('.json'));
+          const rounds = files.flatMap((name) => {
+            try { return [JSON.parse(fs.readFileSync(path.join('/tmp/repair-rounds', name), 'utf8'))]; } catch { return []; }
+          }).filter((value) => Number.isInteger(value.round)).sort((a, b) => a.round - b.round);
+          if (!rounds.length) throw new Error('No completed repair round is available');
+          const baseline = rounds[0];
+          const final = rounds.at(-1);
+          const clean = final.clean === true && final.status === 'complete';
+          const report = {
+            schemaVersion: 2,
+            repairRunId: final.chainId,
+            startedAt: baseline.startedAt,
+            completedAt: final.completedAt,
+            status: clean ? 'complete' : final.status === 'failed' ? 'failed' : 'exhausted',
+            clean,
+            baseline,
+            final,
+            rounds,
+            failure: clean ? null : {
+              stage: final.status === 'failed' ? (final.benchmarkFailedStage || 'infrastructure-or-runtime') : 'repair-round-limit-or-blocked',
+              message: final.status === 'failed'
+                ? 'A real-provider or trajectory-integrity failure stopped iteration.'
+                : 'Open detector findings remain after all completed full-public repair rounds.',
+            },
+            acceptanceRule: 'clean=true only when every registered detector executed, parse errors are zero, and open findings are zero after a complete real-provider public run',
+          };
+          fs.writeFileSync(`runs/public/trajectory-repair-chain-${final.chainId}.redacted.json`, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+          NODE
+      - name: Upload final multi-job redacted result
+        uses: actions/upload-artifact@v6
+        with:
+          name: trajectory-repair-v10-redacted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runs/public/trajectory-repair-chain-*.redacted.json
+          retention-days: 30
+      - name: Download latest complete-public redacted baseline
+        shell: bash
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/final-results/baseline
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" > /tmp/final-results/artifacts.json
+          baseline_id="$(node <<'NODE'
+          const fs = require('node:fs');
+          const text = fs.readFileSync('/tmp/final-results/artifacts.json', 'utf8').trim();
+          const pages = text ? text.split(/\n(?=\{)/).filter(Boolean).map(JSON.parse) : [];
+          const artifact = pages.flatMap((page) => page.artifacts || []).filter((entry) => !entry.expired && /^arc-public-redacted-/.test(entry.name)).sort((a,b) => Date.parse(b.created_at)-Date.parse(a.created_at))[0];
+          process.stdout.write(String(artifact?.id || ''));
+          NODE
+          )"
+          [[ -n "$baseline_id" ]] || { echo "::error::No redacted baseline artifact found"; exit 1; }
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${baseline_id}/zip" > /tmp/final-results/baseline.zip
+          unzip -q /tmp/final-results/baseline.zip -d /tmp/final-results/baseline
+      - name: Render exact final documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin feature/real-public-benchmark
+          git show origin/feature/real-public-benchmark:scripts/publish-redacted-results.mjs > /tmp/publish-redacted-results.mjs
+          node /tmp/publish-redacted-results.mjs /tmp/final-results/baseline runs/public /tmp/final-results/generated
+      - name: Commit exact redacted result to benchmark Draft branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feature/real-public-benchmark
+          rm -rf /tmp/benchmark-results
+          git worktree add --detach /tmp/benchmark-results origin/feature/real-public-benchmark
+          cd /tmp/benchmark-results
+          mkdir -p docs/runs/automation
+          cp /tmp/final-results/generated/latest-results.redacted.json docs/runs/automation/latest-results.redacted.json
+          cp /tmp/final-results/generated/latest-results.md docs/runs/automation/latest-results.md
+          node scripts/secret-scan.mjs
+          git add docs/runs/automation/latest-results.redacted.json docs/runs/automation/latest-results.md
+          if ! git diff --cached --quiet; then
+            git commit -m "docs(results): publish multi-job repair-v10 outcome"
+            for attempt in 1 2 3; do
+              git fetch origin feature/real-public-benchmark
+              git rebase origin/feature/real-public-benchmark
+              if git push origin HEAD:feature/real-public-benchmark; then break; fi
+              sleep $((attempt * 5))
+            done
+          fi
+      - name: Comment exact result on tracking issues
+        shell: bash
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -euo pipefail
+          gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file /tmp/final-results/generated/latest-results.md
+          gh issue comment 3 --repo "$GITHUB_REPOSITORY" --body-file /tmp/final-results/generated/latest-results.md
+          gh issue comment 4 --repo "$GITHUB_REPOSITORY" --body-file /tmp/final-results/generated/latest-results.md
+      - name: Publish final status and fail unless detector-clean
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync('/tmp/final-results/generated/latest-results.redacted.json', 'utf8'));
+          const clean = report?.repair?.status === 'complete' && report?.repair?.clean === true;
+          const score = report?.repair?.final?.officialScore?.value;
+          const rounds = report?.repair?.rounds?.length || 0;
+          const open = report?.repair?.final?.openFindingCount ?? -1;
+          fs.writeFileSync('/tmp/status.json', JSON.stringify({
+            state: clean ? 'success' : 'failure',
+            context: 'trajectory-repair-v10',
+            description: (clean ? `clean rounds=${rounds} score=${score}` : `not clean rounds=${rounds} open=${open}`).slice(0, 140),
+            target_url: process.env.STATUS_TARGET,
+          }));
+          fs.writeFileSync('/tmp/clean.txt', String(clean));
+          NODE
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" --input /tmp/status.json
+          [[ "$(cat /tmp/clean.txt)" == true ]]
