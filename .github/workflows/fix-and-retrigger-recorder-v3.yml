@@ -1,0 +1,70 @@
+name: Fix and retrigger recorder v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v3
+    paths:
+      - 'maintenance/fix-recorder-v3.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-recorder-v3
+  cancel-in-progress: true
+
+jobs:
+  fix-test-trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Close composed-recorder stdin on EOF
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          file = Path('bridge/recording_python_v3.py')
+          text = file.read_text()
+          old = '''def relay(source: TextIO, target: TextIO) -> None:\n    for line in source:\n        target.write(line)\n        target.flush()\n'''
+          new = '''def relay(source: TextIO, target: TextIO) -> None:\n    try:\n        for line in source:\n            target.write(line)\n            target.flush()\n    finally:\n        try:\n            target.close()\n        except Exception:\n            pass\n'''
+          if old not in text:
+              raise SystemExit('expected relay function was not found; refusing an ambiguous patch')
+          file.write_text(text.replace(old, new, 1))
+          PY
+          python -m py_compile bridge/recording_python_v2.py bridge/recording_python_v3.py
+
+      - name: Verify protocol, supervisor, memory, and EOF lifecycle
+        run: node --test test/recording-python-v2.test.mjs test/recording-python-v3.test.mjs test/trajectory-analyzer-v3.test.mjs
+
+      - name: Commit fix and trigger only the corrected v5 run
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trajectory/trigger-v5
+          cat > trajectory/trigger-v5/2026-08-23-eof-corrected-full-evidence.md <<'EOF'
+          # EOF-corrected full-evidence repair loop
+
+          Triggers the real-provider repair-v5 workflow only after protocol, supervisor-marker, durable-state, and EOF lifecycle tests pass. No credential is stored here.
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bridge/recording_python_v3.py test/recording-python-v3.test.mjs trajectory/trigger-v5/2026-08-23-eof-corrected-full-evidence.md
+          git commit -m "fix(trace): close recorder pipe and rerun full evidence [trajectory-repair-v5]"
+          git push origin HEAD:${GITHUB_REF_NAME}
