@@ -148,14 +148,18 @@ def serialize_frame(raw: Any) -> dict[str, Any]:
     }
 
 
+def serialize_environment_info(item: Any) -> dict[str, Any]:
+    return {
+        "game_id": getattr(item, "game_id", None),
+        "title": getattr(item, "title", None),
+        "default_fps": getattr(item, "default_fps", None),
+        "baseline_actions": jsonable(getattr(item, "baseline_actions", None)),
+        "level_tags": jsonable(getattr(item, "level_tags", None)),
+    }
+
+
 def environment_list(arcade: Any) -> list[dict[str, Any]]:
-    return [
-        {
-            "game_id": getattr(item, "game_id", None),
-            "title": getattr(item, "title", None),
-        }
-        for item in arcade.get_environments()
-    ]
+    return [serialize_environment_info(item) for item in arcade.get_environments()]
 
 
 def resolve_action(GameAction: Any, name: str) -> Any:
