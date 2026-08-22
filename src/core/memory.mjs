@@ -6,7 +6,7 @@ const MAX_PATCH_BYTES = 64 * 1024;
 
 function initial(gameId) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     gameId,
     updatedAt: new Date(0).toISOString(),
     actionSemantics: {},
@@ -16,7 +16,10 @@ function initial(gameId) {
     failedHypotheses: [],
     provenStrategies: [],
     notes: [],
-    lineage: [],
+    candidateProposals: [],
+    committedLineage: [],
+    candidateAttempts: [],
+    supervisorInterventions: [],
   };
 }
 
@@ -32,14 +35,19 @@ export class PersistentMemory {
   load() {
     if (fs.existsSync(this.file)) {
       const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.data = { ...initial(this.gameId), ...parsed, gameId: this.gameId };
-      this.lineage = new CandidateLineage(this.data.lineage || []);
+      this.data = migrate({ ...initial(this.gameId), ...parsed, gameId: this.gameId });
+      this.lineage = new CandidateLineage({
+        proposals: this.data.candidateProposals,
+        committed: this.data.committedLineage,
+        attempts: this.data.candidateAttempts,
+      });
     }
     return this;
   }
 
   snapshot() {
     return {
+      schemaVersion: this.data.schemaVersion,
       actionSemantics: this.data.actionSemantics,
       objects: this.data.objects,
       goals: this.data.goals,
@@ -47,8 +55,27 @@ export class PersistentMemory {
       failedHypotheses: this.data.failedHypotheses.slice(-20),
       provenStrategies: this.data.provenStrategies.slice(-20),
       notes: this.data.notes.slice(-30),
-      lineageHead: this.lineage.head,
-      lineageBest: this.lineage.best(),
+      lineage: {
+        proposalCount: this.lineage.proposals.length,
+        pendingCount: this.lineage.pendingProposals().length,
+        committedCount: this.lineage.committed.length,
+        attemptCount: this.lineage.attempts.length,
+        head: this.lineage.head,
+        best: this.lineage.best(),
+      },
+      supervisorInterventions: this.data.supervisorInterventions.slice(-8),
+    };
+  }
+
+  evolution({ proposalLimit = 100, attemptLimit = 100, committedLimit = 100 } = {}) {
+    return {
+      proposals: this.lineage.recentProposals(proposalLimit),
+      pending: this.lineage.pendingProposals().slice(-boundedLimit(proposalLimit)),
+      committed: this.lineage.recentCommitted(committedLimit),
+      attempts: this.lineage.recentAttempts(attemptLimit),
+      head: this.lineage.head,
+      best: this.lineage.best(),
+      supervisorInterventions: this.data.supervisorInterventions.slice(-50),
     };
   }
 
@@ -84,21 +111,63 @@ export class PersistentMemory {
     return this.snapshot();
   }
 
-  commitCandidate(input) {
-    const record = this.lineage.commit(input);
-    this.data.lineage = this.lineage.toJSON();
+  proposeCandidate({ gameId, candidate, baseline }) {
+    const proposal = this.lineage.propose({ gameId, candidate, baseline });
+    this.syncEvolution();
+    this.save();
+    return proposal;
+  }
+
+  evaluateCandidate({ proposalId, evaluation }) {
+    const record = this.lineage.recordEvaluation({ proposalId, evaluation });
+    this.syncEvolution();
     this.save();
     return record;
+  }
+
+  recordSupervisor(intervention) {
+    if (!intervention?.id) return;
+    if (!this.data.supervisorInterventions.some((item) => item.id === intervention.id)) {
+      this.data.supervisorInterventions.push(boundedValue(intervention));
+      this.data.supervisorInterventions = this.data.supervisorInterventions.slice(-100);
+      this.save();
+    }
   }
 
   save() {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
     this.data.updatedAt = new Date().toISOString();
-    this.data.lineage = this.lineage.toJSON();
+    this.syncEvolution();
     const tmp = `${this.file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(tmp, this.file);
   }
+
+  syncEvolution() {
+    const state = this.lineage.toJSON();
+    this.data.candidateProposals = state.proposals;
+    this.data.committedLineage = state.committed;
+    this.data.candidateAttempts = state.attempts;
+    delete this.data.lineage;
+  }
+}
+
+function migrate(data) {
+  const version = Number(data.schemaVersion || 1);
+  if (version < 2) {
+    const legacy = Array.isArray(data.lineage) ? data.lineage : [];
+    data.committedLineage = legacy.filter((record) => record.accepted);
+    data.candidateAttempts = legacy;
+    data.supervisorInterventions = [];
+  }
+  if (version < 3) data.candidateProposals = [];
+  data.schemaVersion = 3;
+  data.candidateProposals = Array.isArray(data.candidateProposals) ? data.candidateProposals : [];
+  data.committedLineage = Array.isArray(data.committedLineage) ? data.committedLineage : [];
+  data.candidateAttempts = Array.isArray(data.candidateAttempts) ? data.candidateAttempts : [];
+  data.supervisorInterventions = Array.isArray(data.supervisorInterventions) ? data.supervisorInterventions : [];
+  delete data.lineage;
+  return data;
 }
 
 function safe(value) {
@@ -113,6 +182,11 @@ function dedupe(values) {
     seen.add(key);
     return true;
   });
+}
+
+function boundedLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 200)) : 100;
 }
 
 function boundedValue(value, depth = 0) {
