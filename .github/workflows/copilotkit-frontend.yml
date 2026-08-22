@@ -1,0 +1,43 @@
+name: CopilotKit mission control
+
+on:
+  push:
+    branches:
+      - feature/copilotkit-control-plane-v2
+    paths:
+      - 'apps/mission-control/**'
+  pull_request:
+    paths:
+      - 'apps/mission-control/**'
+      - '.github/workflows/copilotkit-frontend.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/mission-control
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+      - run: npm install --ignore-scripts
+      - run: npm test
+      - name: Build production frontend
+        env:
+          MISSION_CONTROL_ALLOW_UNAUTHENTICATED: '1'
+          OPENAI_BASE_URL: 'https://provider.invalid/v1'
+          OPENAI_API_KEY: 'build-only-placeholder'
+          OPENAI_MODEL: 'build-only-placeholder'
+        run: npm run build
+      - name: Verify no browser secret variables
+        run: |
+          ! grep -R -E 'NEXT_PUBLIC_(OPENAI|ARC|AVO_PROVIDER)' app components lib
