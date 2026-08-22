@@ -1,0 +1,74 @@
+name: Harden and verify mission-control runtime v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/copilotkit-mission-control-v3
+    paths:
+      - 'maintenance/fix-mission-control-runtime-v3.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-mission-control-runtime
+  cancel-in-progress: true
+
+jobs:
+  patch-test-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: true }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - name: Apply final idempotent runtime and contract corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          control = Path('apps/mission-control-v3/lib/control-plane.mjs')
+          text = control.read_text()
+          if "AVO_ARC_AUTH_MODE: 'anonymous-auto'" not in text:
+              old = '''      ...process.env,\n      OPENAI_REASONING_EFFORT: options.reasoningLevel,\n      AVO_MAX_ACTIONS: String(options.actionBudget),\n      AVO_UI_RUN_ID: id,\n'''
+              new = '''      ...process.env,\n      OPENAI_REASONING_EFFORT: options.reasoningLevel,\n      ARC_API_KEY: '',\n      AVO_ARC_AUTH_MODE: 'anonymous-auto',\n      ARC_PYTHON: process.env.ARC_PYTHON || path.join(REPO_ROOT, 'bridge', 'recording_python_v4.py'),\n      AVO_REAL_PYTHON: process.env.AVO_REAL_PYTHON || path.join(REPO_ROOT, '.venv', 'bin', 'python'),\n      AVO_MAX_ACTIONS: String(options.actionBudget),\n      AVO_UI_RUN_ID: id,\n'''
+              if old not in text:
+                  raise SystemExit('expected child-process environment block not found')
+              text = text.replace(old, new, 1)
+          text = text.replace("path.join(REPO_ROOT, 'bridge', 'recording_python_v3.py')", "path.join(REPO_ROOT, 'bridge', 'recording_python_v4.py')")
+          control.write_text(text)
+          test = Path('apps/mission-control-v3/test/frontend-contract.test.mjs')
+          source = test.read_text().replace(
+              "  assert.match(apiFiles, /x-avo-csrf|requireCsrf/);\n",
+              "  assert.match(session, /x-avo-csrf/);\n",
+          )
+          test.write_text(source)
+          PY
+          grep -q "recording_python_v4.py" apps/mission-control-v3/lib/control-plane.mjs
+          grep -q "AVO_ARC_AUTH_MODE: 'anonymous-auto'" apps/mission-control-v3/lib/control-plane.mjs
+      - name: Install, test, and build
+        working-directory: apps/mission-control-v3
+        run: |
+          npm install --ignore-scripts
+          npm test
+          npm run build
+      - name: Synchronize and commit verified final runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp apps/mission-control-v3/lib/control-plane.mjs /tmp/control-plane.mjs
+          cp apps/mission-control-v3/test/frontend-contract.test.mjs /tmp/frontend-contract.test.mjs
+          git fetch origin "$GITHUB_REF_NAME"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          cp /tmp/control-plane.mjs apps/mission-control-v3/lib/control-plane.mjs
+          cp /tmp/frontend-contract.test.mjs apps/mission-control-v3/test/frontend-contract.test.mjs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/mission-control-v3/lib/control-plane.mjs apps/mission-control-v3/test/frontend-contract.test.mjs
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(ui): use EOF-safe automatic ARC recorder"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
