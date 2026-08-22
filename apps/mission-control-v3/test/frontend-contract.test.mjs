@@ -47,7 +47,7 @@ test('all mutation routes require the server session boundary', () => {
   assert.match(session, /SameSite=Strict/);
   assert.match(session, /timingSafeEqual/);
   assert.match(apiFiles, /requireSession/);
-  assert.match(apiFiles, /x-avo-csrf|requireCsrf/);
+  assert.match(session, /x-avo-csrf/);
 });
 
 function escapeRegExp(value) {
