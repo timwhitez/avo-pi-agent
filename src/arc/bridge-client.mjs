@@ -1,0 +1,119 @@
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
+import path from 'node:path';
+
+export class ArcBridgeClient {
+  constructor({ python, gameId = null, cwd = process.cwd() }) {
+    this.python = python;
+    this.gameId = gameId;
+    this.currentGameId = null;
+    this.cwd = cwd;
+    this.pending = [];
+    this.stderr = '';
+    this.child = null;
+    this.closed = false;
+  }
+
+  async start() {
+    await this.ensureProcess();
+    if (this.gameId && this.currentGameId !== this.gameId) return this.open(this.gameId);
+    if (this.currentGameId) return this.observe();
+    return null;
+  }
+
+  async ensureProcess() {
+    if (this.child && this.child.exitCode === null && !this.child.killed) return;
+    if (this.closed) throw new Error('ARC bridge is closed');
+    const script = path.join(this.cwd, 'bridge', 'arc_bridge.py');
+    this.child = spawn(this.python, [script], {
+      cwd: this.cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+    this.child.stderr.setEncoding('utf8');
+    this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
+    this.child.on('error', (error) => this.rejectPending(error));
+    this.child.on('exit', (code, signal) => {
+      const suffix = this.stderr ? `: ${this.stderr.trim()}` : '';
+      this.rejectPending(new Error(`ARC bridge exited with code ${code ?? 'null'}${signal ? ` (${signal})` : ''}${suffix}`));
+    });
+    const lines = readline.createInterface({ input: this.child.stdout });
+    lines.on('line', (line) => {
+      const item = this.pending.shift();
+      if (!item) return;
+      try {
+        const response = JSON.parse(line);
+        if (!response.ok) item.reject(new Error(response.error || 'ARC bridge error'));
+        else item.resolve(response);
+      } catch (error) {
+        item.reject(new Error(`Invalid ARC bridge response: ${line}`, { cause: error }));
+      }
+    });
+  }
+
+  rejectPending(error) {
+    while (this.pending.length) this.pending.shift().reject(error);
+  }
+
+  request(payload) {
+    if (!this.child || this.child.exitCode !== null || this.child.killed) {
+      throw new Error('ARC bridge is not running');
+    }
+    return new Promise((resolve, reject) => {
+      const item = { resolve, reject };
+      this.pending.push(item);
+      this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+        if (!error) return;
+        const at = this.pending.indexOf(item);
+        if (at >= 0) this.pending.splice(at, 1);
+        reject(error);
+      });
+    });
+  }
+
+  async list() {
+    await this.ensureProcess();
+    return (await this.request({ command: 'list' })).environments;
+  }
+
+  async open(gameId) {
+    await this.ensureProcess();
+    const response = await this.request({ command: 'open', game_id: gameId });
+    this.gameId = gameId;
+    this.currentGameId = gameId;
+    return response.frame;
+  }
+
+  async observe() {
+    return (await this.request({ command: 'observe' })).frame;
+  }
+
+  async step(action, data = {}, reasoning = undefined) {
+    return (await this.request({ command: 'step', action, data, reasoning })).frame;
+  }
+
+  async reset(reasoning = undefined) {
+    return (await this.request({ command: 'reset', reasoning })).frame;
+  }
+
+  async scorecard() {
+    return (await this.request({ command: 'scorecard' })).scorecard;
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    if (!this.child || this.child.exitCode !== null || this.child.killed) return;
+    try { await this.request({ command: 'close' }); } catch {}
+    if (this.child.exitCode === null) this.child.kill();
+  }
+
+  static async list({ python, cwd = process.cwd() }) {
+    const client = new ArcBridgeClient({ python, cwd });
+    try {
+      return await client.list();
+    } finally {
+      await client.close();
+    }
+  }
+}
