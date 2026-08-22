@@ -119,25 +119,67 @@ print(json.dumps(out, separators=(",", ":")))
 }
 
 export async function discoverPublicGames({ python = '.venv/bin/python', cwd = process.cwd() } = {}) {
-  const script = String.raw`
-import json
-import arc_agi
-from arc_agi import OperationMode
-arc = arc_agi.Arcade(operation_mode=OperationMode.NORMAL)
-items = []
-for env in arc.get_environments():
-  full = str(env.game_id)
-  short = full.split("-")[0]
-  items.append({"gameId": short, "versionedGameId": full, "title": getattr(env, "title", None)})
-print(json.dumps(items, separators=(",", ":")))
-`;
-  const result = await run(python, ['-c', script], { cwd, timeoutMs: 120_000 });
-  if (result.status !== 0) throw new Error(`public game discovery failed: ${result.stderr.slice(-1000)}`);
-  const games = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
-  if (!Array.isArray(games) || games.length === 0) throw new Error('official runtime returned no public games');
+  const authMode = String(process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase();
+  const env = { ...process.env, AVO_ARC_AUTH_MODE: authMode };
+  if (authMode === 'anonymous-auto') env.ARC_API_KEY = '';
+
+  const result = await run(python, ['bridge/arc_bridge.py', '--list'], {
+    cwd,
+    env,
+    timeoutMs: 120_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`public game discovery failed: ${(result.stderr || result.stdout).slice(-1000)}`);
+  }
+
+  const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  let payload;
+  try {
+    payload = JSON.parse(lines.at(-1));
+  } catch {
+    throw new Error('public game discovery returned non-JSON bridge output');
+  }
+  if (!payload?.ok) throw new Error(`public game discovery bridge failed: ${payload?.error || 'unknown error'}`);
+
+  const arcAuth = {
+    mode: String(payload?.arc_auth?.mode || 'unknown'),
+    keyAcquired: payload?.arc_auth?.keyAcquired === true,
+    keySource: String(payload?.arc_auth?.keySource || 'unknown'),
+  };
+  if (!arcAuth.keyAcquired) throw new Error('official ARC runtime did not acquire an API key');
+  if (!['anonymous-auto', 'registered'].includes(arcAuth.mode)) {
+    throw new Error(`unexpected ARC authentication mode: ${arcAuth.mode}`);
+  }
+
+  const environments = Array.isArray(payload.environments) ? payload.environments : [];
+  const games = environments.map((envInfo) => {
+    const full = String(envInfo.game_id || '');
+    return {
+      gameId: full.split('-')[0],
+      versionedGameId: full,
+      title: envInfo.title ?? null,
+    };
+  });
+  if (games.length === 0) throw new Error('official runtime returned no public games');
   const ids = games.map((game) => String(game.gameId));
   if (new Set(ids).size !== ids.length) throw new Error('official runtime returned duplicate public game IDs');
   if (ids.some((id) => !/^[a-z0-9]+$/i.test(id))) throw new Error('public game discovery returned malformed IDs');
+
+  const minPublicGames = Number(process.env.AVO_MIN_PUBLIC_GAMES || 25);
+  if (!Number.isInteger(minPublicGames) || minPublicGames < 1) {
+    throw new Error('AVO_MIN_PUBLIC_GAMES must be a positive integer');
+  }
+  if (games.length < minPublicGames) {
+    throw new Error(
+      `ARC authentication exposed only ${games.length}/${minPublicGames} required public games`,
+    );
+  }
+
+  Object.defineProperty(games, 'arcAuth', {
+    value: arcAuth,
+    enumerable: false,
+    writable: false,
+  });
   return games;
 }
 
@@ -155,6 +197,11 @@ export function buildProvenance({ provider, providerPreflight, arcRuntime, games
     providerModelFingerprint: fingerprint(provider.model, salt),
     providerPreflight,
     arcRuntime,
+    arcAuth: games.arcAuth || {
+      mode: 'unknown',
+      keyAcquired: false,
+      keySource: 'unknown',
+    },
     publicGameCount: games.length,
     publicGameIds: games.map((game) => game.gameId),
     publicGameSetHash: fingerprint(games.map((game) => game.versionedGameId).join('\n'), salt),
