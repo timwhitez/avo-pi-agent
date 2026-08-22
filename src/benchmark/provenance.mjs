@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { fingerprint } from './redaction.mjs';
 
 const PLACEHOLDER = /(?:replace[-_ ]?me|example|dummy|mock|fake|test[-_ ]?key|changeme)/i;
@@ -93,27 +94,84 @@ import json
 import pathlib
 import arc_agi
 import arcengine
+
+def distribution_info(name, module):
+    dist = md.distribution(name)
+    direct_text = dist.read_text("direct_url.json")
+    try:
+        direct_url = json.loads(direct_text) if direct_text else None
+    except Exception:
+        direct_url = {"invalid": True}
+    return {
+        "version": dist.version,
+        "distributionName": dist.metadata.get("Name", name),
+        "modulePath": str(pathlib.Path(inspect.getfile(module)).resolve()),
+        "installer": (dist.read_text("INSTALLER") or "").strip(),
+        "directUrl": direct_url,
+    }
+
 out = {
-  "arcAgiVersion": md.version("arc-agi"),
-  "arcAgiPath": str(pathlib.Path(inspect.getfile(arc_agi)).resolve()),
-  "arcEnginePath": str(pathlib.Path(inspect.getfile(arcengine)).resolve()),
+  "arcAgi": distribution_info("arc-agi", arc_agi),
+  "arcEngine": distribution_info("arcengine", arcengine),
 }
 print(json.dumps(out, separators=(",", ":")))
 `;
   const result = await run(python, ['-c', script], { cwd, timeoutMs: 30_000 });
   if (result.status !== 0) throw new Error(`official ARC runtime inspection failed: ${result.stderr.slice(-1000)}`);
   const info = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
-  const repo = new URL(`file://${cwd.endsWith('/') ? cwd : `${cwd}/`}`).pathname;
-  if (!info.arcAgiVersion || !info.arcAgiPath || !info.arcEnginePath) {
-    throw new Error('ARC runtime inspection returned incomplete metadata');
+  return validateArcRuntimeMetadata(info, { cwd });
+}
+
+export function validateArcRuntimeMetadata(info, { cwd = process.cwd() } = {}) {
+  const arcAgi = info?.arcAgi;
+  const arcEngine = info?.arcEngine;
+  if (!arcAgi?.version || !arcAgi?.modulePath || !arcEngine?.version || !arcEngine?.modulePath) {
+    throw new Error('ARC runtime inspection returned incomplete distribution metadata');
   }
-  if (info.arcAgiPath.startsWith(repo) || /(?:fixtures|mocks?|synthetic|test-double)/i.test(info.arcAgiPath)) {
-    throw new Error('local/mock arc_agi module rejected for real-run attestation');
+
+  const expectedNames = [
+    [arcAgi, 'arc-agi'],
+    [arcEngine, 'arcengine'],
+  ];
+  for (const [entry, expectedName] of expectedNames) {
+    const normalizedName = String(entry.distributionName || '').toLowerCase().replace(/[-_.]+/g, '-');
+    if (normalizedName !== expectedName) {
+      throw new Error(`unexpected ARC distribution name: ${entry.distributionName || 'missing'}`);
+    }
+    if (!/(?:site|dist)-packages/i.test(String(entry.modulePath))) {
+      throw new Error(`ARC module is not loaded from an installed package: ${expectedName}`);
+    }
+    if (/(?:fixtures|mocks?|synthetic|test-double)/i.test(String(entry.modulePath))) {
+      throw new Error(`mock ARC module path rejected: ${expectedName}`);
+    }
+    const directUrl = entry.directUrl;
+    if (directUrl?.dir_info?.editable === true || /^file:/i.test(String(directUrl?.url || ''))) {
+      throw new Error(`editable/local ARC distribution rejected: ${expectedName}`);
+    }
   }
+
+  const repoRoot = path.resolve(cwd);
+  const forbiddenSourceRoots = [
+    path.join(repoRoot, 'arc_agi'),
+    path.join(repoRoot, 'arcengine'),
+    path.join(repoRoot, 'src', 'arc_agi'),
+    path.join(repoRoot, 'src', 'arcengine'),
+    path.join(repoRoot, 'fixtures'),
+    path.join(repoRoot, 'test'),
+  ];
+  for (const modulePath of [arcAgi.modulePath, arcEngine.modulePath].map((value) => path.resolve(value))) {
+    if (forbiddenSourceRoots.some((root) => modulePath === root || modulePath.startsWith(`${root}${path.sep}`))) {
+      throw new Error('repository source/mock ARC module rejected for real-run attestation');
+    }
+  }
+
   return {
-    arcAgiVersion: info.arcAgiVersion,
-    arcAgiPathHash: hashPath(info.arcAgiPath),
-    arcEnginePathHash: hashPath(info.arcEnginePath),
+    arcAgiVersion: arcAgi.version,
+    arcEngineVersion: arcEngine.version,
+    arcAgiPathHash: hashPath(arcAgi.modulePath),
+    arcEnginePathHash: hashPath(arcEngine.modulePath),
+    arcAgiInstaller: String(arcAgi.installer || 'unknown'),
+    arcEngineInstaller: String(arcEngine.installer || 'unknown'),
     officialPackageAttested: true,
   };
 }
