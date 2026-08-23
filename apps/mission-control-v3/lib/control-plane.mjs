@@ -1,7 +1,12 @@
 import path from 'node:path';
 import * as base from './control-plane-base.mjs';
 import { loadUsageTelemetry } from './usage-telemetry.mjs';
-import { numericDelta } from '../../../src/local/numeric.mjs';
+import {
+  preserveUnavailableScoreDeltas,
+  usageTelemetryDeltas,
+} from './metric-deltas.mjs';
+
+export { preserveUnavailableScoreDeltas } from './metric-deltas.mjs';
 
 const ACTIVE_STATES = new Set(['starting', 'running', 'paused', 'aborting']);
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
@@ -60,22 +65,8 @@ export function compareRuns(baselineId, candidateId, { subject } = {}) {
   comparison.candidate.telemetry = telemetrySummary(candidateTelemetry);
   comparison.delta = {
     ...(comparison.delta || {}),
-    inputTokens: numericDelta(baselineTelemetry.totals?.inputTokens, candidateTelemetry.totals?.inputTokens),
-    outputTokens: numericDelta(baselineTelemetry.totals?.outputTokens, candidateTelemetry.totals?.outputTokens),
-    totalTokens: numericDelta(baselineTelemetry.totals?.totalTokens, candidateTelemetry.totals?.totalTokens),
-    reasoningTokens: numericDelta(baselineTelemetry.totals?.reasoningTokens, candidateTelemetry.totals?.reasoningTokens),
-    costUsd: numericDelta(baselineTelemetry.totals?.costUsd, candidateTelemetry.totals?.costUsd),
+    ...usageTelemetryDeltas(baselineTelemetry, candidateTelemetry),
   };
-  return comparison;
-}
-
-export function preserveUnavailableScoreDeltas(comparison) {
-  if (!comparison || typeof comparison !== 'object') return comparison;
-  if (!comparison.delta || typeof comparison.delta !== 'object') comparison.delta = {};
-  const baseline = comparison.baseline?.summary || {};
-  const candidate = comparison.candidate?.summary || {};
-  comparison.delta.officialScore = numericDelta(baseline.officialScore, candidate.officialScore);
-  comparison.delta.diagnosticScore = numericDelta(baseline.diagnosticScore, candidate.diagnosticScore);
   return comparison;
 }
 
