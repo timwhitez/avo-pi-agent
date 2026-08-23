@@ -18,7 +18,7 @@ function makeWorkspace(options = {}) {
   return { root, workspace };
 }
 
-test('files-only workspace persists bounded allowed files and blocks lexical escape', () => {
+test('files-only workspace persists bounded allowed files and blocks lexical escape', async () => {
   const { root, workspace } = makeWorkspace();
   try {
     const written = workspace.write('analysis/notes.md', '# hypothesis\n');
