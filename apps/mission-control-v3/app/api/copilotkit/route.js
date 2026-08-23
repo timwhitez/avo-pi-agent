@@ -1,3 +1,4 @@
+import { createCopilotServiceAdapter } from '../../../lib/copilot-service-adapter.mjs';
 import {
   assertRateLimit,
   createBoundedRequestBody,
@@ -23,27 +24,14 @@ export async function POST(request) {
     }
 
     const runtime = new Runtime();
-    let serviceAdapter = null;
-    const configured = Boolean(process.env.OPENAI_BASE_URL && process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL);
-    if (configured && typeof kit.OpenAIAdapter === 'function') {
-      const { default: OpenAI } = await import('openai');
-      const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-        baseURL: process.env.OPENAI_BASE_URL,
-      });
-      serviceAdapter = new kit.OpenAIAdapter({
-        openai,
-        model: process.env.OPENAI_MODEL,
-      });
-    } else if (typeof kit.ExperimentalEmptyAdapter === 'function') {
-      serviceAdapter = new kit.ExperimentalEmptyAdapter();
-    }
-
-    if (!serviceAdapter) {
-      const error = new Error('CopilotKit service adapter is unavailable');
-      error.status = 503;
-      throw error;
-    }
+    const { serviceAdapter } = await createCopilotServiceAdapter({
+      kit,
+      env: process.env,
+      createOpenAI: async ({ apiKey, baseURL }) => {
+        const { default: OpenAI } = await import('openai');
+        return new OpenAI({ apiKey, baseURL });
+      },
+    });
 
     const endpoint = endpointFactory({
       runtime,
