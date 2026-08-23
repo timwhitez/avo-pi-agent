@@ -1,36 +1,111 @@
 export class StallSupervisor {
-  constructor(windowSize = 8, { maxEvents = 512 } = {}) {
+  constructor(windowSize = 8, {
+    maxEvents = 512,
+    maxInterventions = 100,
+    escalationEvery = Math.max(windowSize, 4),
+    maxEscalations = 2,
+  } = {}) {
     this.windowSize = windowSize;
     this.maxEvents = maxEvents;
+    this.maxInterventions = maxInterventions;
+    this.escalationEvery = escalationEvery;
+    this.maxEscalations = maxEscalations;
     this.events = [];
     this.interventions = [];
-    this.lastSignature = null;
+    this.activeEpisode = null;
+    this.episodeSequence = 0;
   }
 
   observe(event) {
-    this.events.push({ ...event });
+    const value = { ...event };
+    this.events.push(value);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
+    if (isObjectiveProgress(value) || value.action === 'RESET') {
+      this.resolveActiveEpisode(value, isObjectiveProgress(value) ? 'objective-progress' : 'reset');
+    }
   }
 
   status({ legalActions = [], memory = null, knowledgeHints = [] } = {}) {
     const tail = this.events.slice(-this.windowSize);
-    if (tail.length < this.windowSize) return { stalled: false, reason: null, directions: [] };
+    if (tail.length < this.windowSize) return idleStatus();
 
-    const hashes = new Set(tail.map((event) => event.afterHash || event.frameHash));
-    const levels = new Set(tail.map((event) => event.levelsCompleted));
-    const repeatedState = hashes.size <= 2 && levels.size === 1;
-    const cycle = detectCycle(tail.map((event) => event.action).filter(Boolean));
+    const hashes = [...new Set(tail.map((event) => event.afterHash || event.frameHash).filter(Boolean))].sort();
+    const levels = [...new Set(tail.map((event) => Number(event.levelsCompleted || 0)))].sort((a, b) => a - b);
+    const actions = tail.map((event) => event.action).filter(Boolean);
+    const repeatedState = hashes.length <= 2 && levels.length === 1;
+    const cycle = detectCycle(actions);
     const noProgress = tail.every((event) => Number(event.levelDelta || 0) <= 0);
-    if ((!repeatedState && !cycle) || !noProgress) return { stalled: false, reason: null, directions: [] };
+    if ((!repeatedState && !cycle) || !noProgress) {
+      this.resolveActiveEpisode(tail.at(-1), 'pattern-cleared');
+      return idleStatus();
+    }
 
     const reason = repeatedState ? 'repeated-state plateau' : `repeating action cycle (period ${cycle})`;
+    const pattern = repeatedState
+      ? `states=${hashes.join('|')};level=${levels[0]}`
+      : `cycle=${actions.slice(0, cycle).join('|')};period=${cycle};level=${levels.at(-1)}`;
+    const key = `${repeatedState ? 'state' : 'cycle'}:${pattern}`;
     const evidenceRefs = tail.map((event) => event.id).filter(Boolean);
-    const signature = `${reason}:${evidenceRefs.join(',')}`;
-    if (signature === this.lastSignature) {
-      return { ...this.interventions.at(-1), stalled: true, repeated: true };
-    }
-    this.lastSignature = signature;
 
+    if (!this.activeEpisode || this.activeEpisode.key !== key) {
+      this.resolveActiveEpisode(tail.at(-1), 'pattern-changed');
+      this.episodeSequence += 1;
+      this.activeEpisode = {
+        id: `stall-episode-${String(this.episodeSequence).padStart(4, '0')}`,
+        key,
+        reason,
+        firstEvidenceRef: evidenceRefs[0] || null,
+        latestEvidenceRef: evidenceRefs.at(-1) || null,
+        evidenceRefs: boundedRefs(evidenceRefs),
+        statusCallsSinceIntervention: 0,
+        escalationLevel: 0,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        resolution: null,
+      };
+      return this.createIntervention({
+        episode: this.activeEpisode,
+        tail,
+        legalActions,
+        memory,
+        knowledgeHints,
+        escalation: false,
+      });
+    }
+
+    const episode = this.activeEpisode;
+    episode.latestEvidenceRef = evidenceRefs.at(-1) || episode.latestEvidenceRef;
+    episode.evidenceRefs = boundedRefs([...episode.evidenceRefs, ...evidenceRefs]);
+    episode.statusCallsSinceIntervention += 1;
+
+    if (episode.statusCallsSinceIntervention >= this.escalationEvery && episode.escalationLevel < this.maxEscalations) {
+      episode.escalationLevel += 1;
+      episode.statusCallsSinceIntervention = 0;
+      return this.createIntervention({
+        episode,
+        tail,
+        legalActions,
+        memory,
+        knowledgeHints,
+        escalation: true,
+      });
+    }
+
+    const prior = [...this.interventions].reverse().find((entry) => entry.episodeId === episode.id);
+    return {
+      ...(prior || { id: null, reason: episode.reason, directions: [] }),
+      stalled: true,
+      repeated: true,
+      suppressed: true,
+      episodeId: episode.id,
+      escalationLevel: episode.escalationLevel,
+      firstEvidenceRef: episode.firstEvidenceRef,
+      latestEvidenceRef: episode.latestEvidenceRef,
+      evidenceRefs: episode.evidenceRefs.slice(),
+    };
+  }
+
+  createIntervention({ episode, tail, legalActions, memory, knowledgeHints, escalation }) {
     const recentActions = new Set(tail.map((event) => event.action));
     const untried = legalActions.filter((action) => action !== 'RESET' && !recentActions.has(action));
     const unknownSemantics = legalActions.filter((action) => action !== 'RESET' && !memory?.actionSemantics?.[action]);
@@ -63,23 +138,62 @@ export class StallSupervisor {
         nextExperiment: 'Use RESET only after recording the failed hypothesis and specifying a materially different opening sequence.',
       },
     ];
-    if (knowledgeHints.length) directions[2].knowledgeHints = knowledgeHints.slice(0, 3).map((entry) => entry.id || entry);
+    if (escalation) {
+      directions.unshift({
+        id: `abandon-hypothesis-family-${episode.escalationLevel}`,
+        rationale: `The same stall episode survived ${episode.escalationLevel} prior intervention level(s); local variation within the current hypothesis family has not resolved it.`,
+        nextExperiment: 'Explicitly abandon the active hypothesis family, retrieve the most dissimilar prior transition or untested object interpretation, and design a fresh opening rather than another local mutation.',
+      });
+    }
+    if (knowledgeHints.length) directions.find((entry) => entry.id === 'semantic-reframe').knowledgeHints = knowledgeHints.slice(0, 3).map((entry) => entry.id || entry);
 
     const intervention = {
       id: `supervisor-${String(this.interventions.length + 1).padStart(4, '0')}`,
+      episodeId: episode.id,
       stalled: true,
-      reason,
-      evidenceRefs,
+      repeated: false,
+      escalation,
+      escalationLevel: episode.escalationLevel,
+      reason: episode.reason,
+      firstEvidenceRef: episode.firstEvidenceRef,
+      latestEvidenceRef: episode.latestEvidenceRef,
+      evidenceRefs: episode.evidenceRefs.slice(),
       directions,
       createdAt: new Date().toISOString(),
     };
+    episode.statusCallsSinceIntervention = 0;
     this.interventions.push(intervention);
+    if (this.interventions.length > this.maxInterventions) {
+      this.interventions.splice(0, this.interventions.length - this.maxInterventions);
+    }
     return intervention;
+  }
+
+  resolveActiveEpisode(event, resolution) {
+    if (!this.activeEpisode) return;
+    this.activeEpisode.closedAt = new Date().toISOString();
+    this.activeEpisode.resolution = resolution;
+    this.activeEpisode.resolutionEvidenceRef = event?.id || null;
+    this.activeEpisode = null;
   }
 
   history(limit = 20) {
     return this.interventions.slice(-Math.max(1, Math.min(Number(limit) || 20, 100)));
   }
+}
+
+function idleStatus() {
+  return { stalled: false, reason: null, directions: [], repeated: false, suppressed: false };
+}
+
+function isObjectiveProgress(event) {
+  return Number(event?.levelDelta || 0) > 0 || String(event?.state || '').toUpperCase().includes('WIN');
+}
+
+function boundedRefs(values) {
+  const distinct = [...new Set(values.filter(Boolean))];
+  if (distinct.length <= 32) return distinct;
+  return [...distinct.slice(0, 4), ...distinct.slice(-28)];
 }
 
 function detectCycle(actions) {
