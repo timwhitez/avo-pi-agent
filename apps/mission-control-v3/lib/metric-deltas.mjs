@@ -1,13 +1,28 @@
 import { numericDelta } from '../../../src/local/numeric.mjs';
 
-export function preserveUnavailableScoreDeltas(comparison) {
+export const SUMMARY_DELTA_FIELDS = Object.freeze([
+  'officialScore',
+  'diagnosticScore',
+  'games',
+  'wins',
+  'totalLevels',
+  'totalActions',
+  'openFindings',
+]);
+
+export function preserveUnavailableSummaryDeltas(comparison) {
   if (!comparison || typeof comparison !== 'object') return comparison;
   if (!comparison.delta || typeof comparison.delta !== 'object') comparison.delta = {};
   const baseline = comparison.baseline?.summary || {};
   const candidate = comparison.candidate?.summary || {};
-  comparison.delta.officialScore = numericDelta(baseline.officialScore, candidate.officialScore);
-  comparison.delta.diagnosticScore = numericDelta(baseline.diagnosticScore, candidate.diagnosticScore);
+  for (const field of SUMMARY_DELTA_FIELDS) {
+    comparison.delta[field] = numericDelta(baseline[field], candidate[field]);
+  }
   return comparison;
+}
+
+export function preserveUnavailableScoreDeltas(comparison) {
+  return preserveUnavailableSummaryDeltas(comparison);
 }
 
 export function usageTelemetryDeltas(baselineTelemetry = {}, candidateTelemetry = {}) {
