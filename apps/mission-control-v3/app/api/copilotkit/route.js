@@ -1,4 +1,4 @@
-import { requireSession } from '../../../lib/session.mjs';
+import { assertRequestBodySize, jsonError, requireSession } from '../../../lib/session.mjs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -6,11 +6,14 @@ export const dynamic = 'force-dynamic';
 export async function POST(request) {
   try {
     requireSession(request, { requireCsrf: false });
+    assertRequestBodySize(request, 1024 * 1024);
     const kit = await import('@copilotkit/runtime');
     const Runtime = kit.CopilotRuntime;
     const endpointFactory = kit.copilotRuntimeNextJSAppRouterEndpoint;
     if (typeof Runtime !== 'function' || typeof endpointFactory !== 'function') {
-      return Response.json({ error: 'Installed CopilotKit runtime is incompatible' }, { status: 503 });
+      const error = new Error('Installed CopilotKit runtime is incompatible');
+      error.status = 503;
+      throw error;
     }
 
     const runtime = new Runtime();
@@ -31,7 +34,9 @@ export async function POST(request) {
     }
 
     if (!serviceAdapter) {
-      return Response.json({ error: 'CopilotKit service adapter is unavailable' }, { status: 503 });
+      const error = new Error('CopilotKit service adapter is unavailable');
+      error.status = 503;
+      throw error;
     }
 
     const endpoint = endpointFactory({
@@ -40,10 +45,13 @@ export async function POST(request) {
       endpoint: '/api/copilotkit',
     });
     if (!endpoint || typeof endpoint.handleRequest !== 'function') {
-      return Response.json({ error: 'CopilotKit endpoint could not be initialized' }, { status: 503 });
+      const error = new Error('CopilotKit endpoint could not be initialized');
+      error.status = 503;
+      throw error;
     }
     return endpoint.handleRequest(request);
-  } catch {
-    return Response.json({ error: 'CopilotKit runtime request failed' }, { status: 503 });
+  } catch (error) {
+    if (!error?.status) error.status = 503;
+    return jsonError(error);
   }
 }
