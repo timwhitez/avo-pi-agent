@@ -71,6 +71,7 @@ const PROXY_KEYS = Object.freeze([
 const OVERRIDE_KEYS = new Set([
   ...ARC_RUNTIME_KEYS,
   ...AVO_RUNTIME_KEYS,
+  'OPENAI_REASONING_EFFORT',
   'AVO_ARC_AUTH_MODE',
   'ARC_API_KEY',
 ]);
