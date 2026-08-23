@@ -1,6 +1,6 @@
 import {
   assertRateLimit,
-  assertRequestBodySize,
+  createBoundedRequestBody,
   jsonError,
   requireSession,
 } from '../../../lib/session.mjs';
@@ -12,7 +12,7 @@ export async function POST(request) {
   try {
     const session = requireSession(request, { requireCsrf: false });
     assertRateLimit('copilotkit', session.subject, { limit: 60, windowMs: 60_000 });
-    assertRequestBodySize(request, 1024 * 1024);
+    const boundedRequest = await createBoundedRequestBody(request, { maxBytes: 1024 * 1024 });
     const kit = await import('@copilotkit/runtime');
     const Runtime = kit.CopilotRuntime;
     const endpointFactory = kit.copilotRuntimeNextJSAppRouterEndpoint;
@@ -55,7 +55,7 @@ export async function POST(request) {
       error.status = 503;
       throw error;
     }
-    return endpoint.handleRequest(request);
+    return endpoint.handleRequest(boundedRequest);
   } catch (error) {
     if (!error?.status) error.status = 503;
     return jsonError(error);
