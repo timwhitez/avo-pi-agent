@@ -26,7 +26,15 @@ export async function runProcess(command, args, {
   let timedOut = false;
   let terminationTimer = null;
   let spawnError = null;
+  let sinkError = null;
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
+
+  for (const sink of [stdoutSink, stderrSink].filter(Boolean)) {
+    sink.on('error', (error) => {
+      if (!sinkError) sinkError = error;
+      terminateProcessTree(child, 'SIGKILL');
+    });
+  }
 
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -57,6 +65,7 @@ export async function runProcess(command, args, {
   await Promise.all([closeSink(stdoutSink), closeSink(stderrSink)]);
 
   if (spawnError) throw spawnError;
+  if (sinkError) throw new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError });
   return {
     ...result,
     timedOut,
@@ -73,17 +82,20 @@ function createSink(file) {
 }
 
 function writeWithBackpressure(source, sink, chunk) {
-  if (!sink) return;
+  if (!sink || sink.destroyed) return;
   if (sink.write(chunk)) return;
   source.pause();
-  sink.once('drain', () => source.resume());
+  sink.once('drain', () => {
+    if (!source.destroyed) source.resume();
+  });
 }
 
 function closeSink(sink) {
   if (!sink) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    sink.once('error', reject);
+  if (sink.closed || sink.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
     sink.once('finish', resolve);
+    sink.once('close', resolve);
     sink.end();
   });
 }
