@@ -226,6 +226,7 @@ function makeReport(kind, results, config, { aggregateScorecard = null, expected
   const safeScorecard = redactRuntimeObject(aggregateScorecard);
   return {
     schemaVersion: 1,
+    runId: process.env.AVO_REAL_RUN_ID || null,
     kind,
     createdAt: new Date().toISOString(),
     config: publicConfigSummary(config),
@@ -260,9 +261,16 @@ function extractOfficialScore(scorecard) {
 function writeReport(report) {
   fs.mkdirSync('runs', { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = path.join('runs', `${stamp}-${report.kind}.json`);
-  fs.writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  const identity = report.runId ? safeFileSegment(report.runId) : stamp;
+  const file = path.join('runs', `${identity}-${report.kind}.json`);
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
   return file;
+}
+
+function safeFileSegment(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120) || 'run';
 }
 
 function printHelp(code) {
