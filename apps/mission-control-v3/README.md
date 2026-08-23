@@ -15,6 +15,19 @@ Private CopilotKit-based mission control for the production AVO × Pi ARC-AGI-3 
 
 The interface is not a cosmetic chat wrapper. CopilotKit invokes the same validated server-side control methods as the visible controls.
 
+## Execution authority
+
+Mission Control never launches `src/cli.mjs run-public` directly.
+
+- **Competition mode** launches `scripts/run-real-public-locked.mjs`, which owns the canonical local execution lock, real-Provider preflight, official ARC runtime attestation, full dynamically discovered public set, exact score origin, redaction, and public/private artifact boundary.
+- **Diagnostic mode** launches `scripts/run-public-diagnostic-locked.mjs`. Its report is permanently labeled `executionMode=diagnostic` and `official=false`, even when the official SDK exposes a scorecard observation.
+
+Every run sets `AVO_REAL_RUN_ID` before spawning. Mission Control reads exactly one fixed report path derived from that run ID, rejects symlinks, oversized files, wrong run IDs, incomplete competition reports, and diagnostic reports that claim official authority. It never selects a report by modification time.
+
+On POSIX hosts the wrapper starts in a separate process group. Pause, resume, terminate, and kill escalation target that group so Python bridges and nested model/ARC children do not survive an abort. Run finalization waits for the child `close` event, after stdout and stderr close.
+
+The UI runner is local-only. It does not add, dispatch, or depend on GitHub Actions.
+
 ## Security boundary
 
 The browser never receives or accepts:
@@ -31,6 +44,8 @@ The server inherits runtime configuration from its process environment and expos
 Every UI and API request is protected by a server-only HTTP Basic access credential. After that first authentication boundary, mutations additionally require a same-origin HttpOnly session and an in-memory CSRF token. Abort also requires an exact run-ID confirmation. API routes repeat the access check even though middleware protects the application, so direct route invocation cannot bypass identity authentication.
 
 Sessions are bound to the authenticated Basic username. Every list, detail, lifecycle, event-stream, comparison, and CopilotKit operation reuses that subject. Runs are tagged with their creating subject in server memory; another subject receives a not-found response rather than learning that the run exists. `DELETE /api/session` revokes the current session and expires the cookie.
+
+Durable AVO memory and scratch workspaces are namespaced from the authenticated subject after strict server-side validation. The namespace is never accepted from the browser. Same-subject runs keep long-horizon memory continuity, while different subjects receive distinct storage roots. Trajectories and reports remain bound to the exact run ID.
 
 The service fails closed with HTTP 503 if `AVO_MISSION_CONTROL_ACCESS_TOKEN` is missing or shorter than 24 characters. Do not put this value in source, URLs, browser storage, `NEXT_PUBLIC_*`, logs, Issues, or PR text.
 
@@ -75,13 +90,14 @@ Start the server from a trusted checkout in which the repository root is two dir
 export AVO_REPO_ROOT=/absolute/path/to/avo-pi-agent
 ```
 
-Provider and ARC configuration remains server-side. The ARC anonymous-auto path in the parent project does not require the UI to receive an ARC key.
+Provider and ARC configuration remains server-side. The parent project's anonymous-auto ARC path asks the official SDK to obtain an anonymous key at runtime; the browser never receives that key. The benchmark still fails closed if anonymous access does not expose the required public set.
 
 ## Resource limits
 
 - `AVO_MISSION_CONTROL_MAX_ACTIVE_RUNS`: global integer 1–8, default 1.
 - `AVO_MISSION_CONTROL_MAX_ACTIVE_RUNS_PER_SUBJECT`: per-subject integer 1–8, default 1.
 - `AVO_MISSION_CONTROL_MAX_SESSIONS`: integer 1–4096, default 256.
+- `AVO_MISSION_CONTROL_ABORT_GRACE_MS`: 1000–60000 ms, default 10000.
 - run-creation request body: 16 KiB maximum.
 - lifecycle-control request body: 8 KiB maximum.
 - CopilotKit request body: 1 MiB maximum.
@@ -90,7 +106,7 @@ Provider and ARC configuration remains server-side. The ARC anonymous-auto path 
 - lifecycle controls: 30 requests per minute per subject.
 - SSE openings and other read paths are independently bounded.
 
-Increasing active-run capacity is appropriate only when the host has isolated ARC state, sufficient Provider quota, and enough CPU/memory. The safest single-user default is one.
+Increasing active-run capacity is appropriate only when the host has isolated ARC state, sufficient Provider quota, and enough CPU/memory. The canonical local execution lock still allows only one authoritative benchmark or repair operation at a time.
 
 ## Deployment model
 
