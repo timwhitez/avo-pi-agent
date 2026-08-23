@@ -115,10 +115,14 @@ try {
     { runId, kind: 'official-public-environments', root: runsRoot },
   );
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
-  copyRegularFileExclusive(selected.file, rawRunReport, {
+  const copiedReport = copyRegularFileExclusive(selected.file, rawRunReport, {
     sourceRoot: runsRoot,
     destinationRoot: privateDir,
   });
+  const rawRunReportSha256 = hashFile(rawRunReport, { root: privateDir });
+  if (copiedReport.bytes !== selected.sourceBytes || rawRunReportSha256 !== selected.sourceSha256) {
+    throw new Error('copied report evidence differs from the validated source bytes');
+  }
 
   stage.value = 'production-loop-attestation';
   const loopAttestation = validateProductionLoops(selected.records, games.length);
@@ -142,7 +146,7 @@ try {
     artifacts: {
       rawRunReport: {
         file: path.basename(rawRunReport),
-        sha256: hashFile(rawRunReport, { root: privateDir }),
+        sha256: rawRunReportSha256,
       },
       stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile, { root: privateDir }) },
       stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile, { root: privateDir }) },
