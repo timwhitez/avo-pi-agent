@@ -1,8 +1,11 @@
 import * as base from './analyzer.mjs';
+import {
+  loadMemoryByGame,
+  loadTrajectoryEvents,
+} from './evidence-loader.mjs';
 
 export const DETECTOR_IDS = base.DETECTOR_IDS;
-export const loadTrajectoryEvents = base.loadTrajectoryEvents;
-export const loadMemoryByGame = base.loadMemoryByGame;
+export { loadMemoryByGame, loadTrajectoryEvents };
 
 export function redactedAnalysis(analysis) {
   return {
@@ -21,6 +24,8 @@ export function redactedAnalysis(analysis) {
         ? analysis.integrity.missingFrameHashGames.map(String)
         : [],
       unknownOperationResponses: Number(analysis.integrity.unknownOperationResponses || 0),
+      expectedGameSetRequired: analysis.integrity.expectedGameSetRequired === true,
+      expectedGameSetPresent: analysis.integrity.expectedGameSetPresent === true,
       passed: analysis.integrity.passed === true,
     } : null,
   };
@@ -31,6 +36,8 @@ export function analyzeTrajectory(args) {
   const events = Array.isArray(args.events) ? args.events : [];
   const expected = unique((args.expectedGames || []).map((value) => String(value).toLowerCase()).filter(Boolean));
   const observedGames = unique(events.map((event) => String(event.gameId || event.game_id || '').toLowerCase()).filter(Boolean));
+  const expectedGameSetRequired = args.requireExpectedGames === true;
+  const expectedGameSetPresent = expected.length > 0;
   const games = expected.length ? expected : observedGames;
   const transitions = events.filter((event) => event.kind === 'arc.response' && ['step', 'act'].includes(String(event.operation).toLowerCase()));
   const transitionsByGame = Object.fromEntries(games.map((gameId) => [
@@ -48,14 +55,17 @@ export function analyzeTrajectory(args) {
   const integrity = {
     recorderSchemaVersion,
     methodProtocolObserved,
-    expectedGameCount: games.length,
+    expectedGameCount: expected.length,
     observedGameCount: observedGames.length,
     transitionGameCount: games.length - missingTransitionGames.length,
     transitionCount: transitions.length,
     missingTransitionGames,
     missingFrameHashGames,
     unknownOperationResponses,
-    passed: recorderSchemaVersion >= 5
+    expectedGameSetRequired,
+    expectedGameSetPresent,
+    passed: (!expectedGameSetRequired || expectedGameSetPresent)
+      && recorderSchemaVersion >= 5
       && methodProtocolObserved
       && games.length > 0
       && observedGames.length === games.length
@@ -65,6 +75,16 @@ export function analyzeTrajectory(args) {
   };
 
   const findings = [];
+  if (expectedGameSetRequired && !expectedGameSetPresent) {
+    findings.push(integrityFinding(
+      'expected-game-set-missing',
+      null,
+      'Authoritative trajectory analysis has no frozen expected-game set.',
+      'Observed events were allowed to define their own completeness boundary.',
+      'Load and validate the exact benchmark manifest before running any clean/authoritative analysis.',
+      {},
+    ));
+  }
   if (recorderSchemaVersion < 5 || !methodProtocolObserved) {
     findings.push(integrityFinding(
       'method-aware-recorder-not-observed',
