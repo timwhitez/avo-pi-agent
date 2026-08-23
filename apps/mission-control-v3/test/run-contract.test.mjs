@@ -18,7 +18,6 @@ test('routes competition and diagnostic runs through separate locked canonical w
   const competition = buildRunLaunch({
     repoRoot: '/repo',
     runId: 'run-competition',
-    storageNamespace: 'alice',
     options: { mode: 'competition', games: [], actionBudget: 500, reasoningLevel: 'max' },
     execPath: '/node',
     env: {},
@@ -27,12 +26,10 @@ test('routes competition and diagnostic runs through separate locked canonical w
   assert.equal(competition.report.path, '/repo/runs/public/run-competition.json');
   assert.equal(competition.report.mode, 'competition');
   assert.equal(competition.env.AVO_REAL_RUN_ID, 'run-competition');
-  assert.equal(competition.env.AVO_MEMORY_DIR, '/repo/state/mission-control/alice/memory');
 
   const diagnostic = buildRunLaunch({
     repoRoot: '/repo',
     runId: 'run-diagnostic',
-    storageNamespace: 'bob',
     options: { mode: 'diagnostic', games: ['ls20'], actionBudget: 50, reasoningLevel: 'high' },
     execPath: '/node',
     env: {},
@@ -43,8 +40,6 @@ test('routes competition and diagnostic runs through separate locked canonical w
   ]);
   assert.equal(diagnostic.report.path, '/repo/runs/diagnostic/run-diagnostic.json');
   assert.equal(diagnostic.report.mode, 'diagnostic');
-  assert.equal(diagnostic.env.AVO_MEMORY_DIR, '/repo/state/mission-control/bob/memory');
-  assert.notEqual(competition.env.AVO_MEMORY_DIR, diagnostic.env.AVO_MEMORY_DIR);
 });
 
 test('loads only the exact bounded diagnostic report and rejects borrowing or authority confusion', () => {
