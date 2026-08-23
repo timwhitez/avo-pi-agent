@@ -40,7 +40,7 @@ test('revalidates before every batch and emits no private event after revocation
   assert.equal(sourceCalls, callsAtClose);
 });
 
-test('an already-aborted request closes without scheduling event delivery', async () => {
+test('an already-aborted request closes before any event delivery', async () => {
   const controller = new AbortController();
   controller.abort();
   let sourceCalls = 0;
@@ -51,10 +51,10 @@ test('an already-aborted request closes without scheduling event delivery', asyn
     getEvents() { sourceCalls += 1; return []; },
   });
   const reader = stream.getReader();
-  while (!(await reader.read()).done) {}
-  const callsAtClose = sourceCalls;
+  assert.equal((await reader.read()).done, true);
+  assert.equal(sourceCalls, 0);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sourceCalls, callsAtClose);
+  assert.equal(sourceCalls, 0);
 });
 
 test('SSE route binds every batch to the original revocable session lease', () => {
