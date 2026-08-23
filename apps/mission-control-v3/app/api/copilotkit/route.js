@@ -1,11 +1,17 @@
-import { assertRequestBodySize, jsonError, requireSession } from '../../../lib/session.mjs';
+import {
+  assertRateLimit,
+  assertRequestBodySize,
+  jsonError,
+  requireSession,
+} from '../../../lib/session.mjs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(request) {
   try {
-    requireSession(request, { requireCsrf: false });
+    const session = requireSession(request, { requireCsrf: false });
+    assertRateLimit('copilotkit', session.subject, { limit: 60, windowMs: 60_000 });
     assertRequestBodySize(request, 1024 * 1024);
     const kit = await import('@copilotkit/runtime');
     const Runtime = kit.CopilotRuntime;
