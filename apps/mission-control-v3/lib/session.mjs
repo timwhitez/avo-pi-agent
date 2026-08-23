@@ -64,6 +64,27 @@ export function requireSession(request, { requireCsrf = true } = {}) {
   return session;
 }
 
+export function createSessionLease(session) {
+  const id = String(session?.id || '');
+  const subject = normalizeSubject(session?.subject);
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(id)) {
+    throw new Error('Mission-control session lease is invalid');
+  }
+  return Object.freeze({ id, subject });
+}
+
+export function requireSessionLease(request, lease) {
+  const expected = createSessionLease(lease);
+  const current = requireSession(request, { requireCsrf: false });
+  if (!safeEqual(current.id, expected.id) || !safeEqual(current.subject, expected.subject)) {
+    const error = new Error('Mission-control event stream lease is no longer valid');
+    error.status = 401;
+    error.authenticate = 'Basic realm="AVO Mission Control", charset="UTF-8"';
+    throw error;
+  }
+  return current;
+}
+
 export function destroySession(request) {
   const session = requireSession(request);
   sessions.delete(session.id);
