@@ -1,4 +1,5 @@
 import * as base from './control-plane-base.mjs';
+import { numericDelta } from '../../../src/local/numeric.mjs';
 
 const ACTIVE_STATES = new Set(['starting', 'running', 'paused', 'aborting']);
 const owners = globalThis.__avoMissionControlRunOwners
@@ -45,7 +46,17 @@ export function controlRun(id, action, confirmation = '', { subject } = {}) {
 export function compareRuns(baselineId, candidateId, { subject } = {}) {
   requireOwnership(baselineId, subject);
   requireOwnership(candidateId, subject);
-  return base.compareRuns(baselineId, candidateId);
+  return preserveUnavailableScoreDeltas(base.compareRuns(baselineId, candidateId));
+}
+
+export function preserveUnavailableScoreDeltas(comparison) {
+  if (!comparison || typeof comparison !== 'object') return comparison;
+  if (!comparison.delta || typeof comparison.delta !== 'object') comparison.delta = {};
+  const baseline = comparison.baseline?.summary || {};
+  const candidate = comparison.candidate?.summary || {};
+  comparison.delta.officialScore = numericDelta(baseline.officialScore, candidate.officialScore);
+  comparison.delta.diagnosticScore = numericDelta(baseline.diagnosticScore, candidate.diagnosticScore);
+  return comparison;
 }
 
 export function activeRunLimit(env = process.env) {
