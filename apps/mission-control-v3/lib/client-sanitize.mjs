@@ -27,7 +27,7 @@ export function sanitizeClientText(value, { maxChars = 1000, explicitSecrets = [
 function bound(value, key, depth, limits) {
   if (value === null || value === undefined) return value;
   if (TOKEN_KEY.test(String(key || ''))) {
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
     if (value !== REDACTED) return REDACTED;
   }
   if (typeof value === 'string') return value.slice(0, limits.maxStringChars);
