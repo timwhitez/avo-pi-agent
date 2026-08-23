@@ -4,9 +4,17 @@ import path from 'node:path';
 export const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 export const MAX_PARTIAL_LINE_CHARS = 64 * 1024;
 
-export function buildRunLaunch({ repoRoot, runId, options, env = process.env, execPath = process.execPath }) {
+export function buildRunLaunch({
+  repoRoot,
+  runId,
+  options,
+  storageNamespace = 'local',
+  env = process.env,
+  execPath = process.execPath,
+}) {
   const root = path.resolve(repoRoot);
   const id = validateRunId(runId);
+  const namespace = validateNamespace(storageNamespace);
   const mode = options?.mode === 'competition' ? 'competition' : 'diagnostic';
   const games = Array.isArray(options?.games) ? options.games : [];
   const commonEnv = {
@@ -16,8 +24,8 @@ export function buildRunLaunch({ repoRoot, runId, options, env = process.env, ex
     AVO_UI_RUN_ID: id,
     OPENAI_REASONING_EFFORT: String(options?.reasoningLevel || 'max'),
     AVO_MAX_ACTIONS: String(options?.actionBudget || 1000),
-    AVO_MEMORY_DIR: env.AVO_MEMORY_DIR || path.join(root, 'state', 'memory'),
-    AVO_WORKSPACE_DIR: env.AVO_WORKSPACE_DIR || path.join(root, 'state', 'workspaces'),
+    AVO_MEMORY_DIR: path.join(root, 'state', 'mission-control', namespace, 'memory'),
+    AVO_WORKSPACE_DIR: path.join(root, 'state', 'mission-control', namespace, 'workspaces'),
     AVO_TRAJECTORY_DIR: path.join(root, 'runs', 'private', 'trajectories', id),
   };
   if (mode === 'competition') {
@@ -120,4 +128,10 @@ function validateRunId(value) {
   const id = String(value || '');
   if (!/^[A-Za-z0-9_.-]{1,120}$/.test(id)) throw new Error('runId is invalid');
   return id;
+}
+
+function validateNamespace(value) {
+  const namespace = String(value || '');
+  if (!/^[A-Za-z0-9_.-]{1,128}$/.test(namespace)) throw new Error('storage namespace is invalid');
+  return namespace;
 }
