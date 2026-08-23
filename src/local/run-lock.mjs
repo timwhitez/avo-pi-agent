@@ -55,18 +55,28 @@ export function acquireLocalExecutionLock({
   fs.closeSync(descriptor);
   let released = false;
 
+  const releaseOnExit = () => {
+    if (released) return;
+    try {
+      const current = readLock(lockFile);
+      if (current && constantEqual(current.token, token)) fs.rmSync(lockFile, { force: true });
+    } catch {}
+  };
+  process.once('exit', releaseOnExit);
+
   return frozenHandle({
     lockFile,
     token,
     inherited: false,
     release() {
       if (released) return;
-      released = true;
       const current = readLock(lockFile);
       if (!current || !constantEqual(current.token, token)) {
         throw new Error('refusing to release a local execution lock owned by another process');
       }
       fs.rmSync(lockFile, { force: true });
+      released = true;
+      process.removeListener('exit', releaseOnExit);
     },
   });
 }
