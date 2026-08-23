@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { finiteNumberOrNull } from '../../../src/local/numeric.mjs';
+import { normalizeReasoningLevel, requireRunMode } from './run-authority.mjs';
 
 export const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 export const MAX_PARTIAL_LINE_CHARS = 64 * 1024;
@@ -16,14 +17,15 @@ export function buildRunLaunch({
   const root = path.resolve(repoRoot);
   const id = validateRunId(runId);
   const namespace = validateNamespace(storageNamespace);
-  const mode = options?.mode === 'competition' ? 'competition' : 'diagnostic';
+  const mode = requireRunMode(options?.mode);
+  const reasoningLevel = normalizeReasoningLevel(options?.reasoningLevel);
   const games = Array.isArray(options?.games) ? options.games : [];
   const commonEnv = {
     ...env,
     GITHUB_ACTIONS: '',
     AVO_REAL_RUN_ID: id,
     AVO_UI_RUN_ID: id,
-    OPENAI_REASONING_EFFORT: String(options?.reasoningLevel || 'max'),
+    OPENAI_REASONING_EFFORT: reasoningLevel,
     AVO_MAX_ACTIONS: String(options?.actionBudget || 1000),
     AVO_MEMORY_DIR: path.join(root, 'state', 'mission-control', namespace, 'memory'),
     AVO_WORKSPACE_DIR: path.join(root, 'state', 'mission-control', namespace, 'workspaces'),
@@ -63,7 +65,7 @@ export function buildRunLaunch({
 export function loadExactRunReport(contract, { maxBytes = MAX_REPORT_BYTES } = {}) {
   const file = path.resolve(contract?.path || '');
   const expectedRunId = validateRunId(contract?.runId);
-  const expectedMode = contract?.mode === 'competition' ? 'competition' : 'diagnostic';
+  const expectedMode = requireRunMode(contract?.mode);
   let stat;
   try { stat = fs.lstatSync(file); } catch { throw new Error('run report is missing'); }
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('run report must be a regular non-symlink file');
