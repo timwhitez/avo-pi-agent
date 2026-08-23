@@ -45,8 +45,6 @@ Every UI and API request is protected by a server-only HTTP Basic access credent
 
 Sessions are bound to the authenticated Basic username. Every list, detail, lifecycle, event-stream, comparison, and CopilotKit operation reuses that subject. Runs are tagged with their creating subject in server memory; another subject receives a not-found response rather than learning that the run exists. `DELETE /api/session` revokes the current session and expires the cookie.
 
-Durable AVO memory and scratch workspaces are namespaced from the authenticated subject after strict server-side validation. The namespace is never accepted from the browser. Same-subject runs keep long-horizon memory continuity, while different subjects receive distinct storage roots. Trajectories and reports remain bound to the exact run ID.
-
 The service fails closed with HTTP 503 if `AVO_MISSION_CONTROL_ACCESS_TOKEN` is missing or shorter than 24 characters. Do not put this value in source, URLs, browser storage, `NEXT_PUBLIC_*`, logs, Issues, or PR text.
 
 Request bodies are bounded before parsing. Session creation, run reads/starts/controls, SSE openings, comparisons, and CopilotKit requests have per-subject fixed-window rate limits. The default global and per-subject active-run capacity is one, checked synchronously before a child process is spawned. Session count is bounded as well.
@@ -106,7 +104,7 @@ Provider and ARC configuration remains server-side. The parent project's anonymo
 - lifecycle controls: 30 requests per minute per subject.
 - SSE openings and other read paths are independently bounded.
 
-Increasing active-run capacity is appropriate only when the host has isolated ARC state, sufficient Provider quota, and enough CPU/memory. The canonical local execution lock still allows only one authoritative benchmark or repair operation at a time.
+Increasing active-run capacity is appropriate only when the host has sufficient Provider quota and enough CPU/memory. The canonical local execution lock still allows only one authoritative benchmark or repair operation at a time.
 
 ## Deployment model
 
