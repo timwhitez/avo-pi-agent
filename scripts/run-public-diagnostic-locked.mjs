@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('local diagnostic runner refuses GitHub Actions execution');
@@ -69,7 +70,7 @@ try {
       wins: finite(summary.wins),
       totalLevels: finite(summary.totalLevels),
       totalActions: finite(summary.totalActions),
-      diagnosticScore: finiteOrNull(summary.officialScore),
+      diagnosticScore: finiteNumberOrNull(summary.officialScore),
       diagnosticScoreOrigin: 'official-sdk-scorecard-observation-not-authoritative-full-public-benchmark',
     },
     source: sourceReport ? {
@@ -138,9 +139,4 @@ function safeRunId(value) {
 function finite(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) && number >= 0 ? number : 0;
-}
-
-function finiteOrNull(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
