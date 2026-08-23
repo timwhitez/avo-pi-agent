@@ -6,9 +6,12 @@ const MAX_AGE_SECONDS = 12 * 60 * 60;
 const DEFAULT_SESSION_LIMIT = 256;
 const sessions = globalThis.__avoMissionControlSessions
   || (globalThis.__avoMissionControlSessions = new Map());
+const rateBuckets = globalThis.__avoMissionControlRateBuckets
+  || (globalThis.__avoMissionControlRateBuckets = new Map());
 
-export function createSession() {
+export function createSession(subject) {
   pruneSessions();
+  const normalizedSubject = normalizeSubject(subject);
   const limit = boundedInteger(process.env.AVO_MISSION_CONTROL_MAX_SESSIONS, 1, 4096, DEFAULT_SESSION_LIMIT);
   if (sessions.size >= limit) {
     const error = new Error('Mission-control session capacity is exhausted');
@@ -18,16 +21,17 @@ export function createSession() {
   const id = crypto.randomBytes(32).toString('base64url');
   const csrf = crypto.randomBytes(32).toString('base64url');
   const expiresAt = Date.now() + MAX_AGE_SECONDS * 1000;
-  sessions.set(id, { id, csrf, createdAt: Date.now(), expiresAt });
+  sessions.set(id, { id, csrf, subject: normalizedSubject, createdAt: Date.now(), expiresAt });
   return {
     id,
     csrf,
+    subject: normalizedSubject,
     cookie: `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${MAX_AGE_SECONDS}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`,
   };
 }
 
 export function requireSession(request, { requireCsrf = true } = {}) {
-  requireAccessAuthentication(request);
+  const identity = requireAccessAuthentication(request);
   assertSameOrigin(request);
   pruneSessions();
   const cookie = request.headers.get('cookie') || '';
@@ -39,6 +43,11 @@ export function requireSession(request, { requireCsrf = true } = {}) {
     error.authenticate = 'Basic realm="AVO Mission Control", charset="UTF-8"';
     throw error;
   }
+  if (!safeEqual(session.subject, identity.username)) {
+    const error = new Error('Mission-control session identity mismatch');
+    error.status = 403;
+    throw error;
+  }
   if (requireCsrf) {
     const supplied = request.headers.get('x-avo-csrf') || '';
     if (!safeEqual(supplied, session.csrf)) {
@@ -48,6 +57,41 @@ export function requireSession(request, { requireCsrf = true } = {}) {
     }
   }
   return session;
+}
+
+export function destroySession(request) {
+  const session = requireSession(request);
+  sessions.delete(session.id);
+  return {
+    subject: session.subject,
+    cookie: `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`,
+  };
+}
+
+export function assertRateLimit(scope, subject, {
+  limit = 120,
+  windowMs = 60_000,
+} = {}) {
+  const safeScope = String(scope || 'request').replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 64);
+  const safeSubject = normalizeSubject(subject);
+  const max = boundedInteger(limit, 1, 100_000, 120);
+  const window = boundedInteger(windowMs, 1000, 24 * 60 * 60 * 1000, 60_000);
+  const now = Date.now();
+  pruneRateBuckets(now);
+  const key = `${safeScope}:${safeSubject}`;
+  const current = rateBuckets.get(key);
+  const bucket = !current || current.resetAt <= now
+    ? { count: 0, resetAt: now + window }
+    : current;
+  bucket.count += 1;
+  rateBuckets.set(key, bucket);
+  if (bucket.count > max) {
+    const error = new Error('Mission-control request rate limit exceeded');
+    error.status = 429;
+    error.retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    throw error;
+  }
+  return { remaining: Math.max(0, max - bucket.count), resetAt: bucket.resetAt };
 }
 
 export function assertSameOrigin(request) {
@@ -101,6 +145,7 @@ export function jsonError(error) {
   const message = status >= 500 ? 'Internal mission-control error' : String(error?.message || 'Request rejected');
   const headers = securityHeaders();
   if (error?.authenticate) headers['WWW-Authenticate'] = String(error.authenticate);
+  if (error?.retryAfterSeconds) headers['Retry-After'] = String(error.retryAfterSeconds);
   return Response.json({ ok: false, error: message }, { status, headers });
 }
 
@@ -121,6 +166,12 @@ function pruneSessions() {
   }
 }
 
+function pruneRateBuckets(now = Date.now()) {
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}
+
 function parseCookie(header, name) {
   for (const part of header.split(';')) {
     const index = part.indexOf('=');
@@ -135,6 +186,16 @@ function safeEqual(left, right) {
   const a = Buffer.from(String(left));
   const b = Buffer.from(String(right));
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function normalizeSubject(value) {
+  const subject = String(value || '');
+  if (!/^[A-Za-z0-9_.-]{1,128}$/.test(subject)) {
+    const error = new Error('Mission-control subject is invalid');
+    error.status = 403;
+    throw error;
+  }
+  return subject;
 }
 
 function boundedInteger(value, min, max, fallback) {
