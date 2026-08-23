@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,14 +32,20 @@ if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
 
-const runId = safeRunId(process.env.AVO_REAL_RUN_ID || `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
+const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
 const root = process.cwd();
 const runsRoot = path.join(root, 'runs');
-const privateDir = path.join(runsRoot, 'private', runId);
+const privateRoot = path.join(runsRoot, 'private');
+const privateDir = path.join(privateRoot, runId);
 const publicDir = path.join(runsRoot, 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
-fs.mkdirSync(privateDir, { recursive: true, mode: 0o700 });
+fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
 fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
+if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
+  throw new Error(`runId already exists and cannot be reused: ${runId}`);
+}
+fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
 
 let provider;
 const stage = { value: 'configuration' };
@@ -76,6 +83,7 @@ try {
   const stdoutFile = path.join(privateDir, 'runner.stdout.log');
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
+  const timeoutMs = benchmarkTimeout();
   const child = await runProcess(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     env: {
@@ -84,13 +92,13 @@ try {
       AVO_REQUIRE_REAL_PROVIDER: '1',
       AVO_REAL_RUN_ID: runId,
     },
-    timeoutMs: benchmarkTimeout(),
+    timeoutMs,
     stdoutFile,
     stderrFile,
     maxTailChars: 64 * 1024,
   });
   if (child.timedOut) {
-    throw new Error(`production public runner timed out after ${benchmarkTimeout()}ms`);
+    throw new Error(`production public runner timed out after ${timeoutMs}ms`);
   }
   if (child.status !== 0) {
     throw new Error(`production public runner exited status=${child.status} signal=${child.signal || 'none'} stderr_tail=${child.stderr.slice(-2000)}`);
@@ -103,7 +111,7 @@ try {
     { runId, kind: 'official-public-environments' },
   );
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
-  fs.copyFileSync(selected.file, rawRunReport);
+  fs.copyFileSync(selected.file, rawRunReport, fs.constants.COPYFILE_EXCL);
 
   stage.value = 'production-loop-attestation';
   const loopAttestation = validateProductionLoops(selected.records, games.length);
@@ -151,7 +159,7 @@ try {
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(publicReport, null, 2)}\n`;
   assertNoPrivateMaterial(serialized, { explicitSecrets });
-  fs.writeFileSync(publicFile, serialized, { mode: 0o600 });
+  fs.writeFileSync(publicFile, serialized, { mode: 0o600, flag: 'wx' });
 
   console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
@@ -170,7 +178,9 @@ try {
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(failure, null, 2)}\n`;
   assertNoPrivateMaterial(serialized, { explicitSecrets });
-  fs.writeFileSync(publicFile, serialized, { mode: 0o600 });
+  if (!fs.existsSync(publicFile)) {
+    fs.writeFileSync(publicFile, serialized, { mode: 0o600, flag: 'wx' });
+  }
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
   process.exitCode = 1;
