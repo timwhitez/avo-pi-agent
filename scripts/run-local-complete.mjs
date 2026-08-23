@@ -59,11 +59,12 @@ const summary = {
   stages: [],
   repairReport: path.relative(process.cwd(), repairPath),
   repairReportEvidence: null,
-  componentEvidence: componentEvidence(),
+  componentEvidence: null,
   failure: null,
 };
 
 try {
+  summary.componentEvidence = componentEvidence();
   writeSummary(true);
   for (const stage of stages) {
     const startedAt = new Date().toISOString();
@@ -141,7 +142,7 @@ try {
   terminal = true;
   summary.completedAt = new Date().toISOString();
   try {
-    writeSummary();
+    writeSummary(!summaryWritten);
   } catch (error) {
     console.error(`[local-complete] summary write failed: ${safeText(error?.message || error)}`);
     if (!process.exitCode) process.exitCode = 1;
@@ -191,7 +192,7 @@ async function interrupt(signal) {
   summary.status = 'interrupted';
   summary.failure = { stage: 'signal', signal: safeSignal(signal) };
   summary.completedAt = new Date().toISOString();
-  try { writeSummary(); } catch {}
+  try { writeSummary(!summaryWritten); } catch {}
   await terminateActiveChild(signal);
 }
 
