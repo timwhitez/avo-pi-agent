@@ -62,7 +62,21 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   return {
     kind: 'pi-sdk',
     async run({ systemPrompt, tools, initialPrompt, shouldStop }) {
-      const piTools = tools.map((tool) => ({
+      const workspaceMode = config.workspaceMode || 'files-only';
+      const exposedTools = tools.filter((tool) => {
+        if (workspaceMode === 'disabled' && tool.name.startsWith('workspace_')) return false;
+        if (tool.name === 'workspace_python' && workspaceMode !== 'isolated-python') return false;
+        return true;
+      });
+      const effectiveSystemPrompt = String(systemPrompt).replace(
+        'The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access.',
+        workspaceMode === 'isolated-python'
+          ? 'Python scratch execution is available only inside a local OS-container boundary with network disabled, a read-only container root, dropped capabilities, resource limits, and a single bound workspace. Python audit hooks are defense in depth and are not the isolation boundary.'
+          : workspaceMode === 'disabled'
+            ? 'The scratch workspace is disabled. No arbitrary-code or workspace-file tool is available.'
+            : 'The scratch workspace is files-only. It rejects symlinks and hard links, and no model-facing arbitrary-code execution tool is available.',
+      );
+      const piTools = exposedTools.map((tool) => ({
         name: tool.name,
         label: tool.label || tool.name,
         description: tool.description,
@@ -80,7 +94,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
 
       const agent = new Agent({
         initialState: {
-          systemPrompt,
+          systemPrompt: effectiveSystemPrompt,
           model: resolvedModel,
           thinkingLevel: config.provider.reasoningEffort,
           tools: piTools,
