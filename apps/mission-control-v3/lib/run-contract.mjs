@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { buildAgentChildEnvironment } from '../../../src/local/child-environment.mjs';
 import { finiteNumberOrNull } from '../../../src/local/numeric.mjs';
 import { readJsonFileEvidence } from '../../../src/local/regular-file-evidence.mjs';
 import { normalizeReasoningLevel, requireRunMode } from './run-authority.mjs';
@@ -20,17 +21,19 @@ export function buildRunLaunch({
   const mode = requireRunMode(options?.mode);
   const reasoningLevel = normalizeReasoningLevel(options?.reasoningLevel);
   const games = Array.isArray(options?.games) ? options.games : [];
-  const commonEnv = {
-    ...env,
-    GITHUB_ACTIONS: '',
-    AVO_REAL_RUN_ID: id,
-    AVO_UI_RUN_ID: id,
-    OPENAI_REASONING_EFFORT: reasoningLevel,
-    AVO_MAX_ACTIONS: String(options?.actionBudget || 1000),
-    AVO_MEMORY_DIR: path.join(root, 'state', 'mission-control', namespace, 'memory'),
-    AVO_WORKSPACE_DIR: path.join(root, 'state', 'mission-control', namespace, 'workspaces'),
-    AVO_TRAJECTORY_DIR: path.join(root, 'runs', 'private', 'trajectories', id),
-  };
+  const commonEnv = buildAgentChildEnvironment({
+    source: env,
+    overrides: {
+      AVO_REQUIRE_REAL_PROVIDER: '1',
+      AVO_REAL_RUN_ID: id,
+      AVO_UI_RUN_ID: id,
+      OPENAI_REASONING_EFFORT: reasoningLevel,
+      AVO_MAX_ACTIONS: String(options?.actionBudget || 1000),
+      AVO_MEMORY_DIR: path.join(root, 'state', 'mission-control', namespace, 'memory'),
+      AVO_WORKSPACE_DIR: path.join(root, 'state', 'mission-control', namespace, 'workspaces'),
+      AVO_TRAJECTORY_DIR: path.join(root, 'runs', 'private', 'trajectories', id),
+    },
+  });
   if (mode === 'competition') {
     const reportRoot = path.join(root, 'runs', 'public');
     return Object.freeze({
