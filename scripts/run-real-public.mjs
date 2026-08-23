@@ -10,24 +10,28 @@ import {
   inspectOfficialArcRuntime,
   preflightResponsesProvider,
   requireRealProviderEnvironment,
-  run,
 } from '../src/benchmark/provenance.mjs';
+import { runProcess } from '../src/benchmark/process-runner.mjs';
 import {
   aggregateGameMetrics,
-  extractGameRecords,
   extractOfficialScore,
   findNewJsonReports,
   hashFile,
-  readJson,
+  selectRunReport,
   snapshotJsonFiles,
   validateCompleteGameSet,
+  validateProductionLoops,
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
 
 loadLocalEnv();
 
-const runId = process.env.AVO_REAL_RUN_ID || `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
+  throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
+}
+
+const runId = safeRunId(process.env.AVO_REAL_RUN_ID || `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}`);
 const root = process.cwd();
 const runsRoot = path.join(root, 'runs');
 const privateDir = path.join(runsRoot, 'private', runId);
@@ -53,6 +57,8 @@ try {
 
   stage.value = 'public-game-discovery';
   console.log('[real-run] freezing the dynamically discovered public game set');
+  process.env.AVO_ARC_AUTH_MODE = process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto';
+  if (process.env.AVO_ARC_AUTH_MODE === 'anonymous-auto') process.env.ARC_API_KEY = '';
   const games = await discoverPublicGames({ python, cwd: root });
   const gitSha = await currentGitSha(root);
   const provenance = buildProvenance({
@@ -69,46 +75,38 @@ try {
   const before = snapshotJsonFiles(runsRoot);
   const stdoutFile = path.join(privateDir, 'runner.stdout.log');
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
-  const stdoutStream = fs.createWriteStream(stdoutFile, { mode: 0o600 });
-  const stderrStream = fs.createWriteStream(stderrFile, { mode: 0o600 });
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
-  const child = await run(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const child = await runProcess(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     env: {
       ...process.env,
+      GITHUB_ACTIONS: '',
       AVO_REQUIRE_REAL_PROVIDER: '1',
       AVO_REAL_RUN_ID: runId,
     },
-    onStdout: (chunk) => stdoutStream.write(chunk),
-    onStderr: (chunk) => stderrStream.write(chunk),
+    timeoutMs: benchmarkTimeout(),
+    stdoutFile,
+    stderrFile,
+    maxTailChars: 64 * 1024,
   });
-  stdoutStream.end();
-  stderrStream.end();
+  if (child.timedOut) {
+    throw new Error(`production public runner timed out after ${benchmarkTimeout()}ms`);
+  }
   if (child.status !== 0) {
-    throw new Error(`production public runner exited status=${child.status} signal=${child.signal || 'none'}`);
+    throw new Error(`production public runner exited status=${child.status} signal=${child.signal || 'none'} stderr_tail=${child.stderr.slice(-2000)}`);
   }
 
   stage.value = 'artifact-discovery';
-  const reports = findNewJsonReports(runsRoot, before)
-    .filter((file) => !file.startsWith(privateDir) && file !== publicFile)
-    .map((file) => {
-      try {
-        const report = readJson(file);
-        return { file, report, records: extractGameRecords(report) };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .toSorted((a, b) => b.records.length - a.records.length);
-  if (!reports.length || reports[0].records.length === 0) {
-    throw new Error('production runner produced no parseable per-game JSON report');
-  }
-  const selected = reports[0];
-  fs.copyFileSync(selected.file, path.join(privateDir, 'raw-run-report.json'));
+  const selected = selectRunReport(
+    findNewJsonReports(runsRoot, before)
+      .filter((file) => !file.startsWith(privateDir) && file !== publicFile),
+    { runId, kind: 'official-public-environments' },
+  );
+  const rawRunReport = path.join(privateDir, 'raw-run-report.json');
+  fs.copyFileSync(selected.file, rawRunReport);
 
   stage.value = 'production-loop-attestation';
-  assertProductionLoop(selected.report, games.length);
+  const loopAttestation = validateProductionLoops(selected.records, games.length);
 
   stage.value = 'game-completeness';
   const completeness = validateCompleteGameSet(games, selected.records);
@@ -121,17 +119,18 @@ try {
     ...provenance,
     completedAt: new Date().toISOString(),
     status: 'complete',
+    loopAttestation,
     completeness,
     officialScore,
     aggregates,
     games: selected.records,
     artifacts: {
       rawRunReport: {
-        file: path.basename(selected.file),
-        sha256: hashFile(selected.file),
+        file: path.basename(rawRunReport),
+        sha256: hashFile(rawRunReport),
       },
-      stdout: { sha256: hashFile(stdoutFile) },
-      stderr: { sha256: hashFile(stderrFile) },
+      stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile) },
+      stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile) },
     },
   };
   writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest);
@@ -143,6 +142,7 @@ try {
     status: 'complete',
     completedAt: privateManifest.completedAt,
     provenance,
+    loopAttestation,
     completeness,
     officialScore,
     aggregates,
@@ -176,22 +176,16 @@ try {
   process.exitCode = 1;
 }
 
-function assertProductionLoop(report, expectedGames) {
-  const loops = [];
-  const stack = [report];
-  const seen = new WeakSet();
-  while (stack.length) {
-    const value = stack.pop();
-    if (!value || typeof value !== 'object' || seen.has(value)) continue;
-    seen.add(value);
-    if (!Array.isArray(value) && typeof value.loop === 'string') loops.push(value.loop);
-    if (Array.isArray(value)) stack.push(...value);
-    else stack.push(...Object.values(value));
+function benchmarkTimeout() {
+  const value = Number(process.env.AVO_BENCHMARK_TIMEOUT_MS || 12 * 60 * 60 * 1000);
+  if (!Number.isFinite(value) || value < 60_000 || value > 48 * 60 * 60 * 1000) {
+    throw new Error('AVO_BENCHMARK_TIMEOUT_MS must be between 60000 and 172800000');
   }
-  if (loops.some((loop) => loop !== 'pi-sdk')) {
-    throw new Error(`non-production loop detected: ${[...new Set(loops)].join(', ')}`);
-  }
-  if (loops.length > 0 && loops.length < expectedGames) {
-    throw new Error(`production loop attestation incomplete: ${loops.length}/${expectedGames} game records`);
-  }
+  return Math.trunc(value);
+}
+
+function safeRunId(value) {
+  const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
+  if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
+  return result;
 }
