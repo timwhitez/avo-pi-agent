@@ -87,11 +87,11 @@ test('report selection requires exactly one matching run ID and kind', () => {
     const unrelated = path.join(root, 'unrelated.json');
     fs.writeFileSync(correct, JSON.stringify(report));
     fs.writeFileSync(unrelated, JSON.stringify({ ...report, runId: 'other-run' }));
-    assert.equal(selectRunReport([unrelated, correct], { runId: 'run-1' }).file, correct);
-    assert.throws(() => selectRunReport([unrelated], { runId: 'run-1' }), /found 0/);
+    assert.equal(selectRunReport([unrelated, correct], { root, runId: 'run-1' }).file, correct);
+    assert.throws(() => selectRunReport([unrelated], { root, runId: 'run-1' }), /found 0/);
     const duplicate = path.join(root, 'duplicate.json');
     fs.writeFileSync(duplicate, JSON.stringify(report));
-    assert.throws(() => selectRunReport([correct, duplicate], { runId: 'run-1' }), /found 2/);
+    assert.throws(() => selectRunReport([correct, duplicate], { root, runId: 'run-1' }), /found 2/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
