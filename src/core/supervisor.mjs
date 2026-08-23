@@ -14,6 +14,7 @@ export class StallSupervisor {
     this.interventions = [];
     this.activeEpisode = null;
     this.episodeSequence = 0;
+    this.interventionSequence = 0;
   }
 
   observe(event) {
@@ -93,15 +94,18 @@ export class StallSupervisor {
 
     const prior = [...this.interventions].reverse().find((entry) => entry.episodeId === episode.id);
     return {
-      ...(prior || { id: null, reason: episode.reason, directions: [] }),
-      stalled: true,
+      id: prior?.id || null,
+      stalled: false,
+      activeStall: true,
       repeated: true,
       suppressed: true,
+      reason: episode.reason,
       episodeId: episode.id,
       escalationLevel: episode.escalationLevel,
       firstEvidenceRef: episode.firstEvidenceRef,
       latestEvidenceRef: episode.latestEvidenceRef,
       evidenceRefs: episode.evidenceRefs.slice(),
+      directions: [],
     };
   }
 
@@ -147,8 +151,9 @@ export class StallSupervisor {
     }
     if (knowledgeHints.length) directions.find((entry) => entry.id === 'semantic-reframe').knowledgeHints = knowledgeHints.slice(0, 3).map((entry) => entry.id || entry);
 
+    this.interventionSequence += 1;
     const intervention = {
-      id: `supervisor-${String(this.interventions.length + 1).padStart(4, '0')}`,
+      id: `supervisor-${String(this.interventionSequence).padStart(6, '0')}`,
       episodeId: episode.id,
       stalled: true,
       repeated: false,
@@ -183,7 +188,7 @@ export class StallSupervisor {
 }
 
 function idleStatus() {
-  return { stalled: false, reason: null, directions: [], repeated: false, suppressed: false };
+  return { stalled: false, activeStall: false, reason: null, directions: [], repeated: false, suppressed: false };
 }
 
 function isObjectiveProgress(event) {
