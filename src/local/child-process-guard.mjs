@@ -10,11 +10,12 @@ const require = createRequire(import.meta.url);
 const childProcess = require('node:child_process');
 const originalSpawn = childProcess.spawn.bind(childProcess);
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
+const guardState = Symbol.for('avo.child-process-guard.installed');
 
-if (process.env.AVO_CHILD_PROCESS_GUARD !== '1') {
+if (globalThis[guardState] !== true) {
   childProcess.spawn = guardedSpawn;
   childProcess.spawnSync = guardedSpawnSync;
-  process.env.AVO_CHILD_PROCESS_GUARD = '1';
+  globalThis[guardState] = true;
   syncBuiltinESMExports();
 }
 
@@ -41,17 +42,18 @@ export function guardedOptions(command, args = [], options = {}) {
 
 export function classifyChild(command, args = []) {
   const executable = path.basename(String(command || '')).toLowerCase();
-  const values = Array.isArray(args) ? args.map((value) => String(value)) : [];
-  const script = values.find((value) => !value.startsWith('-')) || '';
-  const normalized = script.replaceAll('\\', '/');
+  const values = Array.isArray(args) ? args.map((value) => String(value).replaceAll('\\', '/')) : [];
 
-  if (executable.startsWith('python') || /(?:^|\/)bridge\/(?:arc_bridge|recording_python_v\d+)\.py$/.test(normalized)) {
+  if (
+    values.some((value) => /(?:^|\/)bridge\/(?:arc_bridge|recording_python_v\d+)\.py$/.test(value))
+    || executable.startsWith('python')
+  ) {
     return 'arc';
   }
-  if (
-    /(?:^|\/)scripts\/(?:local-preflight|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs$/.test(normalized)
-    || /(?:^|\/)src\/cli\.mjs$/.test(normalized)
-  ) {
+  if (values.some((value) => (
+    /(?:^|\/)scripts\/(?:local-preflight|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs$/.test(value)
+    || /(?:^|\/)src\/cli\.mjs$/.test(value)
+  ))) {
     return 'agent';
   }
   return 'utility';
