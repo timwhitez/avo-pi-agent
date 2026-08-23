@@ -87,6 +87,35 @@ test('bounded request replacement passes only accepted bytes downstream', async 
   await assert.rejects(() => original.text(), /Body is unusable/);
 });
 
+test('copies accepted chunks before a producer can reuse its buffer', async () => {
+  const shared = new Uint8Array(2);
+  let call = 0;
+  const reader = {
+    async read() {
+      if (call === 0) {
+        shared.set([65, 66]);
+        call += 1;
+        return { done: false, value: shared };
+      }
+      if (call === 1) {
+        shared.set([67, 68]);
+        call += 1;
+        return { done: false, value: shared };
+      }
+      return { done: true, value: undefined };
+    },
+    async cancel() {},
+    releaseLock() {},
+  };
+  const request = {
+    headers: new Headers(),
+    signal: new AbortController().signal,
+    body: { getReader() { return reader; } },
+  };
+  const bytes = await readBoundedRequestBody(request, { maxBytes: 4 });
+  assert.equal(bytes.toString('ascii'), 'ABCD');
+});
+
 test('abort and stream failures expose stable messages without raw body details', async () => {
   const controller = new AbortController();
   const pending = new ReadableStream({ start() {} });
