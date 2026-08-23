@@ -6,19 +6,19 @@ import path from 'node:path';
 
 import { WorkspaceSandbox } from '../src/core/workspace.mjs';
 
-function makeWorkspace() {
+function makeWorkspace(options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-workspace-'));
   const workspace = new WorkspaceSandbox({
     root,
     gameId: 'demo',
-    python: process.env.PYTHON || 'python3',
+    mode: 'files-only',
     timeoutMs: 5_000,
-    cwd: path.resolve(new URL('..', import.meta.url).pathname),
+    ...options,
   });
   return { root, workspace };
 }
 
-test('workspace persists bounded allowed files and blocks path escape', () => {
+test('files-only workspace persists bounded allowed files and blocks lexical escape', () => {
   const { root, workspace } = makeWorkspace();
   try {
     const written = workspace.write('analysis/notes.md', '# hypothesis\n');
@@ -27,53 +27,86 @@ test('workspace persists bounded allowed files and blocks path escape', () => {
     assert.ok(workspace.list().some((entry) => entry.path === path.join('analysis', 'notes.md')));
     assert.throws(() => workspace.write('../escape.txt', 'no'), /escapes root/);
     assert.throws(() => workspace.write('payload.sh', 'no'), /extension/);
+    assert.equal(workspace.canRunPython(), false);
+    await assert.rejects(workspace.runPython('print(1)'), /disabled/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('workspace Python runs simple analysis with stripped runtime environment', async (t) => {
+test('workspace rejects file and parent-directory symlink escapes', () => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-workspace-outside-'));
   const { root, workspace } = makeWorkspace();
   try {
-    let result;
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside');
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(workspace.root, 'link.txt'));
+    assert.throws(() => workspace.read('link.txt'), /symlink/);
+
+    fs.symlinkSync(outside, path.join(workspace.root, 'linked-dir'));
+    assert.throws(() => workspace.write('linked-dir/escape.txt', 'no'), /symlink|unsafe/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('workspace rejects multiply-linked regular files', (t) => {
+  if (process.platform === 'win32') {
+    t.skip('hard-link permission and semantics differ on Windows test hosts');
+    return;
+  }
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-workspace-hardlink-'));
+  const { root, workspace } = makeWorkspace();
+  try {
+    const source = path.join(outside, 'source.txt');
+    fs.writeFileSync(source, 'outside');
     try {
-      result = await workspace.runPython("import os\nprint(2 + 3)\nprint(os.environ.get('OPENAI_API_KEY'))");
+      fs.linkSync(source, path.join(workspace.root, 'hard.txt'));
     } catch (error) {
-      if (/ENOENT|produced no protocol output/.test(String(error))) {
-        t.skip(`Python runtime unavailable in this test environment: ${error.message}`);
+      if (error.code === 'EXDEV' || error.code === 'EPERM') {
+        t.skip(`hard links unavailable: ${error.code}`);
         return;
       }
       throw error;
     }
-    assert.equal(result.ok, true);
-    assert.match(result.stdout, /^5/m);
-    assert.match(result.stdout, /None/);
+    assert.throws(() => workspace.read('hard.txt'), /multiple hard links/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   }
 });
 
-test('workspace Python audit hook blocks subprocess and network activity', async (t) => {
-  const { root, workspace } = makeWorkspace();
+test('isolated-python invokes only an explicit container runtime with stripped provider environment', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('executable fixture uses a POSIX shebang');
+    return;
+  }
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-workspace-runtime-'));
+  const runtime = path.join(fixtureRoot, 'fake-container-runtime');
+  fs.writeFileSync(runtime, `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ ok: true, stdout: String(process.env.OPENAI_API_KEY), stderr: '', error: null }));
+});
+`, { mode: 0o700 });
+
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = ['sk', 'workspace-secret'].join('-');
+  const { root, workspace } = makeWorkspace({
+    mode: 'isolated-python',
+    containerRuntime: runtime,
+    containerImage: 'prepulled-test-image',
+  });
   try {
-    for (const code of [
-      "import os\nos.system('echo forbidden')",
-      "import socket\nsocket.socket()",
-    ]) {
-      let result;
-      try {
-        result = await workspace.runPython(code);
-      } catch (error) {
-        if (/ENOENT|produced no protocol output/.test(String(error))) {
-          t.skip(`Python runtime unavailable in this test environment: ${error.message}`);
-          return;
-        }
-        throw error;
-      }
-      assert.equal(result.ok, false);
-      assert.match(`${result.error}\n${result.stderr}`, /blocked audit event|PermissionError/);
-    }
+    const result = await workspace.runPython('print(2 + 3)');
+    assert.equal(result.ok, true);
+    assert.equal(result.stdout, 'undefined');
+    assert.equal(result.isolation.network, 'none');
+    assert.equal(result.isolation.rootFilesystem, 'read-only');
   } finally {
+    if (previous === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous;
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
