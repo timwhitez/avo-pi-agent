@@ -5,6 +5,7 @@ import { redactRuntimeSecrets } from '../redaction.mjs';
 
 const MAX_DIAGNOSTIC_CHARS = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const SUPPORTED_AUTH_MODES = new Set(['anonymous-auto', 'registered']);
 const CHILD_ENV_ALLOWLIST = Object.freeze([
   'PATH',
   'HOME',
@@ -35,17 +36,31 @@ const CHILD_ENV_ALLOWLIST = Object.freeze([
   'AVO_REPAIR_ROUND',
 ]);
 
+export function normalizeArcAuthMode(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return 'anonymous-auto';
+  if (!SUPPORTED_AUTH_MODES.has(normalized)) {
+    throw new Error('AVO_ARC_AUTH_MODE must be anonymous-auto or registered');
+  }
+  return normalized;
+}
+
 export function buildArcChildEnv(env = process.env) {
+  const authMode = normalizeArcAuthMode(env.AVO_ARC_AUTH_MODE);
   const child = {
     PYTHONUNBUFFERED: '1',
-    AVO_ARC_AUTH_MODE: normalizeAuthMode(env.AVO_ARC_AUTH_MODE),
+    AVO_ARC_AUTH_MODE: authMode,
   };
   for (const name of CHILD_ENV_ALLOWLIST) {
     if (env[name] !== undefined && env[name] !== '') child[name] = String(env[name]);
   }
-  child.ARC_API_KEY = child.AVO_ARC_AUTH_MODE === 'registered'
-    ? String(env.ARC_API_KEY || '')
-    : '';
+  if (authMode === 'registered') {
+    const key = String(env.ARC_API_KEY || '').trim();
+    if (!key) throw new Error('registered ARC auth requires ARC_API_KEY');
+    child.ARC_API_KEY = key;
+  } else {
+    child.ARC_API_KEY = '';
+  }
   return child;
 }
 
@@ -235,12 +250,6 @@ export class ArcBridgeClient {
       await client.close();
     }
   }
-}
-
-function normalizeAuthMode(value) {
-  return String(value || 'anonymous-auto').trim().toLowerCase() === 'registered'
-    ? 'registered'
-    : 'anonymous-auto';
 }
 
 function positiveTimeout(value) {
