@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -34,10 +35,17 @@ export function selectRunReport(files, {
   if (!root) throw new Error('selectRunReport requires the expected runs root');
   const matches = [];
   for (const file of files) {
-    const report = readJson(file, { root, maxBytes });
+    const document = readJsonDocument(file, { root, maxBytes });
+    const report = document.value;
     if (String(report?.runId || '') !== String(runId || '')) continue;
     if (String(report?.kind || '') !== kind) continue;
-    matches.push({ file: path.resolve(file), report, records: extractGameRecords(report) });
+    matches.push({
+      file: path.resolve(file),
+      report,
+      records: extractGameRecords(report),
+      sourceBytes: document.bytes,
+      sourceSha256: document.sha256,
+    });
   }
   if (matches.length !== 1) {
     throw new Error(`expected exactly one ${kind} report for runId=${runId}; found ${matches.length}`);
@@ -46,13 +54,21 @@ export function selectRunReport(files, {
   return matches[0];
 }
 
-export function readJson(file, {
+export function readJson(file, options = {}) {
+  return readJsonDocument(file, options).value;
+}
+
+function readJsonDocument(file, {
   root = path.dirname(path.resolve(file)),
   maxBytes = REPORT_LIMITS.maxReportBytes,
 } = {}) {
   const buffer = readBoundedRegularFile(file, { root, maxBytes, purpose: 'JSON report' });
   try {
-    return JSON.parse(buffer.toString('utf8'));
+    return {
+      value: JSON.parse(buffer.toString('utf8')),
+      bytes: buffer.length,
+      sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
+    };
   } catch (error) {
     throw new Error(`invalid JSON report ${safeRelative(root, file)}: ${error instanceof Error ? error.message : String(error)}`);
   }
