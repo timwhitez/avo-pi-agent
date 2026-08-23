@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 
 import { buildRunLaunch } from '../lib/run-contract.mjs';
-import { preserveUnavailableScoreDeltas } from '../lib/control-plane.mjs';
+import {
+  preserveUnavailableScoreDeltas,
+  usageTelemetryDeltas,
+} from '../lib/metric-deltas.mjs';
 import { extractUsageMetrics } from '../lib/usage-telemetry.mjs';
 
 test('subject namespaces remain isolated in the canonical Mission Control launch contract', () => {
@@ -22,7 +25,7 @@ test('subject namespaces remain isolated in the canonical Mission Control launch
   );
 });
 
-test('score deltas stay null unless both values are strictly numeric', () => {
+test('score and telemetry deltas stay null unless both values are strictly numeric', () => {
   const comparison = preserveUnavailableScoreDeltas({
     baseline: { summary: { officialScore: false, diagnosticScore: [] } },
     candidate: { summary: { officialScore: 1, diagnosticScore: 2 } },
@@ -38,6 +41,14 @@ test('score deltas stay null unless both values are strictly numeric', () => {
   });
   assert.equal(valid.delta.officialScore, 0.75);
   assert.equal(valid.delta.diagnosticScore, 3);
+
+  const telemetry = usageTelemetryDeltas(
+    { totals: { inputTokens: [], outputTokens: 0, costUsd: false } },
+    { totals: { inputTokens: 10, outputTokens: 3, costUsd: 1.5 } },
+  );
+  assert.equal(telemetry.inputTokens, null);
+  assert.equal(telemetry.outputTokens, 3);
+  assert.equal(telemetry.costUsd, null);
 });
 
 test('usage telemetry ignores coercible arrays and booleans while preserving genuine zero', () => {
