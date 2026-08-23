@@ -1,14 +1,15 @@
 import { getEventsSince, getRun } from '../../../../../lib/control-plane.mjs';
-import { jsonError, requireSession } from '../../../../../lib/session.mjs';
+import { assertRateLimit, jsonError, requireSession } from '../../../../../lib/session.mjs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request, context) {
   try {
-    requireSession(request, { requireCsrf: false });
+    const session = requireSession(request, { requireCsrf: false });
+    assertRateLimit('event-stream-open', session.subject, { limit: 60, windowMs: 60_000 });
     const { id } = await context.params;
-    getRun(id);
+    getRun(id, { subject: session.subject });
     const requestUrl = new URL(request.url);
     let cursor = Math.max(0, Number(requestUrl.searchParams.get('cursor')) || 0);
     const encoder = new TextEncoder();
@@ -18,13 +19,13 @@ export async function GET(request, context) {
       start(controller) {
         const send = () => {
           try {
-            const events = getEventsSince(id, cursor, 1000);
+            const events = getEventsSince(id, cursor, 1000, { subject: session.subject });
             for (const event of events) {
               cursor = event.cursor;
               controller.enqueue(encoder.encode(`id: ${event.cursor}\nevent: avo\ndata: ${JSON.stringify(event)}\n\n`));
             }
             controller.enqueue(encoder.encode(`event: heartbeat\ndata: ${JSON.stringify({ cursor, at: new Date().toISOString() })}\n\n`));
-          } catch (error) {
+          } catch {
             controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: 'Event stream closed' })}\n\n`));
             clearInterval(timer);
             controller.close();
