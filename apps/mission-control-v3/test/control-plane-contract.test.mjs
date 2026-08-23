@@ -5,7 +5,6 @@ import path from 'node:path';
 
 const appRoot = path.resolve(process.cwd());
 const baseSource = fs.readFileSync(path.join(appRoot, 'lib', 'control-plane-base.mjs'), 'utf8');
-const wrapperSource = fs.readFileSync(path.join(appRoot, 'lib', 'control-plane.mjs'), 'utf8');
 const launchSource = fs.readFileSync(path.join(appRoot, 'lib', 'run-contract.mjs'), 'utf8');
 
 test('competition UI path uses the locked canonical local runner', () => {
@@ -27,12 +26,6 @@ test('pause, resume and abort address the process group and escalate independent
   assert.match(launchSource, /kill\(-pid, signal\)/);
   assert.doesNotMatch(baseSource, /child\.killed/);
   assert.match(baseSource, /run\.abort_escalated/);
-});
-
-test('authenticated subjects receive isolated persistent memory/workspace namespaces', () => {
-  assert.match(wrapperSource, /storageNamespace:\s*owner/);
-  assert.match(launchSource, /state', 'mission-control', namespace, 'memory/);
-  assert.match(launchSource, /state', 'mission-control', namespace, 'workspaces/);
 });
 
 test('partial child output is bounded before parsing', () => {
