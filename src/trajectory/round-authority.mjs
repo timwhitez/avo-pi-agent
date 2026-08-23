@@ -31,7 +31,9 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   const transitionCount = nonNegativeIntegerOrNull(integrity.transitionCount);
   const unknownOperationResponses = nonNegativeIntegerOrNull(integrity.unknownOperationResponses);
   const findingFallback = Array.isArray(analysis?.findings) ? analysis.findings.length : null;
-  const findingCount = firstNonNegativeInteger(acceptance.findingCount, findingFallback);
+  const findingCountDeclared = hasOwn(acceptance, 'findingCount');
+  const declaredFindingCount = nonNegativeIntegerOrNull(acceptance.findingCount);
+  const findingCount = findingCountDeclared ? declaredFindingCount : findingFallback;
   const openFindingCount = nonNegativeIntegerOrNull(acceptance.openFindingCount);
 
   requireCondition(processResult?.code === 0 && !processResult?.signal, 'benchmark process did not exit cleanly', reasons);
@@ -165,12 +167,8 @@ function sameGameSet(left, right) {
   return right.every((value) => expected.has(value));
 }
 
-function firstNonNegativeInteger(...values) {
-  for (const value of values) {
-    const parsed = nonNegativeIntegerOrNull(value);
-    if (parsed !== null) return parsed;
-  }
-  return null;
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function recordOrEmpty(value) {
