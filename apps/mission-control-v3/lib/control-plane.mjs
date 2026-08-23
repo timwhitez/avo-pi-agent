@@ -1,7 +1,10 @@
+import path from 'node:path';
 import * as base from './control-plane-base.mjs';
+import { loadUsageTelemetry } from './usage-telemetry.mjs';
 import { numericDelta } from '../../../src/local/numeric.mjs';
 
 const ACTIVE_STATES = new Set(['starting', 'running', 'paused', 'aborting']);
+const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const owners = globalThis.__avoMissionControlRunOwners
   || (globalThis.__avoMissionControlRunOwners = new Map());
 
@@ -16,7 +19,7 @@ export function startRun(input = {}, { subject } = {}) {
   pruneOwners(runs);
   assertActiveRunCapacity(runs, activeRunLimit());
   assertSubjectRunCapacity(runs, owners, owner, perSubjectActiveRunLimit());
-  const run = base.startRun(input);
+  const run = base.startRun(input, { storageNamespace: owner });
   owners.set(run.id, owner);
   return run;
 }
@@ -30,7 +33,11 @@ export function listRuns({ subject } = {}) {
 
 export function getRun(id, { subject } = {}) {
   requireOwnership(id, subject);
-  return base.getRun(id);
+  const run = base.getRun(id);
+  const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
+  run.telemetry = telemetry;
+  run.summary = { ...(run.summary || {}), telemetry: telemetrySummary(telemetry) };
+  return run;
 }
 
 export function getEventsSince(id, cursor = 0, limit = 500, { subject } = {}) {
@@ -46,7 +53,20 @@ export function controlRun(id, action, confirmation = '', { subject } = {}) {
 export function compareRuns(baselineId, candidateId, { subject } = {}) {
   requireOwnership(baselineId, subject);
   requireOwnership(candidateId, subject);
-  return preserveUnavailableScoreDeltas(base.compareRuns(baselineId, candidateId));
+  const comparison = preserveUnavailableScoreDeltas(base.compareRuns(baselineId, candidateId));
+  const baselineTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: baselineId });
+  const candidateTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: candidateId });
+  comparison.baseline.telemetry = telemetrySummary(baselineTelemetry);
+  comparison.candidate.telemetry = telemetrySummary(candidateTelemetry);
+  comparison.delta = {
+    ...(comparison.delta || {}),
+    inputTokens: numericDelta(baselineTelemetry.totals?.inputTokens, candidateTelemetry.totals?.inputTokens),
+    outputTokens: numericDelta(baselineTelemetry.totals?.outputTokens, candidateTelemetry.totals?.outputTokens),
+    totalTokens: numericDelta(baselineTelemetry.totals?.totalTokens, candidateTelemetry.totals?.totalTokens),
+    reasoningTokens: numericDelta(baselineTelemetry.totals?.reasoningTokens, candidateTelemetry.totals?.reasoningTokens),
+    costUsd: numericDelta(baselineTelemetry.totals?.costUsd, candidateTelemetry.totals?.costUsd),
+  };
+  return comparison;
 }
 
 export function preserveUnavailableScoreDeltas(comparison) {
@@ -141,4 +161,17 @@ function normalizeSubject(value) {
     throw error;
   }
   return subject;
+}
+
+function telemetrySummary(value) {
+  return {
+    source: value.source,
+    filesScanned: value.filesScanned,
+    bytesScanned: value.bytesScanned,
+    sampleCount: value.sampleCount,
+    parseErrors: value.parseErrors,
+    truncated: value.truncated,
+    totals: value.totals,
+    maxima: value.maxima,
+  };
 }
