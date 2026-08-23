@@ -38,6 +38,12 @@ function integer(name, fallback, min = 1) {
   return value;
 }
 
+function enumValue(name, fallback, allowed) {
+  const value = String(process.env[name] || fallback).trim().toLowerCase();
+  if (!allowed.includes(value)) throw new Error(`${name} must be one of: ${allowed.join(', ')}`);
+  return value;
+}
+
 export function getRuntimeConfig({ requireProvider = true } = {}) {
   const provider = {
     baseUrl: process.env.OPENAI_BASE_URL?.replace(/\/$/, ''),
@@ -60,7 +66,10 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
     memoryDir: process.env.AVO_MEMORY_DIR || '.avo-memory',
     workspaceDir: process.env.AVO_WORKSPACE_DIR || '.avo-workspaces',
+    workspaceMode: enumValue('AVO_WORKSPACE_MODE', 'files-only', ['disabled', 'files-only', 'isolated-python']),
     workspacePythonTimeoutMs: integer('AVO_WORKSPACE_PYTHON_TIMEOUT_MS', 10_000, 100),
+    workspaceContainerRuntime: process.env.AVO_WORKSPACE_CONTAINER_RUNTIME || 'docker',
+    workspaceContainerImage: process.env.AVO_WORKSPACE_CONTAINER_IMAGE || 'python:3.12-slim',
     python: process.env.ARC_PYTHON || '.venv/bin/python',
   };
 }
@@ -75,5 +84,7 @@ export function publicConfigSummary(config) {
     stallWindow: config.stallWindow,
     memoryDir: config.memoryDir,
     workspaceDir: config.workspaceDir,
+    workspaceMode: config.workspaceMode,
+    workspacePythonIsolated: config.workspaceMode === 'isolated-python',
   };
 }
