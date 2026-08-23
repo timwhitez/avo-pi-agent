@@ -117,7 +117,7 @@ test('preserves genuine numeric zero while rejecting false as a zero substitute'
   invalid.analysis.acceptance.findingCount = false;
   const rejected = evaluateRoundAuthority(invalid);
   assert.equal(rejected.authoritative, false);
-  assert.equal(rejected.findingCount, 0, 'array length fallback remains explicit but authority must reject malformed declared count');
+  assert.equal(rejected.findingCount, null);
   assert.ok(rejected.reasons.some((reason) => /finding count/.test(reason)));
 });
 
