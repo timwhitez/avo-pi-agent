@@ -33,7 +33,9 @@ export function listRuns({ subject } = {}) {
 export function getRun(id, { subject } = {}) {
   requireOwnership(id, subject);
   const run = base.getRun(id);
-  run.telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
+  const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
+  run.telemetry = telemetry;
+  run.summary = { ...(run.summary || {}), telemetry: telemetrySummary(telemetry) };
   return run;
 }
 
