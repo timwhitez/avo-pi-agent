@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { ensureAuthorityDirectory } from '../src/local/authority-directory.mjs';
 import {
   discoverHashedArtifacts,
   extractStrictRoundMetrics,
@@ -32,7 +33,7 @@ test('binds JSON bytes, digest, and parsed value through a bounded regular-file 
   }
 });
 
-test('rejects symlinked reports and artifact trees', (t) => {
+test('rejects symlinked reports, artifact trees, and authority directory components', (t) => {
   const root = fixture();
   try {
     const target = path.join(root, 'target.json');
@@ -50,6 +51,33 @@ test('rejects symlinked reports and artifact trees', (t) => {
     fs.mkdirSync(artifacts);
     fs.symlinkSync(target, path.join(artifacts, 'linked.jsonl'));
     assert.throws(() => discoverHashedArtifacts(artifacts, { suffix: '.jsonl' }), /rejects symlink/);
+
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-authority-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(root, 'linked-directory'));
+      assert.throws(
+        () => ensureAuthorityDirectory(path.join(root, 'linked-directory', 'child'), { root }),
+        /rejects non-directory or symlink component/,
+      );
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('creates only regular confined authority directories', () => {
+  const root = fixture();
+  try {
+    const target = path.join(root, 'runs', 'private', 'repair');
+    const result = ensureAuthorityDirectory(target, { root, purpose: 'test authority directory' });
+    assert.equal(result, fs.realpathSync(target));
+    assert.equal(fs.lstatSync(target).isDirectory(), true);
+    assert.throws(
+      () => ensureAuthorityDirectory(path.resolve(root, '..', 'escape'), { root }),
+      /escapes|outside|contain/i,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -132,17 +160,22 @@ test('atomic authority JSON rejects a symlink target and persists a regular repl
   }
 });
 
-test('canonical local authority sources use v3, bounded evidence, close, and signal-aware liveness', () => {
+test('canonical local authority sources use v4, bounded evidence, close, and signal-aware liveness', () => {
   const alias = fs.readFileSync(new URL('../scripts/run-trajectory-repair-loop.mjs', import.meta.url), 'utf8');
-  const repair = fs.readFileSync(new URL('../scripts/run-trajectory-repair-loop-v3.mjs', import.meta.url), 'utf8');
+  const v2 = fs.readFileSync(new URL('../scripts/run-trajectory-repair-loop-v2.mjs', import.meta.url), 'utf8');
+  const v3 = fs.readFileSync(new URL('../scripts/run-trajectory-repair-loop-v3.mjs', import.meta.url), 'utf8');
+  const repair = fs.readFileSync(new URL('../scripts/run-trajectory-repair-loop-v4.mjs', import.meta.url), 'utf8');
   const complete = fs.readFileSync(new URL('../scripts/run-local-complete.mjs', import.meta.url), 'utf8');
 
-  assert.match(alias, /run-trajectory-repair-loop-v3\.mjs/);
+  for (const compatibility of [alias, v2, v3]) assert.match(compatibility, /run-trajectory-repair-loop-v4\.mjs/);
+  assert.match(repair, /ensureAuthorityDirectory/);
   assert.match(repair, /readOptionalJsonEvidence/);
   assert.match(repair, /discoverHashedArtifacts/);
   assert.match(repair, /requireExpectedGames:\s*true/);
   assert.match(repair, /once\('close'/);
   assert.match(repair, /signalCode === null/);
+  assert.match(repair, /ARC_API_KEY:\s*''/);
+  assert.match(repair, /AVO_ARC_AUTH_MODE:\s*'anonymous-auto'/);
   assert.doesNotMatch(repair, /function readJsonIfPresent/);
   assert.doesNotMatch(repair, /function walk\(/);
   assert.doesNotMatch(repair, /fs\.readFileSync\(file\)/);
