@@ -2,6 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const SAFE_VERSIONED_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const SAFE_SHORT_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
+const SAFE_STATE = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/;
+
 export function snapshotJsonFiles(root) {
   if (!fs.existsSync(root)) return new Set();
   const files = [];
@@ -52,21 +56,51 @@ export function extractGameRecords(report) {
     const gameId = value.gameId ?? value.game_id;
     const hasResultShape = 'state' in value || 'levelsCompleted' in value || 'levels_completed' in value
       || 'actions' in value || 'actionCount' in value || 'won' in value;
-    if (!gameId || !hasResultShape) return;
-    records.push({
-      gameId: normalizeGameId(gameId),
-      versionedGameId: String(gameId),
-      state: String(value.state ?? value.gameState ?? value.game_state ?? 'UNKNOWN'),
-      levelsCompleted: number(value.levelsCompleted ?? value.levels_completed ?? value.levels ?? 0),
-      winLevels: number(value.winLevels ?? value.win_levels ?? 0),
-      actions: number(value.actions ?? value.actionCount ?? value.action_count ?? 0),
-      won: Boolean(value.won ?? /WIN/i.test(String(value.state ?? ''))),
-      error: value.error ? String(value.error) : null,
-      loop: typeof value.loop === 'string' ? value.loop : null,
-      sourcePath: currentPath,
-    });
+    if (gameId === undefined || gameId === null || !hasResultShape) return;
+    records.push(normalizeGameRecord(value, currentPath));
   });
   return records;
+}
+
+export function normalizeGameRecord(value, sourcePath = '$') {
+  const rawGameId = firstOwn(value, ['gameId', 'game_id']);
+  const versionedGameId = requireSafeVersionedGameId(rawGameId, sourcePath);
+  const gameId = normalizeGameId(versionedGameId);
+  const state = requireState(firstOwn(value, ['state', 'gameState', 'game_state']), sourcePath);
+  const levelsCompleted = optionalCount(
+    firstOwn(value, ['levelsCompleted', 'levels_completed', 'levels']),
+    'levelsCompleted', sourcePath,
+  );
+  const winLevels = optionalCount(firstOwn(value, ['winLevels', 'win_levels']), 'winLevels', sourcePath);
+  const actions = optionalCount(firstOwn(value, ['actions', 'actionCount', 'action_count']), 'actions', sourcePath);
+  if (winLevels > 0 && levelsCompleted > winLevels) {
+    invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds winLevels=${winLevels}`);
+  }
+
+  const stateWon = state === 'WIN';
+  let won = stateWon;
+  if (Object.hasOwn(value, 'won')) {
+    if (typeof value.won !== 'boolean') invalidRecord(sourcePath, 'won must be a boolean when present');
+    won = value.won;
+    if (won !== stateWon) {
+      invalidRecord(sourcePath, `won=${won} contradicts terminal state=${state}`);
+    }
+  }
+
+  const error = optionalString(value.error, 'error', sourcePath);
+  const loop = optionalString(value.loop, 'loop', sourcePath);
+  return Object.freeze({
+    gameId,
+    versionedGameId,
+    state,
+    levelsCompleted,
+    winLevels,
+    actions,
+    won,
+    error,
+    loop,
+    sourcePath,
+  });
 }
 
 export function validateProductionLoops(records, expectedGames) {
@@ -88,7 +122,11 @@ export function validateCompleteGameSet(expectedGames, records) {
   const duplicateExpected = duplicates(expected);
   if (duplicateExpected.length) throw new Error(`expected public game set contains duplicates: ${duplicateExpected.join(', ')}`);
 
-  const actual = records.map((record) => normalizeGameId(record.gameId));
+  if (!Array.isArray(records)) throw new Error('public game records must be an array');
+  const actual = records.map((record, index) => {
+    if (!record || typeof record !== 'object') throw new Error(`public game record at index ${index} is malformed`);
+    return normalizeGameId(record.gameId);
+  });
   const duplicateIds = duplicates(actual);
   const missing = expected.filter((id) => !actual.includes(id));
   const unexpected = actual.filter((id) => !expected.includes(id));
@@ -162,13 +200,56 @@ export function writeJsonAtomic(file, value) {
   fs.renameSync(temporary, file);
 }
 
-function normalizeGameId(value) {
-  return String(value).split('-')[0].trim();
+function firstOwn(value, keys) {
+  for (const key of keys) {
+    if (Object.hasOwn(value, key)) return value[key];
+  }
+  return undefined;
 }
 
-function number(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+function requireSafeVersionedGameId(value, sourcePath) {
+  if (typeof value !== 'string') invalidRecord(sourcePath, 'gameId must be a string');
+  const result = value.trim();
+  if (!result || result !== value || !SAFE_VERSIONED_GAME_ID.test(result)) {
+    invalidRecord(sourcePath, `gameId has an invalid format: ${JSON.stringify(value)}`);
+  }
+  return result;
+}
+
+function normalizeGameId(value) {
+  if (typeof value !== 'string') throw new Error('gameId must be a string');
+  const versioned = value.trim();
+  if (!versioned || versioned !== value || !SAFE_VERSIONED_GAME_ID.test(versioned)) {
+    throw new Error(`gameId has an invalid format: ${JSON.stringify(value)}`);
+  }
+  const short = versioned.split('-')[0];
+  if (!SAFE_SHORT_GAME_ID.test(short)) throw new Error(`normalized gameId has an invalid format: ${JSON.stringify(short)}`);
+  return short;
+}
+
+function requireState(value, sourcePath) {
+  if (typeof value !== 'string') invalidRecord(sourcePath, 'state must be a string');
+  const state = value.trim().toUpperCase();
+  if (!state || !SAFE_STATE.test(state)) invalidRecord(sourcePath, `state has an invalid format: ${JSON.stringify(value)}`);
+  return state;
+}
+
+function optionalCount(value, field, sourcePath) {
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    invalidRecord(sourcePath, `${field} must be an explicit finite non-negative integer`);
+  }
+  return value;
+}
+
+function optionalString(value, field, sourcePath) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') invalidRecord(sourcePath, `${field} must be a string when present`);
+  return value;
+}
+
+function invalidRecord(sourcePath, reason) {
+  throw new Error(`invalid public game record at ${sourcePath}: ${reason}`);
 }
 
 function duplicates(values) {
