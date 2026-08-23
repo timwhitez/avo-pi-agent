@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 
 const DEFAULT_TAIL_CHARS = 64 * 1024;
 
 export async function runProcess(command, args, {
   cwd = process.cwd(),
-  env = process.env,
+  env = buildUtilityChildEnvironment({ source: process.env }),
   timeoutMs = 0,
   stdoutFile = null,
   stderrFile = null,
