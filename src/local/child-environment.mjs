@@ -4,6 +4,13 @@ const BASE_KEYS = Object.freeze([
   'SYSTEMROOT',
   'WINDIR',
   'COMSPEC',
+  'HOME',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'USER',
+  'LOGNAME',
+  'TERM',
   'TMPDIR',
   'TMP',
   'TEMP',
@@ -55,6 +62,7 @@ const AVO_RUNTIME_KEYS = Object.freeze([
   'AVO_REPAIR_MAX_ROUNDS',
   'AVO_LOCAL_LOCK_TOKEN',
   'AVO_DEBUG',
+  'AVO_CHILD_ALLOW_PROXY',
 ]);
 
 const PROXY_KEYS = Object.freeze([
