@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { ensureAuthorityDirectory } from '../src/local/authority-directory.mjs';
 import {
   inspectRegularFile,
   readJsonEvidence,
@@ -20,11 +21,13 @@ if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
 const options = parseOptions(process.argv.slice(2));
 const maxRounds = integer(options.maxRounds ?? process.env.AVO_REPAIR_MAX_ROUNDS ?? 6, 1, 20, 'maxRounds');
 const runId = safeId(options.runId || `local-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`);
+const repositoryRoot = path.resolve('.');
+const privateExecutionRoot = path.resolve('runs/private');
 const publicRoot = path.resolve('runs/public');
+ensureAuthorityDirectory(privateExecutionRoot, { root: repositoryRoot, purpose: 'local completion private runtime directory' });
+ensureAuthorityDirectory(publicRoot, { root: repositoryRoot, purpose: 'local completion public report directory' });
 const reportFile = path.join(publicRoot, `local-complete-${runId}.redacted.json`);
 const repairPath = path.join(publicRoot, `trajectory-repair-${runId}.redacted.json`);
-const repositoryRoot = path.resolve('.');
-fs.mkdirSync(publicRoot, { recursive: true, mode: 0o700 });
 if (fs.existsSync(reportFile)) throw new Error('local completion report already exists for this run ID');
 
 const lock = acquireLocalExecutionLock({ runId, kind: 'complete-local' });
@@ -48,10 +51,11 @@ const stages = [
 ];
 
 const summary = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   runId,
   execution: 'local-only',
   authorityIo: 'src/local/authority-evidence.mjs',
+  directoryBoundary: 'src/local/authority-directory.mjs',
   startedAt: new Date().toISOString(),
   completedAt: null,
   status: 'running',
@@ -227,7 +231,8 @@ function componentEvidence() {
   const files = [
     'scripts/run-local-complete.mjs',
     'scripts/run-trajectory-repair-loop.mjs',
-    'scripts/run-trajectory-repair-loop-v3.mjs',
+    'scripts/run-trajectory-repair-loop-v4.mjs',
+    'src/local/authority-directory.mjs',
     'src/local/authority-evidence.mjs',
     'src/local/complete-acceptance.mjs',
   ];
