@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { ArcBridgeClient, buildArcChildEnv } from '../src/arc/bridge-client.mjs';
+import { ArcBridgeClient, buildArcChildEnv, normalizeArcAuthMode } from '../src/arc/bridge-client.mjs';
 
 test('ARC child environment excludes provider, GitHub, cloud and registry secrets', () => {
   const env = {
@@ -32,7 +32,18 @@ test('ARC child environment excludes provider, GitHub, cloud and registry secret
   }
 });
 
-test('registered ARC mode passes only the ARC credential', () => {
+test('ARC auth mode defaults only when absent and rejects unsupported/typo modes', () => {
+  assert.equal(normalizeArcAuthMode(undefined), 'anonymous-auto');
+  assert.equal(normalizeArcAuthMode(''), 'anonymous-auto');
+  assert.equal(normalizeArcAuthMode('  AnOnYmOuS-AuTo  '), 'anonymous-auto');
+  assert.equal(normalizeArcAuthMode(' REGISTERED '), 'registered');
+  for (const value of ['registerd', 'disabled', 'anonymous', 'auto', 'test']) {
+    assert.throws(() => normalizeArcAuthMode(value), /must be anonymous-auto or registered/);
+    assert.throws(() => buildArcChildEnv({ AVO_ARC_AUTH_MODE: value }), /must be anonymous-auto or registered/);
+  }
+});
+
+test('registered ARC mode passes only the ARC credential and fails without it', () => {
   const child = buildArcChildEnv({
     AVO_ARC_AUTH_MODE: 'registered',
     ARC_API_KEY: 'registered-arc-value',
@@ -41,6 +52,15 @@ test('registered ARC mode passes only the ARC credential', () => {
   assert.equal(child.AVO_ARC_AUTH_MODE, 'registered');
   assert.equal(child.ARC_API_KEY, 'registered-arc-value');
   assert.equal('OPENAI_API_KEY' in child, false);
+
+  assert.throws(
+    () => buildArcChildEnv({ AVO_ARC_AUTH_MODE: 'registered', ARC_API_KEY: '' }),
+    /registered ARC auth requires ARC_API_KEY/,
+  );
+  assert.throws(
+    () => buildArcChildEnv({ AVO_ARC_AUTH_MODE: 'registered' }),
+    /registered ARC auth requires ARC_API_KEY/,
+  );
 });
 
 test('a timed-out request terminates the bridge instead of desynchronizing FIFO responses', async () => {
