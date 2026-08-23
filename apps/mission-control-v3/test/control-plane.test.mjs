@@ -20,18 +20,22 @@ test('validates diagnostic and competition lifecycle options', () => {
     () => validateStartOptions({ mode: 'competition', games: ['ls20'] }),
     /complete dynamically discovered public set/,
   );
-  assert.throws(() => validateStartOptions({ actionBudget: 0 }), /actionBudget/);
-  assert.throws(() => validateStartOptions({ games: ['../secret'] }), /Game IDs/);
+  assert.throws(() => validateStartOptions({ mode: 'diagnostic', actionBudget: 0 }), /actionBudget/);
+  assert.throws(() => validateStartOptions({ mode: 'diagnostic', games: ['../secret'] }), /Game IDs/);
+  assert.throws(() => validateStartOptions({ mode: 'unknown' }), /mode must be exactly/);
+  assert.throws(() => validateStartOptions({ mode: 'diagnostic', reasoningLevel: 'extreme' }), /reasoningLevel/);
 });
 
 test('sanitized run and event objects never expose provider-private fields', () => {
   const secret = ['private', 'credential', 'fixture'].join('-');
   const endpoint = ['http', 's://private.invalid/v1'].join('');
   const run = sanitizeRun({
-    id: 'run_test', state: 'running', mode: 'diagnostic', games: ['ls20'],
-    actionBudget: 100, reasoningLevel: 'max', createdAt: '', startedAt: '', endedAt: null,
+    id: 'run_test', state: 'running', mode: 'diagnostic', requestedMode: 'diagnostic',
+    executionMode: 'diagnostic', official: false, authorityState: 'diagnostic', authorityReasons: [],
+    games: ['ls20'], actionBudget: 100, reasoningLevel: 'max', createdAt: '', startedAt: '', endedAt: null,
     exitCode: null, signal: null, cursor: 1, currentGame: 'ls20',
-    progress: {}, summary: { endpoint, apiKey: secret, rawReasoning: secret }, lastError: endpoint,
+    progress: {}, summary: { endpoint, apiKey: secret, rawReasoning: secret },
+    reportStatus: null, reportEvidence: null, lastError: endpoint,
   });
   const event = sanitizeEvent({ type: 'provider', payload: { authorization: secret, baseUrl: endpoint, modelId: secret } });
   const serialized = JSON.stringify({ run, event });
