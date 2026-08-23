@@ -71,6 +71,25 @@ test('accepts only a complete real-provider official-score v5 trajectory round',
   assert.deepEqual(result.officialScore, { value: 0.75, origin: 'aggregateScorecard.score' });
 });
 
+test('preserves a genuine numeric official score of zero', () => {
+  const input = fixture();
+  input.benchmark.officialScore.value = 0;
+  const result = evaluateRoundAuthority(input);
+  assert.equal(result.authoritative, true);
+  assert.deepEqual(result.officialScore, { value: 0, origin: 'aggregateScorecard.score' });
+});
+
+test('rejects coercible non-numeric score values even with an official origin', () => {
+  for (const value of [null, undefined, '', '   ', false, true, [], [1], {}, '0x10', 'Infinity']) {
+    const input = fixture();
+    input.benchmark.officialScore.value = value;
+    const result = evaluateRoundAuthority(input);
+    assert.equal(result.authoritative, false, `unexpected authority for ${JSON.stringify(value)}`);
+    assert.equal(result.officialScore.value, null);
+    assert.ok(result.reasons.some((reason) => /absent or non-numeric/.test(reason)));
+  }
+});
+
 test('authoritative dirty round may be repaired but is not clean', () => {
   const input = fixture();
   input.analysis.clean = false;
