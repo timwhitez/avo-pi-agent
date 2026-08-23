@@ -20,6 +20,7 @@ function parseDotEnv(text) {
 }
 
 export function loadLocalEnv(cwd = process.cwd()) {
+  if (process.env.AVO_DISABLE_DOTENV === '1') return;
   const file = path.join(cwd, '.env');
   if (!fs.existsSync(file)) return;
   const values = parseDotEnv(fs.readFileSync(file, 'utf8'));
