@@ -1,9 +1,7 @@
-import path from 'node:path';
 import * as base from './control-plane-base.mjs';
-import { loadUsageTelemetry } from './usage-telemetry.mjs';
+import { numericDelta } from '../../../src/local/numeric.mjs';
 
 const ACTIVE_STATES = new Set(['starting', 'running', 'paused', 'aborting']);
-const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const owners = globalThis.__avoMissionControlRunOwners
   || (globalThis.__avoMissionControlRunOwners = new Map());
 
@@ -18,7 +16,7 @@ export function startRun(input = {}, { subject } = {}) {
   pruneOwners(runs);
   assertActiveRunCapacity(runs, activeRunLimit());
   assertSubjectRunCapacity(runs, owners, owner, perSubjectActiveRunLimit());
-  const run = base.startRun(input, { storageNamespace: owner });
+  const run = base.startRun(input);
   owners.set(run.id, owner);
   return run;
 }
@@ -32,11 +30,7 @@ export function listRuns({ subject } = {}) {
 
 export function getRun(id, { subject } = {}) {
   requireOwnership(id, subject);
-  const run = base.getRun(id);
-  const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
-  run.telemetry = telemetry;
-  run.summary = { ...(run.summary || {}), telemetry: telemetrySummary(telemetry) };
-  return run;
+  return base.getRun(id);
 }
 
 export function getEventsSince(id, cursor = 0, limit = 500, { subject } = {}) {
@@ -52,19 +46,16 @@ export function controlRun(id, action, confirmation = '', { subject } = {}) {
 export function compareRuns(baselineId, candidateId, { subject } = {}) {
   requireOwnership(baselineId, subject);
   requireOwnership(candidateId, subject);
-  const comparison = base.compareRuns(baselineId, candidateId);
-  const baselineTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: baselineId });
-  const candidateTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: candidateId });
-  comparison.baseline.telemetry = telemetrySummary(baselineTelemetry);
-  comparison.candidate.telemetry = telemetrySummary(candidateTelemetry);
-  comparison.delta = {
-    ...(comparison.delta || {}),
-    inputTokens: nullableDelta(baselineTelemetry.totals?.inputTokens, candidateTelemetry.totals?.inputTokens),
-    outputTokens: nullableDelta(baselineTelemetry.totals?.outputTokens, candidateTelemetry.totals?.outputTokens),
-    totalTokens: nullableDelta(baselineTelemetry.totals?.totalTokens, candidateTelemetry.totals?.totalTokens),
-    reasoningTokens: nullableDelta(baselineTelemetry.totals?.reasoningTokens, candidateTelemetry.totals?.reasoningTokens),
-    costUsd: nullableDelta(baselineTelemetry.totals?.costUsd, candidateTelemetry.totals?.costUsd),
-  };
+  return preserveUnavailableScoreDeltas(base.compareRuns(baselineId, candidateId));
+}
+
+export function preserveUnavailableScoreDeltas(comparison) {
+  if (!comparison || typeof comparison !== 'object') return comparison;
+  if (!comparison.delta || typeof comparison.delta !== 'object') comparison.delta = {};
+  const baseline = comparison.baseline?.summary || {};
+  const candidate = comparison.candidate?.summary || {};
+  comparison.delta.officialScore = numericDelta(baseline.officialScore, candidate.officialScore);
+  comparison.delta.diagnosticScore = numericDelta(baseline.diagnosticScore, candidate.diagnosticScore);
   return comparison;
 }
 
@@ -150,24 +141,4 @@ function normalizeSubject(value) {
     throw error;
   }
   return subject;
-}
-
-function telemetrySummary(value) {
-  return {
-    source: value.source,
-    filesScanned: value.filesScanned,
-    bytesScanned: value.bytesScanned,
-    sampleCount: value.sampleCount,
-    parseErrors: value.parseErrors,
-    truncated: value.truncated,
-    totals: value.totals,
-    maxima: value.maxima,
-  };
-}
-
-function nullableDelta(left, right) {
-  if (left === null || left === undefined || right === null || right === undefined) return null;
-  const a = Number(left);
-  const b = Number(right);
-  return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
 }
