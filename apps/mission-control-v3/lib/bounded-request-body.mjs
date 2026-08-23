@@ -45,7 +45,7 @@ export async function readBoundedRequestBody(request, { maxBytes = DEFAULT_MAX_B
         await cancelQuietly(reader, 'request body limit exceeded');
         throw requestError(`Request body exceeds ${limit} bytes`, 413);
       }
-      chunks.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      chunks.push(Buffer.from(chunk));
       total += chunk.byteLength;
     }
   } catch (error) {
