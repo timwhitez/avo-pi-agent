@@ -75,12 +75,29 @@ test('a timed-out request terminates the bridge instead of desynchronizing FIFO 
   });
   try {
     await client.start();
+    const exited = onceExit(client.child, 2_000);
     await assert.rejects(client.request({ command: 'hang' }), /timed out/);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.ok(client.child.killed || client.child.exitCode !== null);
+    const result = await exited;
     assert.equal(client.pending.length, 0);
+    assert.equal(result.signal, 'SIGKILL');
+    assert.equal(client.child.signalCode, 'SIGKILL');
+    assert.equal(client.child.stdin.destroyed, true);
   } finally {
     await client.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+function onceExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('child did not exit within test timeout')), timeoutMs);
+    timer.unref?.();
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+  });
+}
