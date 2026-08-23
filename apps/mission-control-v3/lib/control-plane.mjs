@@ -15,7 +15,7 @@ export function startRun(input = {}, { subject } = {}) {
   pruneOwners(runs);
   assertActiveRunCapacity(runs, activeRunLimit());
   assertSubjectRunCapacity(runs, owners, owner, perSubjectActiveRunLimit());
-  const run = base.startRun(input);
+  const run = base.startRun(input, { storageNamespace: owner });
   owners.set(run.id, owner);
   return run;
 }
