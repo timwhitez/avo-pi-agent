@@ -16,7 +16,17 @@ function fixture() {
       provenance: {
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: { ok: true, outputVerified: true },
+        providerPreflight: {
+          ok: true,
+          outputVerified: true,
+          challengeVerified: true,
+          responseFreshnessVerified: true,
+          attestationVersion: 2,
+          responseIdHash: 'a'.repeat(64),
+          challengeHash: 'b'.repeat(64),
+          responseHash: 'c'.repeat(64),
+          proofHash: 'd'.repeat(64),
+        },
         arcRuntime: { officialPackageAttested: true },
         arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
         publicGameCount: 2,
@@ -57,6 +67,7 @@ test('accepts only a complete real-provider official-score v5 trajectory round',
   assert.equal(result.authoritative, true);
   assert.equal(result.clean, true);
   assert.equal(result.reasons.length, 0);
+  assert.equal(result.providerAttestationVersion, 2);
   assert.deepEqual(result.officialScore, { value: 0.75, origin: 'aggregateScorecard.score' });
 });
 
@@ -107,11 +118,31 @@ test('rejects old recorder, incomplete detector coverage or game-set mismatch', 
   assert.equal(evaluateRoundAuthority(games).authoritative, false);
 });
 
-test('rejects mismatched run identity and mock/provider/runtime attestation gaps', () => {
+test('rejects legacy fixed-output attestation and malformed proof digests', () => {
+  const legacy = fixture();
+  legacy.benchmark.provenance.providerPreflight = {
+    ok: true,
+    outputVerified: true,
+    responseIdHash: 'a'.repeat(64),
+  };
+  legacy.benchmark.provenance.noMockAttestation = true;
+  const legacyResult = evaluateRoundAuthority(legacy);
+  assert.equal(legacyResult.authoritative, false);
+  assert.ok(legacyResult.reasons.some((reason) => /freshness attestation/.test(reason)));
+  assert.ok(legacyResult.reasons.some((reason) => /older than v2/.test(reason)));
+
+  const malformed = fixture();
+  malformed.benchmark.provenance.providerPreflight.proofHash = 'not-a-sha';
+  const malformedResult = evaluateRoundAuthority(malformed);
+  assert.equal(malformedResult.authoritative, false);
+  assert.ok(malformedResult.reasons.some((reason) => /proof.*digest/.test(reason)));
+});
+
+test('rejects mismatched run identity and provider/runtime attestation gaps', () => {
   const input = fixture();
   input.analysis.runId = 'another-run';
   input.benchmark.provenance.noMockAttestation = false;
-  input.benchmark.provenance.providerPreflight.outputVerified = false;
+  input.benchmark.provenance.providerPreflight.challengeVerified = false;
   input.benchmark.provenance.arcRuntime.officialPackageAttested = false;
   const result = evaluateRoundAuthority(input);
   assert.equal(result.authoritative, false);
