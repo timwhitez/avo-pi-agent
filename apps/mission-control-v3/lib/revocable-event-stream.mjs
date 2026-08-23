@@ -57,13 +57,17 @@ export function createRevocableEventStream({
         }
       };
 
+      const signal = request?.signal;
+      signal?.addEventListener?.('abort', () => close(), { once: true });
+      if (signal?.aborted) {
+        close();
+        return;
+      }
       send();
       if (!closed) {
         timer = setInterval(send, interval);
         timer.unref?.();
       }
-      if (request?.signal?.aborted) close();
-      else request?.signal?.addEventListener?.('abort', () => close(), { once: true });
     },
     cancel() {
       closed = true;
