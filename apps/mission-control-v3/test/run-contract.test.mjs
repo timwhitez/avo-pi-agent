@@ -7,11 +7,16 @@ import {
   buildRunLaunch,
   createBoundedLineBuffer,
   loadExactRunReport,
+  loadExactRunReportEvidence,
   signalProcessTree,
 } from '../lib/run-contract.mjs';
 
 function tempRoot(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function contract(root, runId, mode) {
+  return { root, path: path.join(root, `${runId}.json`), runId, mode };
 }
 
 test('routes competition and diagnostic runs through separate locked canonical wrappers', () => {
@@ -24,6 +29,7 @@ test('routes competition and diagnostic runs through separate locked canonical w
   });
   assert.deepEqual(competition.args, ['/repo/scripts/run-real-public-locked.mjs']);
   assert.equal(competition.report.path, '/repo/runs/public/run-competition.json');
+  assert.equal(competition.report.root, '/repo/runs/public');
   assert.equal(competition.report.mode, 'competition');
   assert.equal(competition.env.AVO_REAL_RUN_ID, 'run-competition');
 
@@ -39,13 +45,14 @@ test('routes competition and diagnostic runs through separate locked canonical w
     '--game=ls20',
   ]);
   assert.equal(diagnostic.report.path, '/repo/runs/diagnostic/run-diagnostic.json');
+  assert.equal(diagnostic.report.root, '/repo/runs/diagnostic');
   assert.equal(diagnostic.report.mode, 'diagnostic');
 });
 
-test('loads only the exact bounded diagnostic report and rejects borrowing or authority confusion', () => {
+test('loads only exact digest-bound diagnostic report and rejects borrowing or authority confusion', () => {
   const root = tempRoot('avo-mc-report-');
   try {
-    const file = path.join(root, 'run.json');
+    const file = path.join(root, 'run-1.json');
     fs.writeFileSync(file, JSON.stringify({
       runId: 'run-1',
       kind: 'diagnostic-public-environments',
@@ -53,10 +60,13 @@ test('loads only the exact bounded diagnostic report and rejects borrowing or au
       official: false,
       status: 'complete',
     }));
-    assert.equal(loadExactRunReport({ path: file, runId: 'run-1', mode: 'diagnostic' }).runId, 'run-1');
+    const loaded = loadExactRunReportEvidence(contract(root, 'run-1', 'diagnostic'));
+    assert.equal(loaded.report.runId, 'run-1');
+    assert.match(loaded.evidence.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(loaded.evidence.bytes > 0);
     assert.throws(
-      () => loadExactRunReport({ path: file, runId: 'another-run', mode: 'diagnostic' }),
-      /runId/,
+      () => loadExactRunReport({ ...contract(root, 'another-run', 'diagnostic'), path: file }),
+      /exact run contract/,
     );
 
     fs.writeFileSync(file, JSON.stringify({
@@ -67,27 +77,27 @@ test('loads only the exact bounded diagnostic report and rejects borrowing or au
       status: 'complete',
     }));
     assert.throws(
-      () => loadExactRunReport({ path: file, runId: 'run-1', mode: 'diagnostic' }),
+      () => loadExactRunReport(contract(root, 'run-1', 'diagnostic')),
       /authority/,
     );
 
     const target = path.join(root, 'target.json');
-    fs.writeFileSync(target, JSON.stringify({ runId: 'run-1' }));
-    const link = path.join(root, 'link.json');
+    fs.writeFileSync(target, JSON.stringify({ runId: 'run-link' }));
+    const link = path.join(root, 'run-link.json');
     fs.symlinkSync(target, link);
     assert.throws(
-      () => loadExactRunReport({ path: link, runId: 'run-1', mode: 'diagnostic' }),
-      /non-symlink/,
+      () => loadExactRunReport(contract(root, 'run-link', 'diagnostic')),
+      /regular non-symlink/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('requires a complete official-score report for competition completion', () => {
+test('requires a complete score-bearing competition report before parsing', () => {
   const root = tempRoot('avo-mc-competition-');
   try {
-    const file = path.join(root, 'run.json');
+    const file = path.join(root, 'run-1.json');
     const base = {
       runId: 'run-1',
       status: 'complete',
@@ -95,16 +105,16 @@ test('requires a complete official-score report for competition completion', () 
       officialScore: { value: 0.5, origin: 'aggregateScorecard.score' },
     };
     fs.writeFileSync(file, JSON.stringify(base));
-    assert.equal(loadExactRunReport({ path: file, runId: 'run-1', mode: 'competition' }).status, 'complete');
+    assert.equal(loadExactRunReport(contract(root, 'run-1', 'competition')).status, 'complete');
 
     fs.writeFileSync(file, JSON.stringify({ ...base, completeness: { complete: false } }));
     assert.throws(
-      () => loadExactRunReport({ path: file, runId: 'run-1', mode: 'competition' }),
+      () => loadExactRunReport(contract(root, 'run-1', 'competition')),
       /not complete/,
     );
     fs.writeFileSync(file, JSON.stringify({ ...base, officialScore: { value: null, origin: 'unavailable' } }));
     assert.throws(
-      () => loadExactRunReport({ path: file, runId: 'run-1', mode: 'competition' }),
+      () => loadExactRunReport(contract(root, 'run-1', 'competition')),
       /official score/,
     );
   } finally {
