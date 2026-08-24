@@ -6,6 +6,7 @@ const SENSITIVE_NORMALIZED_KEYS = new Set([
   'clientsecret', 'privatekey', 'accesstoken', 'refreshtoken', 'idtoken',
   'authtoken', 'bearertoken', 'sessiontoken', 'githubtoken', 'arcapikey',
   'baseurl', 'endpoint', 'providerurl', 'providerendpoint', 'model', 'modelid', 'modelname',
+  'rawreasoning', 'reasoningcontent', 'thinkingcontent', 'chainofthought',
 ]);
 const SAFE_FINGERPRINT_KEY = /fingerprint|hash|sha|digest/i;
 const URL = /https?:\/\/[^\s"'<>]+/gi;
