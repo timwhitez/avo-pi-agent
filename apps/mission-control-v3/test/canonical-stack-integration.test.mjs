@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { buildRunLaunch } from '../lib/run-contract.mjs';
 import {
@@ -130,7 +131,7 @@ test('usage telemetry ignores coercible arrays and booleans while preserving gen
 });
 
 test('the authenticated control plane overwrites all base deltas with the strict summary helper', () => {
-  const source = fs.readFileSync(path.join(process.cwd(), 'lib', 'control-plane.mjs'), 'utf8');
+  const source = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'lib', 'control-plane.mjs'), 'utf8');
   assert.match(source, /preserveUnavailableSummaryDeltas\(base\.compareRuns/);
   assert.doesNotMatch(source, /preserveUnavailableScoreDeltas\(base\.compareRuns/);
 });

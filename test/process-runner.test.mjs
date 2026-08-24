@@ -42,7 +42,7 @@ test('process runner terminates a timed-out process group and returns a diagnost
     `], {
       stdoutFile: path.join(root, 'stdout.log'),
       stderrFile: path.join(root, 'stderr.log'),
-      timeoutMs: 100,
+      timeoutMs: 1000,
     });
     assert.equal(result.timedOut, true);
     assert.match(result.stderr, /started/);

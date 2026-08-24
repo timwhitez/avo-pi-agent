@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildRunLaunch,
   createBoundedLineBuffer,
@@ -149,7 +150,7 @@ test('bounds unterminated stdout/stderr fragments', () => {
 
 test('diagnostic wrapper is local-only, locked and permanently non-official', () => {
   const wrapper = fs.readFileSync(
-    path.resolve(process.cwd(), '..', '..', 'scripts', 'run-public-diagnostic-locked.mjs'),
+    fileURLToPath(new URL('../../../scripts/run-public-diagnostic-locked.mjs', import.meta.url)),
     'utf8',
   );
   assert.match(wrapper, /refuses GitHub Actions execution/);
