@@ -18,7 +18,8 @@ without changing the JSONL protocol:
    than raw private memory text.
 
 The round process log, complete replay corpus, exact frames, memory/workspace
-state, and private analyses are retained only in seven-day Actions artifacts.
+state, and private analyses are retained only in the trusted local run
+directory, under operator-controlled retention.
 The committed report contains detector findings, evidence ranges, official
 score, game aggregates, and hashes, but no provider endpoint/key/model ID, ARC
 credential, raw reasoning, exact private frames, or unrestricted logs.
@@ -59,11 +60,10 @@ concrete official scorecard value returned
 
 Marking a finding triaged does not produce `clean=true`.
 
-## Four-job repair chain
+## Four-round local repair chain
 
-`.github/workflows/trajectory-repair-v10.yml` serializes behind the complete
-recorded baseline and runs up to four full public-set rounds. Each round is a
-separate GitHub-hosted job with its own six-hour limit:
+The locked local repair runner serializes behind the complete recorded baseline
+and runs up to four full public-set rounds on the same trusted machine:
 
 ```text
 round 0: complete public run -> analyze -> persist evidence-linked repairs
@@ -74,8 +74,8 @@ round 3: restore state -> complete public rerun -> final analysis
 
 A clean round stops the chain immediately. A provider/runtime or replay-integrity
 failure also stops the chain, but with `clean=false`. Otherwise the next round
-receives a compressed private artifact containing only the durable memory and
-workspace state from the previous round.
+receives only the durable memory and workspace state from the previous round
+through the confined local run directory.
 
 Repairs do not hard-code game solutions. They are bounded per-game guidance
 linked to detector findings, such as prohibiting an evidenced action cycle,
@@ -85,20 +85,20 @@ same production Pi loop remains responsible for the next experiment.
 
 ## Final publication and acceptance
 
-The final job combines all completed rounds, downloads the latest recorded
-complete-public redacted baseline artifact, validates the public/private
-boundary, and writes:
+The final local stage combines all completed rounds, validates the
+public/private boundary, and writes:
 
 - `docs/runs/automation/latest-results.redacted.json`
 - `docs/runs/automation/latest-results.md`
 
-It also comments Issues #1, #3, and #4. The benchmark branch's final acceptance
-workflow then requires:
+After local validation, a reviewer may add only the redacted result to the
+tracking issues. Final acceptance requires:
 
 - complete public set and non-null official score;
 - detector-complete clean trajectory result;
 - verified final CopilotKit Draft PR;
 - all tracked feature PRs unmerged, with every open PR still Draft.
 
-Failure of any condition is published as a failing commit status with explicit
-failure codes; it is never converted into a success claim.
+Failure of any condition remains a redacted local failure report with explicit
+failure codes; it is never converted into a success claim. GitHub Actions are
+outside this execution path.

@@ -147,7 +147,8 @@ local score.
 - `npm run security:scan` rejects common key forms, private keys, literal bearer
   tokens, accidental environment files and literal IPv4 provider endpoints.
 - Error messages are redacted before display.
-- CI runs tests and secret scanning before merge.
+- Local release gates run the complete test suite and secret scan before review;
+  benchmark validation is never delegated to GitHub Actions.
 
 No provider-specific private value is present in this repository or its initial
 git history.
