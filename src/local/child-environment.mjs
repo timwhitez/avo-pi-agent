@@ -57,6 +57,7 @@ const AVO_RUNTIME_KEYS = Object.freeze([
   'AVO_TRAJECTORY_DIR',
   'AVO_BENCHMARK_TIMEOUT_MS',
   'AVO_PROVIDER_RESPONSE_MAX_BYTES',
+  'AVO_PI_SMOKE_TIMEOUT_MS',
   'AVO_REPAIR_ROUND',
   'AVO_REPAIR_RUN_ID',
   'AVO_REPAIR_MAX_ROUNDS',
@@ -74,6 +75,13 @@ const PROXY_KEYS = Object.freeze([
   'https_proxy',
   'all_proxy',
   'no_proxy',
+]);
+
+const PROXY_ACTIVATION_KEYS = Object.freeze([
+  // Node's built-in fetch/OpenAI transport does not consume HTTP(S)_PROXY
+  // unless environment-proxy support is explicitly enabled. Keep this
+  // opt-in coupled to the proxy-value allowlist.
+  'NODE_USE_ENV_PROXY',
 ]);
 
 const OVERRIDE_KEYS = new Set([
@@ -111,7 +119,10 @@ export function buildChildEnvironment({
   const result = {};
   copyKnown(result, source, BASE_KEYS);
   if (!result.PATH && process.env.PATH) result.PATH = String(process.env.PATH);
-  if (allowProxy) copyKnown(result, source, PROXY_KEYS);
+  if (allowProxy) {
+    copyKnown(result, source, PROXY_KEYS);
+    copyKnown(result, source, PROXY_ACTIVATION_KEYS);
+  }
 
   if (profile === 'agent') copyKnown(result, source, PROVIDER_KEYS);
   if (profile === 'agent' || profile === 'arc') {

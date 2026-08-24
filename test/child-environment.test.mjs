@@ -37,6 +37,7 @@ function hostileSource() {
     LD_PRELOAD: '/tmp/inject.so',
     DATABASE_URL: 'postgres://secret',
     HTTPS_PROXY: 'http://user:pass@proxy.invalid:8080',
+    NODE_USE_ENV_PROXY: '1',
   };
 }
 
@@ -51,7 +52,7 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   for (const key of [
     'AVO_MISSION_CONTROL_ACCESS_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY',
     'NPM_TOKEN', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PYTHONPATH', 'LD_PRELOAD',
-    'DATABASE_URL', 'HTTPS_PROXY',
+    'DATABASE_URL', 'HTTPS_PROXY', 'NODE_USE_ENV_PROXY',
   ]) assert.equal(Object.hasOwn(env, key), false, key);
 });
 
@@ -72,6 +73,7 @@ test('unknown overrides fail closed and proxy inheritance is explicit opt-in', (
   }), /override is not allowed/);
   const env = buildAgentChildEnvironment({ source: hostileSource(), allowProxy: true });
   assert.equal(env.HTTPS_PROXY, hostileSource().HTTPS_PROXY);
+  assert.equal(env.NODE_USE_ENV_PROXY, '1');
 });
 
 test('utility child gets no provider, ARC, or unrelated credentials', () => {
