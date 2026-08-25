@@ -235,9 +235,70 @@ test('a synchronous reader failure clears the pending deadline timer', async () 
   assert.ok(Date.now() - startedAt < 1000);
 });
 
-test('CopilotKit route forwards only the bounded replacement request', () => {
+test('credential-bearing headers are stripped before forwarding to a downstream runtime', async () => {
+  const request = new Request('https://mission.example/api/copilotkit', {
+    method: 'POST',
+    headers: {
+      authorization: 'Basic dXNlcjpwcml2YXRlLXRva2Vu',
+      cookie: 'avo_mc_session=private-session-id',
+      'proxy-authorization': 'Basic cHJveHk6cHJpdmF0ZQ==',
+      'x-avo-csrf': 'private-csrf-token',
+      'content-type': 'application/json',
+      'x-copilotkit-runtime-client-gql-version': '1',
+    },
+    body: '{"messages":[]}',
+  });
+  const bounded = await createBoundedRequest(request, {
+    maxBytes: 1024,
+    stripHeaders: [
+      'Authorization',
+      'proxy-authorization',
+      'COOKIE',
+      'x-avo-csrf',
+      'authorization',
+    ],
+  });
+  assert.equal(bounded.headers.get('authorization'), null);
+  assert.equal(bounded.headers.get('proxy-authorization'), null);
+  assert.equal(bounded.headers.get('cookie'), null);
+  assert.equal(bounded.headers.get('x-avo-csrf'), null);
+  assert.equal(bounded.headers.get('content-type'), 'application/json');
+  assert.equal(bounded.headers.get('x-copilotkit-runtime-client-gql-version'), '1');
+  assert.equal(request.headers.get('authorization'), 'Basic dXNlcjpwcml2YXRlLXRva2Vu');
+});
+
+test('invalid stripHeaders configuration fails before acquiring or consuming a body reader', async () => {
+  let readerAcquisitions = 0;
+  const request = {
+    headers: new Headers(),
+    signal: new AbortController().signal,
+    body: {
+      getReader() {
+        readerAcquisitions += 1;
+        throw new Error('reader must not be acquired');
+      },
+    },
+  };
+  for (const stripHeaders of [
+    ['valid', 'bad header'],
+    ['valid', 123],
+    'authorization',
+  ]) {
+    await assert.rejects(
+      () => createBoundedRequest(request, { stripHeaders }),
+      /stripHeaders/,
+    );
+  }
+  assert.equal(readerAcquisitions, 0);
+});
+
+test('CopilotKit route forwards only bounded bytes after removing Mission Control credentials', () => {
   const route = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
-  assert.match(route, /createBoundedRequestBody\(request, \{ maxBytes: 1024 \* 1024 \}\)/);
+  assert.match(route, /const COPILOT_FORWARD_STRIP_HEADERS = Object\.freeze\(\[/);
+  for (const header of ['authorization', 'proxy-authorization', 'cookie', 'x-avo-csrf']) {
+    assert.match(route, new RegExp(`['"]${header}['"]`));
+  }
+  assert.match(route, /createBoundedRequestBody\(request,\s*\{[\s\S]*maxBytes: 1024 \* 1024,[\s\S]*stripHeaders: COPILOT_FORWARD_STRIP_HEADERS,[\s\S]*\}\)/);
   assert.match(route, /endpoint\.handleRequest\(boundedRequest\)/);
   assert.doesNotMatch(route, /endpoint\.handleRequest\(request\)/);
 });
