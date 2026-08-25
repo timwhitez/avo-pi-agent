@@ -57,15 +57,17 @@ export class EvidenceStore {
     }
     const currentSize = before?.size ?? 0;
     if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
-    const fd = fs.openSync(
-      this.file,
-      fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollowFlag(),
-      0o600,
-    );
+    const { fd, created } = openEvidenceAppendFile(this.file, before);
     try {
       const opened = fs.fstatSync(fd);
-      if (!opened.isFile() || (before && !sameFileIdentity(before, opened))) {
+      if (!opened.isFile()) throw new Error('evidence store append target must be a regular file');
+      if (created) {
+        if (opened.size !== 0) throw new Error('new evidence store was not empty after exclusive creation');
+      } else if (!sameFileIdentity(before, opened)) {
         throw new Error('evidence store changed during secure append');
+      }
+      if (opened.size + bytes > this.maxFileBytes) {
+        throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
       }
       fs.writeFileSync(fd, line, 'utf8');
       fs.fsyncSync(fd);
@@ -161,6 +163,22 @@ export class EvidenceStore {
     fs.renameSync(temporary, this.file);
     const directory = fs.openSync(this.root, 'r');
     try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  }
+}
+
+function openEvidenceAppendFile(file, before) {
+  const baseFlags = fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollowFlag();
+  if (before) return { fd: fs.openSync(file, baseFlags), created: false };
+  try {
+    return {
+      fd: fs.openSync(file, baseFlags | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600),
+      created: true,
+    };
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw new Error('evidence store appeared during secure create; reload before append', { cause: error });
+    }
+    throw error;
   }
 }
 
