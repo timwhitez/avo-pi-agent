@@ -46,6 +46,46 @@ test('guard classifies only canonical repository child targets', () => {
   );
 });
 
+test('guard uses only the actual interpreter entrypoint', () => {
+  assert.equal(
+    classifyChild('python3', ['-c', 'print(1)', 'bridge/arc_bridge.py']),
+    'utility',
+  );
+  assert.equal(
+    classifyChild('python3', ['-m', 'http.server', 'bridge/arc_bridge.py']),
+    'utility',
+  );
+  assert.equal(
+    classifyChild(process.execPath, ['-e', 'console.log(1)', 'scripts/run-real-public.mjs']),
+    'utility',
+  );
+  assert.equal(
+    classifyChild(process.execPath, ['--test', 'scripts/run-real-public.mjs']),
+    'utility',
+  );
+  assert.equal(classifyChild('bash', ['scripts/run-real-public.mjs']), 'utility');
+  assert.equal(classifyChild('python3', ['--', 'bridge/arc_bridge.py']), 'arc');
+  assert.equal(classifyChild(process.execPath, ['--', 'scripts/run-real-public.mjs']), 'agent');
+});
+
+test('trailing trusted paths cannot grant ARC or Provider values', () => {
+  const utilityArc = guardedOptions(
+    'python3',
+    ['-c', 'print(1)', 'bridge/arc_bridge.py'],
+    { env: registeredSource() },
+  );
+  assert.equal(Object.hasOwn(utilityArc.env, 'ARC_API_KEY'), false);
+  assert.equal(Object.hasOwn(utilityArc.env, 'AVO_ARC_AUTH_MODE'), false);
+
+  const utilityAgent = guardedOptions(
+    process.execPath,
+    ['-e', 'console.log(1)', 'scripts/run-real-public.mjs'],
+    { env: source() },
+  );
+  assert.equal(Object.hasOwn(utilityAgent.env, 'OPENAI_API_KEY'), false);
+  assert.equal(Object.hasOwn(utilityAgent.env, 'OPENAI_MODEL'), false);
+});
+
 test('generic Python utilities cannot receive a registered ARC credential', () => {
   const utility = guardedOptions('python3', ['-c', 'print(1)'], {
     env: registeredSource(),
