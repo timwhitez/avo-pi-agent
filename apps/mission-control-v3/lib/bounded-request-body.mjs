@@ -1,6 +1,9 @@
+import { performance } from 'node:perf_hooks';
+
 const DEFAULT_MAX_BYTES = 32 * 1024;
 const DEFAULT_MAX_JSON_NODES = 20_000;
 const DEFAULT_MAX_JSON_DEPTH = 32;
+const DEFAULT_READ_TIMEOUT_MS = 30_000;
 
 export function assertDeclaredContentLength(request, maxBytes = DEFAULT_MAX_BYTES) {
   const limit = boundedInteger(maxBytes, 1, 16 * 1024 * 1024, DEFAULT_MAX_BYTES, 'maxBytes');
@@ -20,8 +23,19 @@ export function assertDeclaredContentLength(request, maxBytes = DEFAULT_MAX_BYTE
   return { limit, declaredBytes };
 }
 
-export async function readBoundedRequestBody(request, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+export async function readBoundedRequestBody(request, {
+  maxBytes = DEFAULT_MAX_BYTES,
+  timeoutMs = DEFAULT_READ_TIMEOUT_MS,
+} = {}) {
   const { limit, declaredBytes } = assertDeclaredContentLength(request, maxBytes);
+  const readTimeoutMs = boundedInteger(
+    timeoutMs,
+    1,
+    10 * 60 * 1000,
+    DEFAULT_READ_TIMEOUT_MS,
+    'timeoutMs',
+  );
+  const deadline = performance.now() + readTimeoutMs;
   const body = request?.body;
   if (!body) {
     if (declaredBytes !== null && declaredBytes !== 0) {
@@ -38,7 +52,7 @@ export async function readBoundedRequestBody(request, { maxBytes = DEFAULT_MAX_B
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await readChunk(reader, request?.signal);
+      const { done, value } = await readChunk(reader, request?.signal, deadline);
       if (done) break;
       const chunk = normalizeChunk(value);
       if (chunk.byteLength > limit - total) {
@@ -64,10 +78,11 @@ export async function readBoundedRequestBody(request, { maxBytes = DEFAULT_MAX_B
 
 export async function readBoundedJsonBody(request, {
   maxBytes = DEFAULT_MAX_BYTES,
+  timeoutMs = DEFAULT_READ_TIMEOUT_MS,
   maxJsonNodes = DEFAULT_MAX_JSON_NODES,
   maxJsonDepth = DEFAULT_MAX_JSON_DEPTH,
 } = {}) {
-  const bytes = await readBoundedRequestBody(request, { maxBytes });
+  const bytes = await readBoundedRequestBody(request, { maxBytes, timeoutMs });
   if (bytes.length === 0) return {};
   let text;
   try {
@@ -86,8 +101,11 @@ export async function readBoundedJsonBody(request, {
   return value;
 }
 
-export async function createBoundedRequest(request, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
-  const bytes = await readBoundedRequestBody(request, { maxBytes });
+export async function createBoundedRequest(request, {
+  maxBytes = DEFAULT_MAX_BYTES,
+  timeoutMs = DEFAULT_READ_TIMEOUT_MS,
+} = {}) {
+  const bytes = await readBoundedRequestBody(request, { maxBytes, timeoutMs });
   const headers = new Headers(request.headers);
   headers.delete('transfer-encoding');
   headers.set('content-length', String(bytes.length));
@@ -125,13 +143,20 @@ export function assertJsonComplexity(value, {
   return { nodes };
 }
 
-async function readChunk(reader, signal) {
+async function readChunk(reader, signal, deadline) {
   if (signal?.aborted) throw requestError('Request body was aborted', 408);
+  const remainingMs = deadline - performance.now();
+  if (remainingMs <= 0) {
+    void cancelQuietly(reader, 'request body read timed out');
+    throw requestError('Request body read timed out', 408);
+  }
   return await new Promise((resolve, reject) => {
     let settled = false;
+    let timer;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       signal?.removeEventListener?.('abort', onAbort);
       callback(value);
     };
@@ -139,11 +164,19 @@ async function readChunk(reader, signal) {
       void cancelQuietly(reader, 'request aborted');
       finish(reject, requestError('Request body was aborted', 408));
     };
+    const onTimeout = () => {
+      void cancelQuietly(reader, 'request body read timed out');
+      finish(reject, requestError('Request body read timed out', 408));
+    };
+    timer = setTimeout(onTimeout, Math.max(1, Math.ceil(remainingMs)));
     signal?.addEventListener?.('abort', onAbort, { once: true });
-    Promise.resolve(reader.read()).then(
-      (result) => finish(resolve, result),
-      () => finish(reject, requestError('Request body could not be read', signal?.aborted ? 408 : 400)),
-    );
+    if (signal?.aborted) onAbort();
+    if (!settled) {
+      Promise.resolve().then(() => reader.read()).then(
+        (result) => finish(resolve, result),
+        () => finish(reject, requestError('Request body could not be read', signal?.aborted ? 408 : 400)),
+      );
+    }
   });
 }
 
