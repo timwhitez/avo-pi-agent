@@ -198,14 +198,27 @@ class Arcade:
                 "games": len(self.environments), "levels": completed}
   `);
 
+  // The production child-environment boundary deliberately strips
+  // PYTHONPATH. Exercise the full runner through an explicit Python shim
+  // instead of weakening that boundary for a test-only fixture.
+  const fakePython = path.join(root, 'fake-python');
+  fs.writeFileSync(fakePython, `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const result = spawnSync('python3', process.argv.slice(2), {
+  stdio: 'inherit',
+  env: { ...process.env, PYTHONPATH: ${JSON.stringify(fakePy)} },
+});
+process.exit(result.status ?? 1);
+`);
+  fs.chmodSync(fakePython, 0o755);
+
   const result = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
     env: {
       ...process.env,
-      PYTHONPATH: fakePy,
-      ARC_PYTHON: 'python',
+      ARC_PYTHON: fakePython,
       AVO_ARC_AUTH_MODE: 'registered',
       ARC_API_KEY: 'mock-test-key',
       OPENAI_BASE_URL: 'http://localhost:1/v1',

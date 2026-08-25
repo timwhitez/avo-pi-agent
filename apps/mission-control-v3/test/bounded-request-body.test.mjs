@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createBoundedRequest,
   readBoundedJsonBody,
@@ -142,7 +143,7 @@ test('abort and stream failures expose stable messages without raw body details'
 });
 
 test('CopilotKit route forwards only the bounded replacement request', () => {
-  const route = fs.readFileSync(path.join(process.cwd(), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
+  const route = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
   assert.match(route, /createBoundedRequestBody\(request, \{ maxBytes: 1024 \* 1024 \}\)/);
   assert.match(route, /endpoint\.handleRequest\(boundedRequest\)/);
   assert.doesNotMatch(route, /endpoint\.handleRequest\(request\)/);

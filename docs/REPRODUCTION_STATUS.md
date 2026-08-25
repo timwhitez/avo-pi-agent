@@ -13,24 +13,23 @@ execution. No synthetic or mocked result is treated as an ARC-AGI-3 score.
 | Failed-attempt retention and continuous lineage | Implemented | Separate proposals, attempts and committed records. |
 | Conditional evidence-backed supervisor | Implemented | Repeated-state/cycle detector with multiple directions. |
 | Confined persistent scratch workspace | Implemented as an engineering adaptation | Node wrapper plus resource-limited Python helper. |
-| Offline test suite | Passed locally | 20 tests passed in the implementation worktree. |
+| Offline test suite | Passed locally | 235 tests passed in the audited implementation worktree. |
 | Offline synthetic contract demo | Passed locally | 25/25 synthetic environments, 75/75 synthetic levels, 816 actions. |
-| Real provider preflight | Not completed in this execution environment | The available build container cannot reach the supplied private endpoint. |
-| Official ARC-AGI-3 public-set run | Not executed | No real-provider trajectory or official scorecard exists yet. |
+| Real provider preflight | Passed locally | Fresh Responses nonce attestation and a Pi SDK streaming tool-call attestation both passed without publishing provider values. |
+| Official ARC-AGI-3 public-set run | No accepted result recorded | The complete local runner remains fail-closed until all dynamically discovered games and the official-score gate succeed. |
 | Concrete official score | Unavailable | Must come from the official runtime/scorecard. |
 | Real trajectory diagnosis and repair | Pending real run | Detector/replay workstream is tracked separately. |
 | CopilotKit frontend | Pending backend contract stabilization | Intentionally scheduled last. |
 
 ## Why a real score is not recorded here
 
-The current build environment cannot reach the private provider endpoint, npm or
-PyPI/ARC services, and the GitHub connector cannot create repository secrets or
-dispatch a protected workflow. Sending the already disclosed credential through
-source, workflow YAML, issue text or commit history would violate the project's
-secret boundary.
+Local access to the provider and official ARC packages has been verified, but a
+successful preflight is not an ARC score. A score may be recorded only after a
+single fail-closed local run satisfies the complete-game, production-Pi,
+trajectory-integrity, redaction, and explicit official-score-origin gates.
+Runtime credentials remain outside source, issues, pull requests, and logs.
 
-A real run therefore requires a network-enabled runner that receives provider
-and ARC values as runtime-only secrets. The benchmark workstream must then:
+The local benchmark workstream must:
 
 1. issue a real non-mock Responses request;
 2. verify the official Pi production path and official `arc-agi` package;

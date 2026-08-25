@@ -119,6 +119,23 @@ test('atomic JSON writer fsyncs a complete mode-0600 file and leaves no temp on 
   }
 });
 
+test('atomic JSON writer rejects dangling symlink targets instead of replacing them', () => {
+  const root = temporaryRoot('avo-report-dangling-target');
+  try {
+    const file = path.join(root, 'report.json');
+    const missing = path.join(root, 'missing.json');
+    fs.symlinkSync(missing, file);
+    assert.throws(
+      () => writeJsonAtomic(file, { status: 'complete' }, { root }),
+      /regular non-symlink file/,
+    );
+    assert.equal(fs.lstatSync(file).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(missing), false);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test('findNewJsonReports returns only bounded new regular JSON files', () => {
   const root = temporaryRoot('avo-report-new');
   try {

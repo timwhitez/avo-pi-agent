@@ -51,7 +51,7 @@ export function classifyChild(command, args = []) {
     return 'arc';
   }
   if (values.some((value) => (
-    /(?:^|\/)scripts\/(?:local-preflight|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs$/.test(value)
+    /(?:^|\/)scripts\/(?:local-preflight|pi-provider-smoke|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs$/.test(value)
     || /(?:^|\/)src\/cli\.mjs$/.test(value)
   ))) {
     return 'agent';

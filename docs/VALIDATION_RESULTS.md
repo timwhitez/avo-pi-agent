@@ -2,19 +2,23 @@
 
 ## Local implementation validation
 
-The AVO conformance implementation was exercised in a network-isolated local
-worktree with the production code paths imported but without contacting a model
-provider or official ARC service.
+The AVO conformance implementation was exercised in a local audited worktree.
+Offline checks were followed by real provider and official-runtime preflights;
+no preflight result is treated as a benchmark score.
 
 Completed checks:
 
-- Node test suite: **20 passed, 0 failed**.
+- Node test suite: **235 passed, 0 failed**.
 - Secret scan: **passed**.
 - Python syntax compilation for the official ARC bridge and scratch helper:
   **passed**.
 - Deterministic offline contract demo: **25/25 synthetic games completed**,
   **75/75 synthetic levels**, **816 synthetic environment actions**.
 - Existing `main` regression tests against the updated core: **passed**.
+- Fresh real Responses nonce preflight: **passed**.
+- Production Pi SDK streaming tool-call preflight: **passed**.
+- Official `arc-agi`/`arcengine` package and 25-game discovery gate:
+  **passed**.
 
 ## What these checks establish
 
@@ -36,7 +40,7 @@ They establish that:
 
 They do **not** establish:
 
-- connectivity or compatibility with the supplied real provider;
+- completion of a provider-backed action trajectory for every public game;
 - model quality on any ARC public game;
 - an official ARC score or RHAE value;
 - completion of the full public game set;
@@ -61,5 +65,6 @@ A future real benchmark report must contain, at minimum:
 - explicit skipped/duplicate/incomplete-game failures;
 - trajectory detector findings and triage state.
 
-Until those artifacts exist, the repository's official public-run status remains
-**not executed** and its official score remains **unavailable**.
+Until that evidence exists and every acceptance gate succeeds, the repository
+has **no accepted official public-run result** and its official score remains
+**unavailable**.

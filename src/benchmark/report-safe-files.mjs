@@ -207,9 +207,14 @@ function openBoundedRegularFile(file, { root, maxBytes, purpose }) {
 function assertSafeReplaceTarget(target, root, { exclusive = false } = {}) {
   const rootPath = fs.realpathSync(path.resolve(root));
   assertContained(rootPath, target);
-  if (!fs.existsSync(target)) return;
+  let stat;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
   if (exclusive) throw new Error(`atomic JSON target already exists: ${safeRelative(rootPath, target)}`);
-  const stat = fs.lstatSync(target);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw new Error(`atomic JSON target must be a regular non-symlink file: ${safeRelative(rootPath, target)}`);
   }
