@@ -2,40 +2,43 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { ensureAuthorityDirectory } from './authority-directory.mjs';
+
+const LOCK_NAME = '.local-execution.lock';
+const LOCK_MAX_BYTES = 16 * 1024;
+
 export function acquireLocalExecutionLock({
   root = process.cwd(),
   runId,
   kind,
   inheritedToken = process.env.AVO_LOCAL_LOCK_TOKEN || '',
 } = {}) {
-  const lockFile = path.resolve(root, 'runs/private/.local-execution.lock');
-  fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
+  const authority = captureLockAuthority(root, { create: true });
+  const lockFile = path.join(authority.directory, LOCK_NAME);
 
   if (inheritedToken) {
-    const current = readLock(lockFile);
-    if (!current || !constantEqual(current.token, inheritedToken)) {
+    const current = readLockSnapshot(authority, lockFile);
+    if (!current || !constantEqual(current.value.token, inheritedToken)) {
       throw new Error('inherited local execution lock token is invalid or stale');
     }
     return frozenHandle({ lockFile, token: inheritedToken, inherited: true, release() {} });
   }
 
   const token = crypto.randomBytes(32).toString('hex');
-  let descriptor;
+  let created;
   for (;;) {
     try {
-      descriptor = fs.openSync(lockFile, 'wx', 0o600);
+      created = createExclusiveLock(authority, lockFile);
       break;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
-      const current = readLock(lockFile);
+      const current = readLockSnapshot(authority, lockFile);
       if (!current) throw new Error('local execution lock exists but is unreadable; inspect it manually');
-      if (isAlive(current.pid)) {
-        throw new Error(`another local benchmark/repair execution is active (pid ${current.pid}, kind ${current.kind || 'unknown'}, run ${current.runId || 'unknown'})`);
+      if (isAlive(current.value.pid)) {
+        throw new Error(`another local benchmark/repair execution is active (pid ${current.value.pid}, kind ${current.value.kind || 'unknown'}, run ${current.value.runId || 'unknown'})`);
       }
-      const stale = `${lockFile}.stale-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
       try {
-        fs.renameSync(lockFile, stale);
-        fs.rmSync(stale, { force: true });
+        removeExactLock(authority, lockFile, current.identity);
       } catch (cause) {
         throw new Error('failed to reclaim stale local execution lock', { cause });
       }
@@ -50,16 +53,28 @@ export function acquireLocalExecutionLock({
     token,
     createdAt: new Date().toISOString(),
   };
-  fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, 'utf8');
-  fs.fsyncSync(descriptor);
-  fs.closeSync(descriptor);
+  try {
+    writeAll(created.descriptor, Buffer.from(`${JSON.stringify(record)}\n`, 'utf8'));
+    fs.fsyncSync(created.descriptor);
+    const after = fs.fstatSync(created.descriptor, { bigint: true });
+    if (!sameFileIdentity(created.identity, after)) {
+      throw new Error('local execution lock identity changed while writing');
+    }
+    assertPathIdentity(lockFile, created.identity);
+    assertLockAuthority(authority);
+  } catch (error) {
+    try { fs.closeSync(created.descriptor); } catch {}
+    try { removeExactLock(authority, lockFile, created.identity); } catch {}
+    throw error;
+  }
+  fs.closeSync(created.descriptor);
+  fsyncDirectory(authority.directory);
   let released = false;
 
   const releaseOnExit = () => {
     if (released) return;
     try {
-      const current = readLock(lockFile);
-      if (current && constantEqual(current.token, token)) fs.rmSync(lockFile, { force: true });
+      releaseOwnedLock(authority, lockFile, token, created.identity);
     } catch {}
   };
   process.once('exit', releaseOnExit);
@@ -70,11 +85,7 @@ export function acquireLocalExecutionLock({
     inherited: false,
     release() {
       if (released) return;
-      const current = readLock(lockFile);
-      if (!current || !constantEqual(current.token, token)) {
-        throw new Error('refusing to release a local execution lock owned by another process');
-      }
-      fs.rmSync(lockFile, { force: true });
+      releaseOwnedLock(authority, lockFile, token, created.identity);
       released = true;
       process.removeListener('exit', releaseOnExit);
     },
@@ -82,17 +93,226 @@ export function acquireLocalExecutionLock({
 }
 
 export function readLocalExecutionLock(root = process.cwd()) {
-  return readLock(path.resolve(root, 'runs/private/.local-execution.lock'));
-}
-
-function readLock(file) {
   try {
-    const stat = fs.lstatSync(file);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 16 * 1024) return null;
-    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return value && typeof value === 'object' ? value : null;
+    const authority = captureLockAuthority(root, { create: false });
+    if (!authority) return null;
+    return readLockSnapshot(authority, path.join(authority.directory, LOCK_NAME))?.value || null;
   } catch {
     return null;
+  }
+}
+
+function captureLockAuthority(root, { create }) {
+  const rootInput = path.resolve(root);
+  if (create) {
+    ensureAuthorityDirectory(path.join(rootInput, 'runs', 'private'), {
+      root: rootInput,
+      mode: 0o700,
+      purpose: 'local execution lock directory',
+    });
+  }
+
+  let rootPath;
+  try {
+    const rootStat = fs.lstatSync(rootInput, { bigint: true });
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw new Error('local execution lock root must be a regular non-symlink directory');
+    }
+    rootPath = fs.realpathSync(rootInput);
+  } catch (error) {
+    if (!create && error?.code === 'ENOENT') return null;
+    throw error;
+  }
+
+  const paths = [rootPath, path.join(rootPath, 'runs'), path.join(rootPath, 'runs', 'private')];
+  const components = [];
+  for (const component of paths) {
+    let stat;
+    try {
+      stat = fs.lstatSync(component, { bigint: true });
+    } catch (error) {
+      if (!create && error?.code === 'ENOENT') return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error('local execution lock authority rejects a non-directory or symlink component');
+    }
+    const real = fs.realpathSync(component);
+    if (!isContained(rootPath, real)) throw new Error('local execution lock authority escapes its root');
+    components.push({ path: component, identity: fileIdentity(stat) });
+  }
+
+  const authority = Object.freeze({
+    root: rootPath,
+    directory: paths.at(-1),
+    components: Object.freeze(components),
+  });
+  assertLockAuthority(authority);
+  return authority;
+}
+
+function assertLockAuthority(authority) {
+  for (const component of authority.components) {
+    const stat = fs.lstatSync(component.path, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory() || !sameFileIdentity(component.identity, stat)) {
+      throw new Error('local execution lock authority changed during operation');
+    }
+  }
+  const real = fs.realpathSync(authority.directory);
+  if (real !== authority.directory || !isContained(authority.root, real)) {
+    throw new Error('local execution lock directory changed during operation');
+  }
+}
+
+function createExclusiveLock(authority, lockFile) {
+  assertLockAuthority(authority);
+  const flags = fs.constants.O_WRONLY
+    | fs.constants.O_CREAT
+    | fs.constants.O_EXCL
+    | (fs.constants.O_NOFOLLOW ?? 0);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(lockFile, flags, 0o600);
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n) {
+      throw new Error('local execution lock must be a singly linked regular file');
+    }
+    const identity = fileIdentity(opened);
+    assertPathIdentity(lockFile, identity);
+    assertLockAuthority(authority);
+    return { descriptor, identity };
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+    throw error;
+  }
+}
+
+function readLockSnapshot(authority, lockFile) {
+  let descriptor;
+  try {
+    assertLockAuthority(authority);
+    const before = fs.lstatSync(lockFile, { bigint: true });
+    if (!isReadableLockStat(before)) return null;
+    descriptor = fs.openSync(lockFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameStableFile(before, opened) || !isReadableLockStat(opened)) return null;
+
+    const bytes = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) return null;
+      offset += count;
+    }
+
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    const pathAfter = fs.lstatSync(lockFile, { bigint: true });
+    if (!sameStableFile(opened, after) || !sameStableFile(after, pathAfter)) return null;
+    assertLockAuthority(authority);
+    const value = JSON.parse(bytes.toString('utf8'));
+    return value && typeof value === 'object'
+      ? { value, identity: fileIdentity(after) }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function releaseOwnedLock(authority, lockFile, token, identity) {
+  const current = readLockSnapshot(authority, lockFile);
+  if (!current
+    || !sameFileIdentity(current.identity, identity)
+    || !constantEqual(current.value.token, token)) {
+    throw new Error('refusing to release a local execution lock owned by another process');
+  }
+  removeExactLock(authority, lockFile, identity);
+}
+
+function removeExactLock(authority, lockFile, identity) {
+  assertLockAuthority(authority);
+  assertPathIdentity(lockFile, identity);
+  const tombstone = path.join(
+    authority.directory,
+    `${LOCK_NAME}.remove-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`,
+  );
+  fs.renameSync(lockFile, tombstone);
+  let moved;
+  try {
+    moved = fs.lstatSync(tombstone, { bigint: true });
+    if (moved.isSymbolicLink() || !moved.isFile() || !sameFileIdentity(identity, moved)) {
+      try {
+        if (!fs.existsSync(lockFile)) fs.renameSync(tombstone, lockFile);
+      } catch {}
+      throw new Error('local execution lock changed before atomic removal');
+    }
+    assertLockAuthority(authority);
+    fs.unlinkSync(tombstone);
+    fsyncDirectory(authority.directory);
+  } catch (error) {
+    if (moved && sameFileIdentity(identity, moved)) {
+      try {
+        if (!fs.existsSync(lockFile)) fs.renameSync(tombstone, lockFile);
+      } catch {}
+    }
+    throw error;
+  }
+}
+
+function assertPathIdentity(file, identity) {
+  const stat = fs.lstatSync(file, { bigint: true });
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n || !sameFileIdentity(identity, stat)) {
+    throw new Error('local execution lock path does not name the expected regular file');
+  }
+}
+
+function isReadableLockStat(stat) {
+  return stat.isFile()
+    && !stat.isSymbolicLink()
+    && stat.nlink === 1n
+    && stat.size >= 1n
+    && stat.size <= BigInt(LOCK_MAX_BYTES);
+}
+
+function sameStableFile(left, right) {
+  return sameFileIdentity(left, right)
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function fileIdentity(stat) {
+  return Object.freeze({ dev: stat.dev, ino: stat.ino });
+}
+
+function sameFileIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+function isContained(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function writeAll(descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) offset += fs.writeSync(descriptor, bytes, offset, bytes.length - offset);
+}
+
+function fsyncDirectory(directory) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(directory, fs.constants.O_RDONLY);
+    fs.fsyncSync(descriptor);
+  } catch {} finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
   }
 }
 
