@@ -17,6 +17,9 @@ export async function runProcess(command, args, {
   onStdout = null,
   onStderr = null,
 } = {}) {
+  const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
+  const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
+  const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
   const stdoutSink = stdoutFile ? createSink(stdoutFile) : null;
   const stderrSink = stderrFile ? createSink(stderrFile) : null;
   const child = spawn(command, args, {
@@ -35,9 +38,6 @@ export async function runProcess(command, args, {
   let spawnError = null;
   let sinkError = null;
   let streamError = null;
-  const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
-  const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
-  const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
 
   for (const sink of [stdoutSink, stderrSink].filter(Boolean)) {
     sink.on('error', (error) => {
@@ -157,7 +157,6 @@ function invokeCallback(callback, chunk, label, fail) {
     return false;
   }
 }
-
 
 function closeChildOutputStreams(child) {
   try { child?.stdout?.destroy(); } catch {}

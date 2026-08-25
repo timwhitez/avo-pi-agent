@@ -1,10 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
+import { runProcess } from '../src/benchmark/process-runner.mjs';
 import { run } from '../src/benchmark/provenance.mjs';
 
 const unixOnly = { skip: process.platform === 'win32' };
+
+
+test('shared runner validates byte limits before spawning a child', async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-runner-limit-'));
+  const marker = path.join(root, 'started');
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    () => runProcess(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`], {
+      maxStdoutBytes: 0,
+    }),
+    /maxStdoutBytes must be a positive safe integer/,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(fs.existsSync(marker), false);
+});
 
 test('provenance waits for late inherited output and preserves callbacks', unixOnly, async () => {
   let callbackOutput = '';
