@@ -20,7 +20,9 @@ test('restores durable evidence and continues a monotonic sequence', () => {
     const c = second.append({ type: 'environment-action', action: 'ACTION2', actionIndex: 2 });
     assert.equal(c.sequence, 3);
     assert.match(c.id, /^evidence-000003-[a-f0-9]{12}$/);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('detects corruption instead of silently trusting persisted evidence', () => {
@@ -32,7 +34,9 @@ test('detects corruption instead of silently trusting persisted evidence', () =>
     line.actionIndex = 999;
     fs.writeFileSync(store.file, `${JSON.stringify(line)}\n`);
     assert.throws(() => new EvidenceStore(dir, 'game-b').load(), /integrity validation/);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('compaction retains protected evidence and a bounded recent tail', () => {
@@ -46,7 +50,9 @@ test('compaction retains protected evidence and a bounded recent tail', () => {
     const reloaded = new EvidenceStore(dir, 'game-c').load();
     assert.deepEqual(reloaded.events.map((event) => event.id), store.events.map((event) => event.id));
     assert.throws(() => store.compact({ protectedIds: ['missing'] }), /protected evidence is missing/);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('enforces event and file limits before memory exhaustion', () => {
@@ -58,7 +64,9 @@ test('enforces event and file limits before memory exhaustion', () => {
     assert.throws(() => store.append({ type: 'observation' }), /exceeds 2 events/);
     const other = new EvidenceStore(dir, 'game-e', { maxEventBytes: 256 }).load();
     assert.throws(() => other.append({ type: 'observation', text: 'x'.repeat(1000) }), /event exceeds/);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('evidence persistence rejects symlink roots and dangling store targets', () => {
@@ -67,14 +75,24 @@ test('evidence persistence rejects symlink roots and dangling store targets', ()
   try {
     const linkedRoot = path.join(dir, 'linked');
     fs.symlinkSync(outside, linkedRoot);
-    assert.throws(() => new EvidenceStore(linkedRoot, 'game-f').load(), /evidence root must be a regular non-symlink directory/);
+    assert.throws(
+      () => new EvidenceStore(linkedRoot, 'game-f').load(),
+      /evidence root must be a regular non-symlink directory/,
+    );
+
     const regular = path.join(dir, 'regular');
     fs.mkdirSync(regular);
     const store = new EvidenceStore(regular, 'game-g').load();
     fs.symlinkSync(path.join(outside, 'missing.jsonl'), store.file);
-    assert.throws(() => store.append({ type: 'observation' }), /regular non-symlink file/);
+    assert.throws(
+      () => store.append({ type: 'observation' }),
+      /regular non-symlink file/,
+    );
     assert.equal(fs.lstatSync(store.file).isSymbolicLink(), true);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test('file appearing between absent lstat and exclusive create is rejected without append', () => {
@@ -90,9 +108,16 @@ test('file appearing between absent lstat and exclusive create is rejected witho
       && (numericFlags & fs.constants.O_EXCL) !== 0;
     if (!injected && isExclusiveCreate && path.resolve(String(file)) === path.resolve(store.file)) {
       injected = true;
-      const attackFd = originalOpenSync(file, fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC, 0o600);
-      try { fs.writeSync(attackFd, Buffer.alloc(maxFileBytes, 0x41)); }
-      finally { fs.closeSync(attackFd); }
+      const attackFd = originalOpenSync(
+        file,
+        fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC,
+        0o600,
+      );
+      try {
+        fs.writeSync(attackFd, Buffer.alloc(maxFileBytes, 0x41));
+      } finally {
+        fs.closeSync(attackFd);
+      }
     }
     return originalOpenSync(file, flags, mode);
   };
