@@ -1,31 +1,42 @@
 # Real Provider ARC-AGI-3 Public Benchmark Runbook
 
 This runbook is the acceptance boundary for a **real**, non-mock public-set run.
-Offline contract games and portable loops are rejected by the benchmark runner.
-The benchmark and repair loop run only on a trusted local machine; GitHub Actions
-must not be added, dispatched, or rerun for this workstream.
+Benchmark and repair execution is supported only on a trusted local machine.
+GitHub Actions must not be added, dispatched, rerun, or used for this workstream.
 
 ## Required local runtime values
 
-Configure these only in the trusted local process environment or a mode-0600,
-gitignored local `.env`:
+Configure Provider values only in the trusted local process environment or a
+mode-0600, gitignored local `.env`:
 
-- `AVO_PROVIDER_BASE_URL`
-- `AVO_PROVIDER_API_KEY`
-- `AVO_PROVIDER_MODEL`
-- `ARC_API_KEY` when the selected official runtime path requires it
+- `OPENAI_BASE_URL` — the Responses-compatible HTTPS `/v1` base URL
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
 
-The fail-closed local runner checks the first three names before any benchmark
-game starts. Missing values produce only a redacted `configuration` failure;
-values are never printed. Rotate any key previously placed in source, shell
-history, an issue, a pull request, or another non-secret channel.
+The runtime also consumes:
+
+- `OPENAI_REASONING_EFFORT` — optional; defaults to `max`
+
+The legacy `AVO_PROVIDER_*` family is not consumed or aliased by the current
+runtime. Supplying only that family makes the real-provider preflight fail
+closed before any benchmark game starts.
+
+ARC authentication defaults to automatic anonymous bootstrap:
+
+- `AVO_ARC_AUTH_MODE=anonymous-auto` — default; `ARC_API_KEY` is forced empty
+  before the official SDK is imported
+- `AVO_ARC_AUTH_MODE=registered` — optional account-bound mode; requires a
+  non-empty `ARC_API_KEY`
 
 Optional local runtime variables:
 
-- `AVO_PROVIDER_REASONING_EFFORT` — default `max`
 - `AVO_MAX_ACTIONS` — default `1000`
 - `AVO_MAX_OUTER_TURNS` — default `1000`
 - `AVO_STALL_WINDOW` — default `8`
+
+Missing or invalid values produce only a redacted `configuration` failure;
+runtime values are never printed. Rotate any key previously placed in source,
+shell history, an issue, a pull request, or another non-secret channel.
 
 Do not paste real values into issues, pull requests, commits, files intended for
 publication, or client-side frontend configuration.
@@ -34,22 +45,22 @@ publication, or client-side frontend configuration.
 
 `scripts/run-real-public.mjs` executes these stages in order:
 
-1. validate that provider configuration is present, non-placeholder,
-   non-loopback and not in portable/test mode;
+1. validate that Provider configuration is present, non-placeholder, valid
+   HTTPS, non-loopback, and not in portable/test mode;
 2. issue a real `/responses` request and require a response ID plus model output
-   satisfying a nonce-bearing attestation instruction;
-3. require a real Pi SDK streaming turn that completes exactly one tool call;
+   satisfying a fresh challenge-bound attestation;
+3. require a real Pi SDK streaming turn that completes exactly one tool call in
+   the same filtered Agent-child environment;
 4. inspect the installed `arc-agi` and `arcengine` module paths and package
-   version, rejecting local/mock paths;
+   versions, rejecting local/mock paths;
 5. dynamically discover and freeze the complete public game set;
-6. invoke the existing production CLI for `run-public --all` with the Pi SDK
-   path;
-7. discover the newly generated JSON run report;
+6. invoke the production CLI for `run-public --all` with the Pi SDK path;
+7. discover the newly generated JSON run report for the exact run ID;
 8. reject any non-`pi-sdk` loop declaration;
-9. reject missing, duplicate, unexpected or errored game records;
-10. accept a score only from an explicit scorecard field;
+9. reject missing, duplicate, unexpected, malformed, or errored game records;
+10. accept a score only from an explicit official scorecard origin;
 11. produce private raw evidence and a separately redacted public report;
-12. scan the public report for literal secrets, URLs and network endpoints.
+12. scan the public report for literal secrets, URLs, and network endpoints.
 
 A failure at any stage exits non-zero and writes a redacted failure report. It
 does not invent a score or convert an incomplete run into a partial success.
@@ -80,34 +91,38 @@ The redacted report contains:
 - exact scorecard value and its field origin;
 - hashes of the private evidence.
 
-The model ID, provider URL, key and ARC credential are absent.
+The model ID, Provider URL, Provider key, and ARC credential are absent.
 
 ## Secure local runner
 
-On a network-enabled trusted machine:
+On a network-enabled trusted machine using the repository-supported Node
+runtime:
 
 ```bash
 npm install --ignore-scripts
 ./scripts/setup-arc.sh
 
-# Export runtime values in the current shell or a mode-0600 local .env.
+# Export the supported OPENAI_* values in this shell, or place them in a
+# mode-0600, gitignored local .env. Do not pass secrets on the command line.
 node scripts/run-real-public-locked.mjs
 ```
 
-The local `.env`, memory, workspace and run directories are ignored by git. The
-locked wrapper prevents concurrent authority runs and reclaims only provably
-stale locks.
+The local `.env`, memory, workspace, and run directories are ignored by git.
+The locked wrapper prevents concurrent authority runs and reclaims only
+provably stale locks.
 
 ## Completion criteria
 
 A run is complete only when all of these are true:
 
-- fresh real provider attestation passed;
+- fresh real Provider attestation passed;
 - production Pi streaming/tool-call attestation passed;
 - official runtime attestation passed;
 - expected game count equals actual game count;
-- no game is skipped, duplicated, unexpected or marked errored;
-- a concrete score exists at an explicit official scorecard origin;
+- no game is skipped, duplicated, unexpected, malformed, or marked errored;
+- a concrete strict numeric score exists at an accepted official scorecard
+  origin;
+- trajectory-integrity and detector-coverage gates passed;
 - redaction acceptance passed;
 - both private and redacted local evidence exist and their hashes agree.
 
