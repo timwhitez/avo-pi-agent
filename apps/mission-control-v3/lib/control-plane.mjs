@@ -1,6 +1,13 @@
 import path from 'node:path';
 import * as base from './control-plane-base.mjs';
 import { loadUsageTelemetry } from './usage-telemetry.mjs';
+import {
+  preserveUnavailableScoreDeltas,
+  preserveUnavailableSummaryDeltas,
+  usageTelemetryDeltas,
+} from './metric-deltas.mjs';
+
+export { preserveUnavailableScoreDeltas, preserveUnavailableSummaryDeltas } from './metric-deltas.mjs';
 
 const ACTIVE_STATES = new Set(['starting', 'running', 'paused', 'aborting']);
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
@@ -52,18 +59,14 @@ export function controlRun(id, action, confirmation = '', { subject } = {}) {
 export function compareRuns(baselineId, candidateId, { subject } = {}) {
   requireOwnership(baselineId, subject);
   requireOwnership(candidateId, subject);
-  const comparison = base.compareRuns(baselineId, candidateId);
+  const comparison = preserveUnavailableSummaryDeltas(base.compareRuns(baselineId, candidateId));
   const baselineTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: baselineId });
   const candidateTelemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: candidateId });
   comparison.baseline.telemetry = telemetrySummary(baselineTelemetry);
   comparison.candidate.telemetry = telemetrySummary(candidateTelemetry);
   comparison.delta = {
     ...(comparison.delta || {}),
-    inputTokens: nullableDelta(baselineTelemetry.totals?.inputTokens, candidateTelemetry.totals?.inputTokens),
-    outputTokens: nullableDelta(baselineTelemetry.totals?.outputTokens, candidateTelemetry.totals?.outputTokens),
-    totalTokens: nullableDelta(baselineTelemetry.totals?.totalTokens, candidateTelemetry.totals?.totalTokens),
-    reasoningTokens: nullableDelta(baselineTelemetry.totals?.reasoningTokens, candidateTelemetry.totals?.reasoningTokens),
-    costUsd: nullableDelta(baselineTelemetry.totals?.costUsd, candidateTelemetry.totals?.costUsd),
+    ...usageTelemetryDeltas(baselineTelemetry, candidateTelemetry),
   };
   return comparison;
 }
@@ -163,11 +166,4 @@ function telemetrySummary(value) {
     totals: value.totals,
     maxima: value.maxima,
   };
-}
-
-function nullableDelta(left, right) {
-  if (left === null || left === undefined || right === null || right === undefined) return null;
-  const a = Number(left);
-  const b = Number(right);
-  return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
 }
