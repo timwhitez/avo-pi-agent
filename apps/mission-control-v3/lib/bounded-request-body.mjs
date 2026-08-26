@@ -104,9 +104,12 @@ export async function readBoundedJsonBody(request, {
 export async function createBoundedRequest(request, {
   maxBytes = DEFAULT_MAX_BYTES,
   timeoutMs = DEFAULT_READ_TIMEOUT_MS,
+  stripHeaders = [],
 } = {}) {
+  const strippedHeaderNames = normalizeHeaderNames(stripHeaders);
   const bytes = await readBoundedRequestBody(request, { maxBytes, timeoutMs });
   const headers = new Headers(request.headers);
+  for (const name of strippedHeaderNames) headers.delete(name);
   headers.delete('transfer-encoding');
   headers.set('content-length', String(bytes.length));
   return new Request(request.url, {
@@ -178,6 +181,24 @@ async function readChunk(reader, signal, deadline) {
       );
     }
   });
+}
+
+function normalizeHeaderNames(value) {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new Error('stripHeaders must be an array of at most 64 header names');
+  }
+  const names = new Set();
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.length > 256) {
+      throw new Error('stripHeaders contains an invalid header name');
+    }
+    const name = entry.trim().toLowerCase();
+    if (!/^[!#$%&'*+\-.^_`|~0-9a-z]+$/.test(name)) {
+      throw new Error('stripHeaders contains an invalid header name');
+    }
+    names.add(name);
+  }
+  return names;
 }
 
 function normalizeChunk(value) {
