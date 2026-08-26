@@ -15,6 +15,7 @@ import {
 import { runProcess } from '../src/benchmark/process-runner.mjs';
 import {
   aggregateGameMetrics,
+  copyRegularFileExclusive,
   extractOfficialScore,
   findNewJsonReports,
   hashFile,
@@ -76,7 +77,10 @@ try {
     runId,
     gitSha,
   });
-  writeJsonAtomic(path.join(privateDir, 'provenance.json'), provenance);
+  writeJsonAtomic(path.join(privateDir, 'provenance.json'), provenance, {
+    root: privateDir,
+    exclusive: true,
+  });
 
   stage.value = 'agent-execution';
   const before = snapshotJsonFiles(runsRoot);
@@ -108,10 +112,17 @@ try {
   const selected = selectRunReport(
     findNewJsonReports(runsRoot, before)
       .filter((file) => !file.startsWith(privateDir) && file !== publicFile),
-    { runId, kind: 'official-public-environments' },
+    { runId, kind: 'official-public-environments', root: runsRoot },
   );
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
-  fs.copyFileSync(selected.file, rawRunReport, fs.constants.COPYFILE_EXCL);
+  const copiedReport = copyRegularFileExclusive(selected.file, rawRunReport, {
+    sourceRoot: runsRoot,
+    destinationRoot: privateDir,
+  });
+  const rawRunReportSha256 = hashFile(rawRunReport, { root: privateDir });
+  if (copiedReport.bytes !== selected.sourceBytes || rawRunReportSha256 !== selected.sourceSha256) {
+    throw new Error('copied report evidence differs from the validated source bytes');
+  }
 
   stage.value = 'production-loop-attestation';
   const loopAttestation = validateProductionLoops(selected.records, games.length);
@@ -135,13 +146,16 @@ try {
     artifacts: {
       rawRunReport: {
         file: path.basename(rawRunReport),
-        sha256: hashFile(rawRunReport),
+        sha256: rawRunReportSha256,
       },
-      stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile) },
-      stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile) },
+      stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile, { root: privateDir }) },
+      stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile, { root: privateDir }) },
     },
   };
-  writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest);
+  writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest, {
+    root: privateDir,
+    exclusive: true,
+  });
 
   stage.value = 'redaction-acceptance';
   const publicReport = redact({
@@ -159,7 +173,7 @@ try {
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(publicReport, null, 2)}\n`;
   assertNoPrivateMaterial(serialized, { explicitSecrets });
-  fs.writeFileSync(publicFile, serialized, { mode: 0o600, flag: 'wx' });
+  writeJsonAtomic(publicFile, publicReport, { root: publicDir, exclusive: true });
 
   console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
@@ -179,7 +193,7 @@ try {
   const serialized = `${JSON.stringify(failure, null, 2)}\n`;
   assertNoPrivateMaterial(serialized, { explicitSecrets });
   if (!fs.existsSync(publicFile)) {
-    fs.writeFileSync(publicFile, serialized, { mode: 0o600, flag: 'wx' });
+    writeJsonAtomic(publicFile, failure, { root: publicDir, exclusive: true });
   }
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
