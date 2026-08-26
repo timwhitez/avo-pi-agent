@@ -10,6 +10,7 @@ import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
+import { redactText } from './benchmark/redaction.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
 
@@ -156,19 +157,31 @@ async function runPublic(args) {
       console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
-        await environment.open(gameId);
-        const agent = configureWorkspace(new AvoArcAgent({
-          gameId,
-          environment,
-          loop,
-          config: gameConfig,
-          captureScorecard: false,
-        }), gameConfig);
-        const result = {
-          ...await agent.run(),
-          actionBudget,
-          outerTurnBudget: gameConfig.maxOuterTurns,
-        };
+        const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
+        let result = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          await environment.open(gameId);
+          const agent = configureWorkspace(new AvoArcAgent({
+            gameId,
+            environment,
+            loop,
+            config: gameConfig,
+            captureScorecard: false,
+          }), gameConfig);
+          result = {
+            ...await agent.run(),
+            actionBudget,
+            outerTurnBudget: gameConfig.maxOuterTurns,
+          };
+          if (!result.error || isWinState(result.state)) break;
+          // A transient provider fault must not sacrifice the whole game:
+          // durable memory persists across attempts, so a retry re-grounds.
+          if (attempt < maxAttempts) {
+            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
+            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(result.error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
+            await sleep(delayMs);
+          }
+        }
         results.push(result);
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
@@ -284,4 +297,22 @@ function printHelp(code) {
 Production public runs use the official Pi SDK loop and official arc-agi runtime.
 The offline demo validates only this repository's agent/environment contract.`);
   process.exitCode = code;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function positiveEnvInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function isWinState(state) {
+  return String(state || '').toUpperCase() === 'WIN';
 }

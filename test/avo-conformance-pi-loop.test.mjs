@@ -9,7 +9,10 @@ test('production Pi loop uses official SDK and sequential tools', () => {
   assert.match(source, /@earendil-works\/pi-ai/);
   assert.match(source, /openAIResponsesApi/);
   assert.match(source, /toolExecution:\s*'sequential'/);
-  assert.match(source, /models\.streamSimple\.bind\(models\)/);
+  assert.match(source, /models\.streamSimple\.call\(models/);
+  // Transport knobs (TTFB timeout + retry budget) ride on every stream request.
+  assert.match(source, /timeoutMs: streamTimeoutMs/);
+  assert.match(source, /maxRetries: streamMaxRetries/);
 });
 
 test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustion', () => {
