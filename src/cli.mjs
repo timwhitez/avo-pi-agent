@@ -79,7 +79,13 @@ async function offlineDemo(args) {
   const results = [];
   for (const [index, environment] of environments.entries()) {
     const loop = createPortablePiLoop({ maxSteps: config.maxActions });
-    const agent = new AvoArcAgent({ gameId: environment.gameId, environment, loop, config, logger: quietLogger });
+    const agent = configureWorkspace(new AvoArcAgent({
+      gameId: environment.gameId,
+      environment,
+      loop,
+      config,
+      logger: quietLogger,
+    }), config);
     const result = await agent.run();
     results.push(result);
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
@@ -151,13 +157,13 @@ async function runPublic(args) {
       progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
         await environment.open(gameId);
-        const agent = new AvoArcAgent({
+        const agent = configureWorkspace(new AvoArcAgent({
           gameId,
           environment,
           loop,
           config: gameConfig,
           captureScorecard: false,
-        });
+        }), gameConfig);
         const result = {
           ...await agent.run(),
           actionBudget,
@@ -206,12 +212,21 @@ async function runPublic(args) {
   // game coverage and official score origin are validated by the outer runner.
 }
 
+function configureWorkspace(agent, config) {
+  agent.workspace.mode = config.workspaceMode || 'files-only';
+  agent.workspace.timeoutMs = config.workspacePythonTimeoutMs || 10_000;
+  agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
+  agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
+  return agent;
+}
+
 function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
   const wins = results.filter((r) => r.won).length;
   const safeResults = redactRuntimeObject(results);
   const safeScorecard = redactRuntimeObject(aggregateScorecard);
   return {
     schemaVersion: 1,
+    runId: process.env.AVO_REAL_RUN_ID || null,
     kind,
     createdAt: new Date().toISOString(),
     config: publicConfigSummary(config),
@@ -246,9 +261,16 @@ function extractOfficialScore(scorecard) {
 function writeReport(report) {
   fs.mkdirSync('runs', { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = path.join('runs', `${stamp}-${report.kind}.json`);
-  fs.writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  const identity = report.runId ? safeFileSegment(report.runId) : stamp;
+  const file = path.join('runs', `${identity}-${report.kind}.json`);
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, file);
   return file;
+}
+
+function safeFileSegment(value) {
+  return String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120) || 'run';
 }
 
 function printHelp(code) {

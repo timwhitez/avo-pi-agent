@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 
-const SENSITIVE_KEY = /(?:api[_-]?key|authorization|credential|password|secret|token|base[_-]?url|endpoint|provider[_-]?url|model(?:[_-]?id|[_-]?name)?)/i;
+const SAFE_TOKEN_METRIC = /^(?:(?:prompt|completion|input|output|total|reasoning|cached?|cacheRead|cacheWrite)[_-]?)?tokens?(?:[_-]?(?:count|used|usage))?$/i;
+const SENSITIVE_NORMALIZED_KEYS = new Set([
+  'apikey', 'authorization', 'credential', 'credentials', 'password', 'secret',
+  'clientsecret', 'privatekey', 'accesstoken', 'refreshtoken', 'idtoken',
+  'authtoken', 'bearertoken', 'sessiontoken', 'githubtoken', 'arcapikey',
+  'baseurl', 'endpoint', 'providerurl', 'providerendpoint', 'model', 'modelid', 'modelname',
+]);
 const SAFE_FINGERPRINT_KEY = /fingerprint|hash|sha|digest/i;
 const URL = /https?:\/\/[^\s"'<>]+/gi;
 const IPV4_ENDPOINT = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g;
@@ -52,22 +58,23 @@ export function assertNoPrivateMaterial(value, { explicitSecrets = [] } = {}) {
 
 function visit(value, key, secrets, seen) {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') {
-    if (SENSITIVE_KEY.test(key) && !SAFE_FINGERPRINT_KEY.test(key)) return '<redacted>';
-    return redactText(value, { explicitSecrets: secrets });
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    if (SENSITIVE_KEY.test(key) && !SAFE_FINGERPRINT_KEY.test(key)) return '<redacted>';
-    return value;
-  }
+  if (isSensitiveKey(key)) return '<redacted>';
+  if (typeof value === 'string') return redactText(value, { explicitSecrets: secrets });
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value !== 'object') return String(value);
   if (seen.has(value)) return '<circular>';
   seen.add(value);
   if (Array.isArray(value)) return value.map((item) => visit(item, key, secrets, seen));
   return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [
     childKey,
-    SENSITIVE_KEY.test(childKey) && !SAFE_FINGERPRINT_KEY.test(childKey)
-      ? '<redacted>'
-      : visit(child, childKey, secrets, seen),
+    isSensitiveKey(childKey) ? '<redacted>' : visit(child, childKey, secrets, seen),
   ]));
+}
+
+function isSensitiveKey(key) {
+  const source = String(key || '');
+  if (!source || SAFE_FINGERPRINT_KEY.test(source) || SAFE_TOKEN_METRIC.test(source)) return false;
+  const normalized = source.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  if (SENSITIVE_NORMALIZED_KEYS.has(normalized)) return true;
+  return /(?:apikey|clientsecret|privatekey|access(?:token|credential)|refresh(?:token|credential)|bearertoken|authorization)$/.test(normalized);
 }

@@ -27,7 +27,7 @@ AvoArcAgent — autonomous variation operator
   ├─ failed-attempt archive
   ├─ committed parent-linked lineage
   ├─ conditional stagnation supervisor
-  └─ confined persistent scratch workspace
+  └─ bounded files-only scratch workspace by default
                 │
                 ▼
 Node JSONL bridge client
@@ -109,11 +109,27 @@ preserving failed and accepted records.
 
 ## Scratch workspace
 
-The optional workspace persists compact analysis outside the model context. It
-is deliberately secondary to direct environment interaction. Its Python helper
-runs with stripped environment variables, resource limits, audit-hook blocks on
-network/subprocess activity and file confinement. The container/host sandbox is
-still the primary security boundary.
+The workspace is deliberately secondary to direct ARC interaction and has three
+explicit modes:
+
+- `disabled`: no workspace tools are exposed;
+- `files-only` (default): bounded UTF-8 text, JSON, CSV, Markdown, and Python
+  source files may be stored, but no code is executed;
+- `isolated-python`: the Python tool is exposed only through a local Docker or
+  Podman container with no network, a read-only container root, dropped Linux
+  capabilities, `no-new-privileges`, PID/memory/CPU limits, an unprivileged UID,
+  and exactly one writable bind mount for the per-game workspace.
+
+The Node file layer rejects symbolic links, multiply-linked files, path escapes,
+non-regular files, oversized files, and unbounded recursive listings. Writes use
+an atomic same-directory temporary file and no-follow open flags where the host
+supports them.
+
+Python audit hooks inside the container are defense in depth only. They are not
+and are never described as the isolation boundary. There is no fallback to
+model-authored Python running directly on the host interpreter. Operators must
+pre-pull the configured image; `--pull=never` prevents an execution-time image
+substitution.
 
 ## Trust boundaries
 
