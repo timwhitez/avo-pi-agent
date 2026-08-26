@@ -79,7 +79,13 @@ async function offlineDemo(args) {
   const results = [];
   for (const [index, environment] of environments.entries()) {
     const loop = createPortablePiLoop({ maxSteps: config.maxActions });
-    const agent = new AvoArcAgent({ gameId: environment.gameId, environment, loop, config, logger: quietLogger });
+    const agent = configureWorkspace(new AvoArcAgent({
+      gameId: environment.gameId,
+      environment,
+      loop,
+      config,
+      logger: quietLogger,
+    }), config);
     const result = await agent.run();
     results.push(result);
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
@@ -151,13 +157,13 @@ async function runPublic(args) {
       progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
         await environment.open(gameId);
-        const agent = new AvoArcAgent({
+        const agent = configureWorkspace(new AvoArcAgent({
           gameId,
           environment,
           loop,
           config: gameConfig,
           captureScorecard: false,
-        });
+        }), gameConfig);
         const result = {
           ...await agent.run(),
           actionBudget,
@@ -204,6 +210,14 @@ async function runPublic(args) {
   // A complete public benchmark can legitimately score below 100. Individual
   // non-wins are benchmark data, not a process/infrastructure failure. Exact
   // game coverage and official score origin are validated by the outer runner.
+}
+
+function configureWorkspace(agent, config) {
+  agent.workspace.mode = config.workspaceMode || 'files-only';
+  agent.workspace.timeoutMs = config.workspacePythonTimeoutMs || 10_000;
+  agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
+  agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
+  return agent;
 }
 
 function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
