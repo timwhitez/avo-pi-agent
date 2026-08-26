@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
 import { requireAccessAuthentication } from './access-auth.mjs';
+import {
+  assertDeclaredContentLength,
+  createBoundedRequest,
+  readBoundedJsonBody,
+} from './bounded-request-body.mjs';
 
 const COOKIE_NAME = 'avo_mc_session';
 const MAX_AGE_SECONDS = 12 * 60 * 60;
@@ -59,6 +64,27 @@ export function requireSession(request, { requireCsrf = true } = {}) {
   return session;
 }
 
+export function createSessionLease(session) {
+  const id = String(session?.id || '');
+  const subject = normalizeSubject(session?.subject);
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(id)) {
+    throw new Error('Mission-control session lease is invalid');
+  }
+  return Object.freeze({ id, subject });
+}
+
+export function requireSessionLease(request, lease) {
+  const expected = createSessionLease(lease);
+  const current = requireSession(request, { requireCsrf: false });
+  if (!safeEqual(current.id, expected.id) || !safeEqual(current.subject, expected.subject)) {
+    const error = new Error('Mission-control event stream lease is no longer valid');
+    error.status = 401;
+    error.authenticate = 'Basic realm="AVO Mission Control", charset="UTF-8"';
+    throw error;
+  }
+  return current;
+}
+
 export function destroySession(request) {
   const session = requireSession(request);
   sessions.delete(session.id);
@@ -114,30 +140,15 @@ export function assertSameOrigin(request) {
 }
 
 export function assertRequestBodySize(request, maxBytes = 32 * 1024) {
-  const limit = boundedInteger(maxBytes, 1, 16 * 1024 * 1024, 32 * 1024);
-  const contentLength = Number(request.headers.get('content-length') || 0);
-  if (Number.isFinite(contentLength) && contentLength > limit) {
-    const error = new Error(`Request body exceeds ${limit} bytes`);
-    error.status = 413;
-    throw error;
-  }
-  return limit;
+  return assertDeclaredContentLength(request, maxBytes).limit;
 }
 
-export async function readJsonBody(request, { maxBytes = 32 * 1024 } = {}) {
-  const limit = assertRequestBodySize(request, maxBytes);
-  const text = await request.text();
-  if (Buffer.byteLength(text, 'utf8') > limit) {
-    const error = new Error(`Request body exceeds ${limit} bytes`);
-    error.status = 413;
-    throw error;
-  }
-  if (!text.trim()) return {};
-  try { return JSON.parse(text); } catch {
-    const error = new Error('Request body must be valid JSON');
-    error.status = 400;
-    throw error;
-  }
+export async function readJsonBody(request, options = {}) {
+  return await readBoundedJsonBody(request, options);
+}
+
+export async function createBoundedRequestBody(request, options = {}) {
+  return await createBoundedRequest(request, options);
 }
 
 export function jsonError(error) {
