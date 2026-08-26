@@ -75,6 +75,10 @@ export AVO_MISSION_CONTROL_MAX_ACTIVE_RUNS_PER_SUBJECT=1
 
 The browser displays its native Basic-authentication prompt. The default username is `avo`; the password is the generated access token. Use TLS or a trusted loopback connection because HTTP Basic authentication relies on transport security.
 
+Launch the server with `COPILOTKIT_TELEMETRY_DISABLED=true` to keep the
+CopilotKit runtime from sending anonymous telemetry off-host. The service is
+local-only and must not emit operational metadata to third parties.
+
 ## Run locally
 
 From this directory:
