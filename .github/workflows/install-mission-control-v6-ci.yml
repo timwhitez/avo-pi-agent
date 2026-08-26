@@ -1,0 +1,100 @@
+name: Install mission-control v6 branch CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/trajectory-repair-v3
+    paths:
+      - 'maintenance/install-mission-control-v6-ci.trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-mission-control-v6-ci
+  cancel-in-progress: true
+
+jobs:
+  wait-patch-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0, persist-credentials: true }
+      - uses: actions/setup-node@v5
+        with: { node-version: '22.19.0', package-manager-cache: false }
+      - name: Wait for final v6 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 5100))
+          while (( SECONDS < deadline )); do
+            git fetch origin feature/copilotkit-mission-control-v6 || true
+            source="$(git show origin/feature/copilotkit-mission-control-v6:apps/mission-control-v3/lib/control-plane.mjs 2>/dev/null || true)"
+            if grep -q "AVO_ARC_AUTH_MODE: 'anonymous-auto'" <<<"$source" && grep -q "recording_python_v4.py" <<<"$source"; then
+              exit 0
+            fi
+            echo "Waiting for final v6 branch with automatic ARC auth and recorder v4"
+            sleep 30
+          done
+          echo "::error::Timed out waiting for final v6 branch"
+          exit 1
+      - name: Add branch-native frontend CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --force-create feature/copilotkit-mission-control-v6 origin/feature/copilotkit-mission-control-v6
+          cat > .github/workflows/mission-control-v6.yml <<'EOF'
+          name: mission-control-v6
+
+          on:
+            push:
+              branches:
+                - feature/copilotkit-mission-control-v6
+              paths:
+                - 'apps/mission-control-v3/**'
+                - '.github/workflows/mission-control-v6.yml'
+            pull_request:
+              paths:
+                - 'apps/mission-control-v3/**'
+                - '.github/workflows/mission-control-v6.yml'
+
+          permissions:
+            contents: read
+
+          jobs:
+            verify-ui:
+              runs-on: ubuntu-24.04
+              timeout-minutes: 30
+              defaults:
+                run:
+                  working-directory: apps/mission-control-v3
+              steps:
+                - uses: actions/checkout@v6
+                  with:
+                    persist-credentials: false
+                - uses: actions/setup-node@v5
+                  with:
+                    node-version: '22.19.0'
+                    package-manager-cache: false
+                - name: Install frontend dependencies
+                  run: npm install --ignore-scripts
+                - name: Run lifecycle, session, browser-secret, and control-plane tests
+                  run: npm test
+                - name: Build standalone CopilotKit frontend
+                  run: npm run build
+          EOF
+          git add .github/workflows/mission-control-v6.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "ci(ui): verify final mission-control v6 branch"
+            git push origin HEAD:feature/copilotkit-mission-control-v6
+          fi
+      - name: Locally verify the exact updated v6 head before returning
+        working-directory: apps/mission-control-v3
+        run: |
+          npm install --ignore-scripts
+          npm test
+          npm run build
