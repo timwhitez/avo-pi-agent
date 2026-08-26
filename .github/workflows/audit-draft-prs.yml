@@ -1,0 +1,80 @@
+name: Audit AVO draft PR stack
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/real-public-benchmark
+    paths:
+      - 'maintenance/audit-draft-prs.trigger'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enforce draft and assert unmerged state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --state all --limit 100 \
+            --json number,headRefName,isDraft,mergedAt,state,title,url > /tmp/prs.json
+          node <<'NODE' > /tmp/targets.tsv
+          const fs = require('node:fs');
+          const prs = JSON.parse(fs.readFileSync('/tmp/prs.json', 'utf8'));
+          const target = /^(feature\/(?:avo-conformance|real-public-benchmark|trajectory-repair|copilotkit-mission-control))/;
+          for (const pr of prs.filter((entry) => target.test(entry.headRefName))) {
+            console.log([pr.number, pr.headRefName, pr.state, pr.isDraft, pr.mergedAt || '', pr.url].join('\t'));
+          }
+          NODE
+          merged=0
+          while IFS=$'\t' read -r number head state draft merged_at url; do
+            [[ -n "$number" ]] || continue
+            if [[ -n "$merged_at" ]]; then
+              echo "::error::Target PR #${number} (${head}) was merged at ${merged_at}"
+              merged=1
+              continue
+            fi
+            if [[ "$state" == "OPEN" && "$draft" != "true" ]]; then
+              gh pr ready "$number" --repo "$GITHUB_REPOSITORY" --undo
+            fi
+          done < /tmp/targets.tsv
+          if [[ "$merged" -ne 0 ]]; then exit 1; fi
+
+      - name: Publish audit to Epic
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --state all --limit 100 \
+            --json number,headRefName,isDraft,mergedAt,state,title,url > /tmp/prs-after.json
+          node <<'NODE' > /tmp/pr-audit.md
+          const fs = require('node:fs');
+          const prs = JSON.parse(fs.readFileSync('/tmp/prs-after.json', 'utf8'));
+          const target = /^(feature\/(?:avo-conformance|real-public-benchmark|trajectory-repair|copilotkit-mission-control))/;
+          const rows = prs.filter((entry) => target.test(entry.headRefName)).sort((a, b) => a.number - b.number);
+          console.log('## Automated Draft PR audit');
+          console.log('');
+          console.log(`Audited at: ${new Date().toISOString()}`);
+          console.log('');
+          console.log('| PR | Head | State | Draft | Merged |');
+          console.log('|---:|---|---|---:|---:|');
+          for (const pr of rows) {
+            console.log(`| #${pr.number} | \`${pr.headRefName}\` | ${pr.state} | ${pr.isDraft} | ${Boolean(pr.mergedAt)} |`);
+          }
+          console.log('');
+          console.log('The workflow fails if any tracked PR has `mergedAt != null`. Open tracked PRs are converted back to Draft automatically.');
+          NODE
+          gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-audit.md
