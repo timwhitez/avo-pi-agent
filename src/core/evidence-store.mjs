@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { acquireEvidenceWriteLock } from './evidence-lock.mjs';
+
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_EVENT_BYTES = 128 * 1024;
 const DEFAULT_MAX_EVENTS = 100_000;
@@ -14,26 +16,43 @@ export class EvidenceStore {
     assertContained(this.authorityRoot, this.root);
     this.gameId = String(gameId);
     this.file = path.join(this.root, `${safe(gameId)}.jsonl`);
+    this.lockFile = `${this.file}.lock`;
     this.maxFileBytes = boundedInteger(options.maxFileBytes, 1024, 512 * 1024 * 1024, DEFAULT_MAX_FILE_BYTES);
     this.maxEventBytes = boundedInteger(options.maxEventBytes, 256, 4 * 1024 * 1024, DEFAULT_MAX_EVENT_BYTES);
     this.maxEvents = boundedInteger(options.maxEvents, 1, 1_000_000, DEFAULT_MAX_EVENTS);
     this.events = [];
     this.sequence = 0;
+    this.loaded = false;
+    this.fileIdentity = null;
   }
 
   load() {
     this.events = [];
     this.sequence = 0;
-    if (!inspectEvidenceRoot(this.authorityRoot, this.root)) return this;
+    this.loaded = false;
+    this.fileIdentity = null;
+    if (!inspectEvidenceRoot(this.authorityRoot, this.root)) {
+      this.loaded = true;
+      return this;
+    }
     const stat = optionalLstat(this.file);
-    if (!stat) return this;
+    if (!stat) {
+      this.loaded = true;
+      return this;
+    }
     assertEvidenceFile(stat);
     if (fileSize(stat) > this.maxFileBytes) throw new Error(`evidence store exceeds ${this.maxFileBytes} bytes`);
-    this.#readLines(stat, (line, lineNumber) => this.#acceptParsed(parseLine(line, lineNumber), lineNumber));
+    const after = this.#readLines(
+      stat,
+      (line, lineNumber) => this.#acceptParsed(parseLine(line, lineNumber), lineNumber),
+    );
+    this.fileIdentity = snapshotFileIdentity(after);
+    this.loaded = true;
     return this;
   }
 
   append(input) {
+    if (!this.loaded) throw new Error('evidence store must be loaded before append');
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('evidence event must be an object');
     const sequence = this.sequence + 1;
     const core = boundedClone({ ...input, gameId: this.gameId, sequence });
@@ -50,27 +69,40 @@ export class EvidenceStore {
     if (bytes > this.maxEventBytes) throw new Error(`evidence event exceeds ${this.maxEventBytes} bytes`);
     if (this.events.length >= this.maxEvents) throw new Error(`evidence store exceeds ${this.maxEvents} events; compact before append`);
     ensureEvidenceRoot(this.authorityRoot, this.root);
-    const before = optionalLstat(this.file);
-    if (before) assertEvidenceFile(before);
-    const currentSize = before ? fileSize(before) : 0;
-    if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
-    const { fd, created } = openEvidenceAppendFile(this.file, before);
+    const lock = acquireEvidenceWriteLock({ root: this.root, file: this.lockFile, owner: this.gameId });
+    let persistedIdentity;
     try {
-      const opened = fs.fstatSync(fd, { bigint: true });
-      assertEvidenceFile(opened, 'evidence store append target');
-      if (created) {
-        if (fileSize(opened) !== 0) throw new Error('new evidence store was not empty after exclusive creation');
-      } else if (!sameFileIdentity(before, opened)) {
-        throw new Error('evidence store changed during secure append');
+      const before = optionalLstat(this.file);
+      assertExpectedFileState(this.fileIdentity, before);
+      const currentSize = before ? fileSize(before) : 0;
+      if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
+      const { fd, created } = openEvidenceAppendFile(this.file, before);
+      try {
+        const opened = fs.fstatSync(fd, { bigint: true });
+        assertEvidenceFile(opened, 'evidence store append target');
+        if (created) {
+          if (fileSize(opened) !== 0) throw new Error('new evidence store was not empty after exclusive creation');
+        } else if (!sameFileIdentity(before, opened)) {
+          throw new Error('evidence store changed during secure append');
+        }
+        if (fileSize(opened) + bytes > this.maxFileBytes) {
+          throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
+        }
+        fs.writeFileSync(fd, line, 'utf8');
+        fs.fsyncSync(fd);
+        const persisted = fs.fstatSync(fd, { bigint: true });
+        assertEvidenceFile(persisted, 'evidence store append target');
+        if (fileSize(persisted) !== fileSize(opened) + bytes) {
+          throw new Error('evidence store changed during append; reload before retry');
+        }
+        persistedIdentity = snapshotFileIdentity(persisted);
+      } finally {
+        fs.closeSync(fd);
       }
-      if (fileSize(opened) + bytes > this.maxFileBytes) {
-        throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
-      }
-      fs.writeFileSync(fd, line, 'utf8');
-      fs.fsyncSync(fd);
     } finally {
-      fs.closeSync(fd);
+      lock.release();
     }
+    this.fileIdentity = persistedIdentity;
     this.events.push(event);
     this.sequence = sequence;
     return event;
@@ -81,6 +113,7 @@ export class EvidenceStore {
   }
 
   compact({ protectedIds = [], retainRecent = 2000 } = {}) {
+    if (!this.loaded) throw new Error('evidence store must be loaded before compaction');
     const protectedSet = new Set(protectedIds.map(String));
     const missing = [...protectedSet].filter((id) => !this.get(id));
     if (missing.length) throw new Error(`protected evidence is missing: ${missing.join(', ')}`);
@@ -89,7 +122,7 @@ export class EvidenceStore {
     if (keep.size === this.events.length) return { removed: 0, retained: this.events.length };
     const retained = this.events.filter((event) => keep.has(event.id));
     const removed = this.events.length - retained.length;
-    this.#rewrite(retained);
+    this.fileIdentity = this.#rewrite(retained);
     this.events = retained;
     this.sequence = retained.reduce((max, event) => Math.max(max, event.sequence), 0);
     return { removed, retained: retained.length };
@@ -139,6 +172,7 @@ export class EvidenceStore {
       }
       const after = fs.fstatSync(fd, { bigint: true });
       if (!sameFileIdentity(opened, after)) throw new Error('evidence store changed while being read');
+      return after;
     } finally {
       fs.closeSync(fd);
     }
@@ -146,21 +180,58 @@ export class EvidenceStore {
 
   #rewrite(events) {
     ensureEvidenceRoot(this.authorityRoot, this.root);
-    const target = optionalLstat(this.file);
-    if (target) assertEvidenceFile(target);
-    const temporary = `${this.file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-    const fd = fs.openSync(temporary, 'wx', 0o600);
+    const lock = acquireEvidenceWriteLock({ root: this.root, file: this.lockFile, owner: this.gameId });
+    let temporary = null;
     try {
-      for (const event of events) fs.writeFileSync(fd, `${JSON.stringify(event)}\n`, 'utf8');
-      fs.fsyncSync(fd);
+      const target = optionalLstat(this.file);
+      assertExpectedFileState(this.fileIdentity, target);
+      temporary = `${this.file}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+      const fd = fs.openSync(temporary, 'wx', 0o600);
+      try {
+        for (const event of events) fs.writeFileSync(fd, `${JSON.stringify(event)}\n`, 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temporary, this.file);
+      temporary = null;
+      const persisted = fs.lstatSync(this.file, { bigint: true });
+      assertEvidenceFile(persisted);
+      fsyncDirectory(this.root);
+      return snapshotFileIdentity(persisted);
     } finally {
-      fs.closeSync(fd);
+      if (temporary) {
+        try { fs.unlinkSync(temporary); } catch {}
+      }
+      lock.release();
     }
-    fs.renameSync(temporary, this.file);
-    assertEvidenceFile(fs.lstatSync(this.file, { bigint: true }));
-    const directory = fs.openSync(this.root, 'r');
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   }
+}
+
+function fsyncDirectory(directory) {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY);
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+}
+
+function assertExpectedFileState(expected, actual) {
+  if (actual) assertEvidenceFile(actual);
+  if ((expected === null) !== (actual === null)) {
+    throw new Error('evidence store changed since load; reload before retry');
+  }
+  if (expected && !sameFileIdentity(expected, actual)) {
+    throw new Error('evidence store changed since load; reload before retry');
+  }
+}
+
+function snapshotFileIdentity(stat) {
+  return Object.freeze({
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    nlink: stat.nlink,
+  });
 }
 
 function fileSize(stat) {
