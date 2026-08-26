@@ -84,28 +84,37 @@ export default function Page() {
     cursorRef.current = 0;
     refreshSelected();
     const timer = setInterval(refreshSelected, 2000);
-    if (!selectedId || !csrf) return () => clearInterval(timer);
-
-    const source = new EventSource(`/api/runs/${encodeURIComponent(selectedId)}/events?cursor=0`, { withCredentials: true });
-    source.addEventListener('avo', (message) => {
-      try {
-        const event = JSON.parse(message.data);
-        cursorRef.current = Math.max(cursorRef.current, Number(event.cursor) || 0);
-        setEvents((current) => {
-          const byCursor = new Map(current.map((item) => [item.cursor, item]));
-          byCursor.set(event.cursor, event);
-          return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor).slice(-4000);
-        });
-      } catch {}
-    });
-    source.onerror = () => {
-      source.close();
-      const retry = setTimeout(() => refreshSelected(), 1000);
-      retry.unref?.();
+    let source = null;
+    let retryTimer = null;
+    let disposed = false;
+    // A dropped SSE connection must reconnect from the last seen cursor;
+    // closing without a reconnect silently froze the live event feed.
+    const connect = () => {
+      if (disposed || !selectedId || !csrf) return;
+      source = new EventSource(`/api/runs/${encodeURIComponent(selectedId)}/events?cursor=${cursorRef.current}`, { withCredentials: true });
+      source.addEventListener('avo', (message) => {
+        try {
+          const event = JSON.parse(message.data);
+          cursorRef.current = Math.max(cursorRef.current, Number(event.cursor) || 0);
+          setEvents((current) => {
+            const byCursor = new Map(current.map((item) => [item.cursor, item]));
+            byCursor.set(event.cursor, event);
+            return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor).slice(-4000);
+          });
+        } catch {}
+      });
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        if (!disposed) retryTimer = setTimeout(connect, 2000);
+      };
     };
+    connect();
     return () => {
+      disposed = true;
       clearInterval(timer);
-      source.close();
+      clearTimeout(retryTimer);
+      source?.close();
     };
   }, [selectedId, csrf, refreshSelected]);
 
