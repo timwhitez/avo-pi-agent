@@ -10,6 +10,8 @@ const READ_CHUNK_BYTES = 64 * 1024;
 export class EvidenceStore {
   constructor(root, gameId, options = {}) {
     this.root = path.resolve(root);
+    this.authorityRoot = path.resolve(options.authorityRoot ?? this.root);
+    assertContained(this.authorityRoot, this.root);
     this.gameId = String(gameId);
     this.file = path.join(this.root, `${safe(gameId)}.jsonl`);
     this.maxFileBytes = boundedInteger(options.maxFileBytes, 1024, 512 * 1024 * 1024, DEFAULT_MAX_FILE_BYTES);
@@ -22,13 +24,11 @@ export class EvidenceStore {
   load() {
     this.events = [];
     this.sequence = 0;
-    const rootStat = optionalLstat(this.root);
-    if (!rootStat) return this;
-    assertEvidenceRoot(rootStat);
+    if (!inspectEvidenceRoot(this.authorityRoot, this.root)) return this;
     const stat = optionalLstat(this.file);
     if (!stat) return this;
-    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('evidence store must be a regular non-symlink file');
-    if (stat.size > this.maxFileBytes) throw new Error(`evidence store exceeds ${this.maxFileBytes} bytes`);
+    assertEvidenceFile(stat);
+    if (fileSize(stat) > this.maxFileBytes) throw new Error(`evidence store exceeds ${this.maxFileBytes} bytes`);
     this.#readLines(stat, (line, lineNumber) => this.#acceptParsed(parseLine(line, lineNumber), lineNumber));
     return this;
   }
@@ -49,24 +49,21 @@ export class EvidenceStore {
     const bytes = Buffer.byteLength(line, 'utf8');
     if (bytes > this.maxEventBytes) throw new Error(`evidence event exceeds ${this.maxEventBytes} bytes`);
     if (this.events.length >= this.maxEvents) throw new Error(`evidence store exceeds ${this.maxEvents} events; compact before append`);
-    fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    assertEvidenceRoot(fs.lstatSync(this.root));
+    ensureEvidenceRoot(this.authorityRoot, this.root);
     const before = optionalLstat(this.file);
-    if (before && (before.isSymbolicLink() || !before.isFile())) {
-      throw new Error('evidence store must be a regular non-symlink file');
-    }
-    const currentSize = before?.size ?? 0;
+    if (before) assertEvidenceFile(before);
+    const currentSize = before ? fileSize(before) : 0;
     if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
     const { fd, created } = openEvidenceAppendFile(this.file, before);
     try {
-      const opened = fs.fstatSync(fd);
-      if (!opened.isFile()) throw new Error('evidence store append target must be a regular file');
+      const opened = fs.fstatSync(fd, { bigint: true });
+      assertEvidenceFile(opened, 'evidence store append target');
       if (created) {
-        if (opened.size !== 0) throw new Error('new evidence store was not empty after exclusive creation');
+        if (fileSize(opened) !== 0) throw new Error('new evidence store was not empty after exclusive creation');
       } else if (!sameFileIdentity(before, opened)) {
         throw new Error('evidence store changed during secure append');
       }
-      if (opened.size + bytes > this.maxFileBytes) {
+      if (fileSize(opened) + bytes > this.maxFileBytes) {
         throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
       }
       fs.writeFileSync(fd, line, 'utf8');
@@ -113,13 +110,15 @@ export class EvidenceStore {
   }
 
   #readLines(before, onLine) {
+    inspectEvidenceRoot(this.authorityRoot, this.root);
     const fd = fs.openSync(this.file, fs.constants.O_RDONLY | noFollowFlag());
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
     let carry = '';
     let lineNumber = 0;
     try {
-      const opened = fs.fstatSync(fd);
-      if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+      const opened = fs.fstatSync(fd, { bigint: true });
+      assertEvidenceFile(opened);
+      if (!sameFileIdentity(before, opened)) {
         throw new Error('evidence store changed during secure open');
       }
       for (;;) {
@@ -138,7 +137,7 @@ export class EvidenceStore {
         lineNumber += 1;
         onLine(carry, lineNumber);
       }
-      const after = fs.fstatSync(fd);
+      const after = fs.fstatSync(fd, { bigint: true });
       if (!sameFileIdentity(opened, after)) throw new Error('evidence store changed while being read');
     } finally {
       fs.closeSync(fd);
@@ -146,12 +145,9 @@ export class EvidenceStore {
   }
 
   #rewrite(events) {
-    fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    assertEvidenceRoot(fs.lstatSync(this.root));
+    ensureEvidenceRoot(this.authorityRoot, this.root);
     const target = optionalLstat(this.file);
-    if (target && (target.isSymbolicLink() || !target.isFile())) {
-      throw new Error('evidence store must be a regular non-symlink file');
-    }
+    if (target) assertEvidenceFile(target);
     const temporary = `${this.file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     const fd = fs.openSync(temporary, 'wx', 0o600);
     try {
@@ -161,9 +157,16 @@ export class EvidenceStore {
       fs.closeSync(fd);
     }
     fs.renameSync(temporary, this.file);
+    assertEvidenceFile(fs.lstatSync(this.file, { bigint: true }));
     const directory = fs.openSync(this.root, 'r');
     try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   }
+}
+
+function fileSize(stat) {
+  const size = Number(stat.size);
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error('evidence store has an invalid file size');
+  return size;
 }
 
 function openEvidenceAppendFile(file, before) {
@@ -182,25 +185,77 @@ function openEvidenceAppendFile(file, before) {
   }
 }
 
+function inspectEvidenceRoot(authorityRoot, root) {
+  assertContained(authorityRoot, root);
+  const authority = optionalLstat(authorityRoot);
+  if (!authority) return false;
+  assertEvidenceRoot(authority, authorityRoot === root ? 'evidence root' : 'evidence authority root');
+  const realAuthority = fs.realpathSync(authorityRoot);
+  let current = authorityRoot;
+  const relative = path.relative(authorityRoot, root);
+  if (!relative) return true;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    const stat = optionalLstat(current);
+    if (!stat) return false;
+    assertEvidenceRoot(stat, 'evidence parent');
+    assertContained(realAuthority, fs.realpathSync(current));
+  }
+  return true;
+}
+
+function ensureEvidenceRoot(authorityRoot, root) {
+  assertContained(authorityRoot, root);
+  fs.mkdirSync(authorityRoot, { recursive: true, mode: 0o700 });
+  const authority = fs.lstatSync(authorityRoot, { bigint: true });
+  assertEvidenceRoot(authority, authorityRoot === root ? 'evidence root' : 'evidence authority root');
+  const realAuthority = fs.realpathSync(authorityRoot);
+  let current = authorityRoot;
+  const relative = path.relative(authorityRoot, root);
+  if (!relative) return;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    if (!optionalLstat(current)) fs.mkdirSync(current, { mode: 0o700 });
+    const opened = fs.lstatSync(current, { bigint: true });
+    assertEvidenceRoot(opened, 'evidence parent');
+    assertContained(realAuthority, fs.realpathSync(current));
+  }
+}
+
+function assertEvidenceFile(stat, purpose = 'evidence store') {
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`${purpose} must be a regular non-symlink file`);
+  }
+  if (Number(stat.nlink) !== 1) throw new Error(`${purpose} must be singly linked`);
+}
+
+function assertContained(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`evidence path escapes authority root: ${relative || '.'}`);
+  }
+}
+
 function optionalLstat(file) {
   try {
-    return fs.lstatSync(file);
+    return fs.lstatSync(file, { bigint: true });
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
     throw error;
   }
 }
-function assertEvidenceRoot(stat) {
+function assertEvidenceRoot(stat, purpose = 'evidence root') {
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error('evidence root must be a regular non-symlink directory');
+    throw new Error(`${purpose} must be a regular non-symlink directory`);
   }
 }
 function sameFileIdentity(left, right) {
   return left.dev === right.dev
     && left.ino === right.ino
     && left.size === right.size
-    && left.mtimeMs === right.mtimeMs
-    && left.ctimeMs === right.ctimeMs;
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.nlink === right.nlink;
 }
 function noFollowFlag() {
   return Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
