@@ -1,16 +1,19 @@
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import {
   buildArcChildEnvironment,
   buildUtilityChildEnvironment,
 } from '../local/child-environment.mjs';
 import { fingerprint } from './redaction.mjs';
+import { runProcess } from './process-runner.mjs';
 
 export { preflightResponsesProvider } from './provider-attestation.mjs';
 
 const PLACEHOLDER = /(?:replace[-_ ]?me|example|dummy|mock|fake|test[-_ ]?key|changeme)/i;
 const LOOPBACK = /^(?:https?:\/\/)?(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?)(?::|\/|$)/i;
+export const DEFAULT_PROVENANCE_STDOUT_MAX_BYTES = 1024 * 1024;
+export const DEFAULT_PROVENANCE_STDERR_MAX_BYTES = 1024 * 1024;
+const MAX_PROVENANCE_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export function requireRealProviderEnvironment(env = process.env) {
   const config = {
@@ -235,32 +238,37 @@ function hashPath(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
-export function run(command, args, {
+export async function run(command, args, {
   cwd = process.cwd(),
   env = buildUtilityChildEnvironment({ source: process.env }),
   timeoutMs = 0,
   onStdout,
   onStderr,
+  maxStdoutBytes = DEFAULT_PROVENANCE_STDOUT_MAX_BYTES,
+  maxStderrBytes = DEFAULT_PROVENANCE_STDERR_MAX_BYTES,
 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      onStdout?.(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-      onStderr?.(chunk);
-    });
-    const timer = timeoutMs > 0 ? setTimeout(() => child.kill('SIGKILL'), timeoutMs) : null;
-    child.on('error', reject);
-    child.on('exit', (status, signal) => {
-      if (timer) clearTimeout(timer);
-      resolve({ status, signal, stdout, stderr });
-    });
+  const stdoutLimit = normalizeProvenanceByteLimit(maxStdoutBytes, 'maxStdoutBytes');
+  const stderrLimit = normalizeProvenanceByteLimit(maxStderrBytes, 'maxStderrBytes');
+  const result = await runProcess(command, args, {
+    cwd,
+    env,
+    timeoutMs,
+    onStdout,
+    onStderr,
+    maxStdoutBytes: stdoutLimit,
+    maxStderrBytes: stderrLimit,
+    maxTailChars: Math.max(stdoutLimit, stderrLimit),
   });
+  if (result.timedOut) {
+    throw new Error(`provenance child process timed out after ${timeoutMs} ms`);
+  }
+  return result;
+}
+
+function normalizeProvenanceByteLimit(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > MAX_PROVENANCE_OUTPUT_BYTES) {
+    throw new Error(`${label} must be an integer from 1 to ${MAX_PROVENANCE_OUTPUT_BYTES}`);
+  }
+  return number;
 }

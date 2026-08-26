@@ -12,7 +12,14 @@ export async function runProcess(command, args, {
   stdoutFile = null,
   stderrFile = null,
   maxTailChars = DEFAULT_TAIL_CHARS,
+  maxStdoutBytes = null,
+  maxStderrBytes = null,
+  onStdout = null,
+  onStderr = null,
 } = {}) {
+  const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
+  const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
+  const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
   const stdoutSink = stdoutFile ? createSink(stdoutFile) : null;
   const stderrSink = stderrFile ? createSink(stderrFile) : null;
   const child = spawn(command, args, {
@@ -24,27 +31,48 @@ export async function runProcess(command, args, {
 
   let stdoutTail = '';
   let stderrTail = '';
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
   let timedOut = false;
   let terminationTimer = null;
   let spawnError = null;
   let sinkError = null;
-  const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
+  let streamError = null;
 
   for (const sink of [stdoutSink, stderrSink].filter(Boolean)) {
     sink.on('error', (error) => {
       if (!sinkError) sinkError = error;
       terminateProcessTree(child, 'SIGKILL');
+      closeChildOutputStreams(child);
     });
   }
+
+  const failStream = (error) => {
+    if (!streamError) streamError = error;
+    terminateProcessTree(child, 'SIGKILL');
+    closeChildOutputStreams(child);
+  };
 
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
+    stdoutBytes += Buffer.byteLength(chunk, 'utf8');
+    if (stdoutLimit !== null && stdoutBytes > stdoutLimit) {
+      failStream(new Error(`child stdout exceeded ${stdoutLimit} byte limit`));
+      return;
+    }
     stdoutTail = appendTail(stdoutTail, chunk, tailLimit);
+    if (!invokeCallback(onStdout, chunk, 'stdout', failStream)) return;
     writeWithBackpressure(child.stdout, stdoutSink, chunk);
   });
   child.stderr.on('data', (chunk) => {
+    stderrBytes += Buffer.byteLength(chunk, 'utf8');
+    if (stderrLimit !== null && stderrBytes > stderrLimit) {
+      failStream(new Error(`child stderr exceeded ${stderrLimit} byte limit`));
+      return;
+    }
     stderrTail = appendTail(stderrTail, chunk, tailLimit);
+    if (!invokeCallback(onStderr, chunk, 'stderr', failStream)) return;
     writeWithBackpressure(child.stderr, stderrSink, chunk);
   });
   child.once('error', (error) => { spawnError = error; });
@@ -52,7 +80,10 @@ export async function runProcess(command, args, {
   const timeout = timeoutMs > 0 ? setTimeout(() => {
     timedOut = true;
     terminateProcessTree(child, 'SIGTERM');
-    terminationTimer = setTimeout(() => terminateProcessTree(child, 'SIGKILL'), 2_000);
+    terminationTimer = setTimeout(() => {
+      terminateProcessTree(child, 'SIGKILL');
+      closeChildOutputStreams(child);
+    }, 2_000);
     terminationTimer.unref?.();
   }, timeoutMs) : null;
   timeout?.unref?.();
@@ -67,6 +98,7 @@ export async function runProcess(command, args, {
 
   if (spawnError) throw spawnError;
   if (sinkError) throw new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError });
+  if (streamError) throw streamError;
   return {
     ...result,
     timedOut,
@@ -106,12 +138,40 @@ function appendTail(current, chunk, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);
 }
 
-function terminateProcessTree(child, signal) {
-  if (!child || child.exitCode !== null) return;
+function normalizeOptionalByteLimit(value, label) {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return number;
+}
+
+function invokeCallback(callback, chunk, label, fail) {
+  if (typeof callback !== 'function') return true;
   try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch {
+    callback(chunk);
+    return true;
+  } catch (error) {
+    fail(new Error(`child ${label} callback failed`, { cause: error }));
+    return false;
+  }
+}
+
+function closeChildOutputStreams(child) {
+  try { child?.stdout?.destroy(); } catch {}
+  try { child?.stderr?.destroy(); } catch {}
+}
+
+function terminateProcessTree(child, signal) {
+  if (!child?.pid) return;
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {}
+  }
+  if (child.exitCode === null) {
     try { child.kill(signal); } catch {}
   }
 }
