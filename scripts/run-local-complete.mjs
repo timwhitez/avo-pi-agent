@@ -27,8 +27,11 @@ const publicRoot = path.resolve('runs/public');
 ensureAuthorityDirectory(privateExecutionRoot, { root: repositoryRoot, purpose: 'local completion private runtime directory' });
 ensureAuthorityDirectory(publicRoot, { root: repositoryRoot, purpose: 'local completion public report directory' });
 const reportFile = path.join(publicRoot, `local-complete-${runId}.redacted.json`);
+const missionControlPath = path.join(publicRoot, `mission-control-${runId}.redacted.json`);
 const repairPath = path.join(publicRoot, `trajectory-repair-${runId}.redacted.json`);
-if (fs.existsSync(reportFile)) throw new Error('local completion report already exists for this run ID');
+for (const file of [reportFile, missionControlPath, repairPath]) {
+  if (fs.existsSync(file)) throw new Error('local completion evidence already exists for this run ID');
+}
 
 const lock = acquireLocalExecutionLock({ runId, kind: 'complete-local' });
 let activeChild = null;
@@ -40,6 +43,16 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 }
 
 const stages = [
+  {
+    name: 'mission-control',
+    command: process.execPath,
+    args: [
+      'scripts/validate-mission-control.mjs',
+      '--stop-after=build',
+      `--run-id=${runId}`,
+      `--evidence=${path.relative(process.cwd(), missionControlPath)}`,
+    ],
+  },
   { name: 'tests', command: process.execPath, args: ['--test'] },
   { name: 'secret-scan', command: process.execPath, args: ['scripts/secret-scan.mjs'] },
   { name: 'local-preflight', command: process.execPath, args: ['scripts/local-preflight.mjs'] },
@@ -51,7 +64,7 @@ const stages = [
 ];
 
 const summary = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   runId,
   execution: 'local-only',
   authorityIo: 'src/local/authority-evidence.mjs',
@@ -61,6 +74,8 @@ const summary = {
   status: 'running',
   maxRounds,
   stages: [],
+  missionControlReport: path.relative(process.cwd(), missionControlPath),
+  missionControlReportEvidence: null,
   repairReport: path.relative(process.cwd(), repairPath),
   repairReportEvidence: null,
   componentEvidence: null,
@@ -73,7 +88,19 @@ try {
   for (const stage of stages) {
     const startedAt = new Date().toISOString();
     console.log(`\n[local-complete] ${stage.name}`);
-    const result = await runStage(stage);
+    let result = await runStage(stage);
+    if (stage.name === 'mission-control' && result.code === 0 && !result.signal) {
+      try {
+        attachMissionControlReport();
+      } catch (error) {
+        console.error(`[local-complete] Mission Control evidence rejected: ${safeText(error?.message || error)}`);
+        result = {
+          ...result,
+          code: 71,
+          errorClass: safeClass(error?.name || 'Error'),
+        };
+      }
+    }
     summary.stages.push({
       name: stage.name,
       startedAt,
@@ -98,6 +125,7 @@ try {
   }
 
   if (summary.status === 'running') {
+    verifyMissionControlReportEvidence();
     const repairDocument = readJsonEvidence(repairPath, {
       root: publicRoot,
       purpose: 'final trajectory-repair report',
@@ -227,14 +255,89 @@ function writeSummary(exclusive = false) {
   summaryWritten = true;
 }
 
+function attachMissionControlReport() {
+  const document = readJsonEvidence(missionControlPath, {
+    root: publicRoot,
+    purpose: 'Mission Control validation report',
+  });
+  const report = document.value;
+  if (report?.type !== 'mission-control-local-validation') throw new Error('Mission Control report type is invalid');
+  if (String(report?.runId || '') !== runId) throw new Error('Mission Control report run ID does not match');
+  if (report?.status !== 'complete' || report?.stopAfter !== 'build') throw new Error('Mission Control report is not a complete build validation');
+  if (report?.tests?.completed !== true || !Number.isSafeInteger(report?.tests?.count) || report.tests.count < 1) {
+    throw new Error('Mission Control report does not prove test completion');
+  }
+  const packageManager = String(report?.packageManager || '');
+  const npmVersion = String(report?.runtime?.npmVersion || '');
+  const nodeVersion = String(report?.runtime?.nodeVersion || '');
+  const packageSha256 = strictSha256(report?.package?.sha256, 'Mission Control package digest');
+  const lockSha256 = strictSha256(report?.lock?.sha256, 'Mission Control lock digest');
+  const buildIdSha256 = strictSha256(report?.build?.buildId?.sha256, 'Mission Control BUILD_ID digest');
+  const standaloneServerSha256 = strictSha256(report?.build?.standaloneServer?.sha256, 'Mission Control standalone server digest');
+  if (!/^npm@\d+\.\d+\.\d+$/.test(packageManager) || packageManager !== `npm@${npmVersion}`) {
+    throw new Error('Mission Control package-manager provenance is invalid');
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(nodeVersion)) throw new Error('Mission Control Node.js provenance is invalid');
+  if (!Number.isSafeInteger(report?.package?.bytes) || report.package.bytes < 1) throw new Error('Mission Control package size is invalid');
+  if (!Number.isSafeInteger(report?.lock?.bytes) || report.lock.bytes < 1) throw new Error('Mission Control lock size is invalid');
+  summary.missionControlReportEvidence = {
+    sha256: document.sha256,
+    bytes: document.bytes,
+    packageManager,
+    nodeVersion,
+    npmVersion,
+    packageSha256,
+    packageBytes: report.package.bytes,
+    lockSha256,
+    lockBytes: report.lock.bytes,
+    testCount: report.tests.count,
+    buildIdSha256,
+    standaloneServerSha256,
+  };
+}
+
+function verifyMissionControlReportEvidence() {
+  if (!summary.missionControlReportEvidence) throw new Error('Mission Control evidence was not attached');
+  const document = readJsonEvidence(missionControlPath, {
+    root: publicRoot,
+    purpose: 'final Mission Control validation report',
+  });
+  if (document.sha256 !== summary.missionControlReportEvidence.sha256
+    || document.bytes !== summary.missionControlReportEvidence.bytes) {
+    throw new Error('Mission Control validation report changed after acceptance');
+  }
+  const packageEvidence = inspectRegularFile(path.resolve('apps/mission-control-v3/package.json'), {
+    root: repositoryRoot,
+    maxBytes: 1024 * 1024,
+    purpose: 'final Mission Control package manifest',
+  });
+  const lockEvidence = inspectRegularFile(path.resolve('apps/mission-control-v3/package-lock.json'), {
+    root: repositoryRoot,
+    maxBytes: 32 * 1024 * 1024,
+    purpose: 'final Mission Control package lock',
+  });
+  if (packageEvidence.sha256 !== summary.missionControlReportEvidence.packageSha256
+    || packageEvidence.bytes !== summary.missionControlReportEvidence.packageBytes
+    || lockEvidence.sha256 !== summary.missionControlReportEvidence.lockSha256
+    || lockEvidence.bytes !== summary.missionControlReportEvidence.lockBytes) {
+    throw new Error('Mission Control package or lock changed after validation');
+  }
+}
+
 function componentEvidence() {
   const files = [
     'scripts/run-local-complete.mjs',
+    'scripts/validate-mission-control.mjs',
     'scripts/run-trajectory-repair-loop.mjs',
     'scripts/run-trajectory-repair-loop-v4.mjs',
     'src/local/authority-directory.mjs',
     'src/local/authority-evidence.mjs',
+    'src/local/child-environment.mjs',
     'src/local/complete-acceptance.mjs',
+    'src/local/mission-control-validation.mjs',
+    'src/local/regular-file-evidence.mjs',
+    'apps/mission-control-v3/package.json',
+    'apps/mission-control-v3/next.config.mjs',
   ];
   return Object.fromEntries(files.map((file) => {
     const evidence = inspectRegularFile(path.resolve(file), {
@@ -273,6 +376,12 @@ function integer(value, min, max, name) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
   return parsed;
+}
+
+function strictSha256(value, label) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error(`${label} is invalid`);
+  return text;
 }
 
 function safeSignal(value) {
