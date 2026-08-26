@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { finiteNumberOrNull } from '../../../src/local/numeric.mjs';
 
 export const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 export const MAX_PARTIAL_LINE_CHARS = 64 * 1024;
@@ -75,11 +76,17 @@ export function loadExactRunReport(contract, { maxBytes = MAX_REPORT_BYTES } = {
     if (report?.kind !== 'diagnostic-public-environments' || report?.executionMode !== 'diagnostic' || report?.official !== false) {
       throw new Error('diagnostic run report kind or authority label is invalid');
     }
+    if (!report.summary || typeof report.summary !== 'object' || Array.isArray(report.summary)) report.summary = {};
+    const score = finiteNumberOrNull(report.summary.diagnosticScore);
+    if (score === null) delete report.summary.diagnosticScore;
+    else report.summary.diagnosticScore = score;
   } else {
     if (!['complete', 'failed'].includes(String(report?.status || ''))) throw new Error('competition report status is invalid');
     if (report.status === 'complete') {
       if (report?.completeness?.complete !== true) throw new Error('competition report is not complete');
-      if (!Number.isFinite(Number(report?.officialScore?.value))) throw new Error('competition report lacks an official score');
+      const score = finiteNumberOrNull(report?.officialScore?.value);
+      if (score === null) throw new Error('competition report lacks an official score');
+      report.officialScore.value = score;
     }
   }
   return report;
