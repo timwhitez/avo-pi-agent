@@ -5,39 +5,108 @@ import path from 'node:path';
 import { createRevocableEventStream } from '../lib/revocable-event-stream.mjs';
 
 const decoder = new TextDecoder();
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-test('revalidates before every batch and emits no private event after revocation', async () => {
-  let active = true;
+test('backpressure bounds event-source reads while revocation checks continue', async () => {
+  let revalidations = 0;
   let sourceCalls = 0;
-  const controller = new AbortController();
+  const all = Array.from({ length: 20 }, (_, index) => ({
+    cursor: index + 1,
+    payload: `event-${index + 1}`,
+  }));
   const stream = createRevocableEventStream({
-    request: { signal: controller.signal },
-    heartbeatMs: 5,
+    request: { signal: new AbortController().signal },
+    heartbeatMs: 4,
+    highWaterMarkBytes: 1,
+    maxEventBytes: 1024,
     revalidate() {
-      if (!active) throw new Error('revoked');
+      revalidations += 1;
       return { subject: 'avo' };
     },
     getEvents({ cursor }) {
       sourceCalls += 1;
-      return cursor === 0 ? [{ cursor: 1, payload: 'private-event' }] : [];
+      return all.filter((event) => event.cursor > cursor);
     },
-    now: () => 'fixed',
   });
   const reader = stream.getReader();
-  const first = decoder.decode((await reader.read()).value);
-  const heartbeat = decoder.decode((await reader.read()).value);
-  assert.match(first, /private-event/);
-  assert.match(heartbeat, /heartbeat/);
+  await sleep(20);
+  assert.equal(sourceCalls, 1);
+  assert.ok(revalidations > sourceCalls);
+  assert.match(decoder.decode((await reader.read()).value), /id: 1/);
+  await sleep(10);
+  assert.ok(sourceCalls >= 2);
+  assert.match(decoder.decode((await reader.read()).value), /id: 2/);
+  await reader.cancel();
+});
 
+test('revocation errors the stream and discards already queued private events', async () => {
+  let active = true;
+  const stream = createRevocableEventStream({
+    request: { signal: new AbortController().signal },
+    heartbeatMs: 4,
+    highWaterMarkBytes: 1024 * 1024,
+    maxEventBytes: 1024,
+    revalidate() {
+      if (!active) throw new Error('revoked-private-cause');
+      return { subject: 'avo' };
+    },
+    getEvents() {
+      return [
+        { cursor: 1, payload: 'private-event-1' },
+        { cursor: 2, payload: 'private-event-2' },
+      ];
+    },
+  });
+  const reader = stream.getReader();
   active = false;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  const closed = decoder.decode((await reader.read()).value);
-  assert.match(closed, /Event stream closed/);
-  assert.doesNotMatch(closed, /private-event/);
-  assert.equal((await reader.read()).done, true);
-  const callsAtClose = sourceCalls;
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sourceCalls, callsAtClose);
+  await sleep(10);
+  await assert.rejects(
+    () => reader.read(),
+    (error) => error.message === 'Event stream closed' && !error.message.includes('private-event'),
+  );
+});
+
+test('oversized individual events fail generically without payload disclosure', async () => {
+  const stream = createRevocableEventStream({
+    request: { signal: new AbortController().signal },
+    heartbeatMs: 10,
+    highWaterMarkBytes: 1024,
+    maxEventBytes: 64,
+    revalidate: () => ({ subject: 'avo' }),
+    getEvents: () => [{ cursor: 1, payload: 'private-fragment'.repeat(100) }],
+  });
+  const reader = stream.getReader();
+  await assert.rejects(
+    () => reader.read(),
+    (error) => error.message === 'Event stream closed' && !error.message.includes('private-fragment'),
+  );
+});
+
+test('cursor advances only for enqueued events and resumes after reads', async () => {
+  const requested = [];
+  const all = [
+    { cursor: 1, payload: 'one' },
+    { cursor: 2, payload: 'two' },
+    { cursor: 3, payload: 'three' },
+  ];
+  const stream = createRevocableEventStream({
+    request: { signal: new AbortController().signal },
+    heartbeatMs: 4,
+    highWaterMarkBytes: 1,
+    maxEventBytes: 1024,
+    revalidate: () => ({ subject: 'avo' }),
+    getEvents({ cursor }) {
+      requested.push(cursor);
+      return all.filter((event) => event.cursor > cursor);
+    },
+  });
+  const reader = stream.getReader();
+  assert.match(decoder.decode((await reader.read()).value), /id: 1/);
+  await sleep(8);
+  assert.match(decoder.decode((await reader.read()).value), /id: 2/);
+  await sleep(8);
+  assert.deepEqual(requested.slice(0, 3), [0, 1, 2]);
+  await reader.cancel();
 });
 
 test('an already-aborted request closes before any event delivery', async () => {
@@ -53,8 +122,29 @@ test('an already-aborted request closes before any event delivery', async () => 
   const reader = stream.getReader();
   assert.equal((await reader.read()).done, true);
   assert.equal(sourceCalls, 0);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await sleep(20);
   assert.equal(sourceCalls, 0);
+});
+
+test('client cancellation clears timers and stops source polling', async () => {
+  let sourceCalls = 0;
+  const stream = createRevocableEventStream({
+    request: { signal: new AbortController().signal },
+    heartbeatMs: 4,
+    highWaterMarkBytes: 1,
+    maxEventBytes: 1024,
+    revalidate: () => ({ subject: 'avo' }),
+    getEvents() {
+      sourceCalls += 1;
+      return [{ cursor: sourceCalls, payload: 'event' }];
+    },
+  });
+  const reader = stream.getReader();
+  await reader.read();
+  await reader.cancel();
+  const callsAtCancel = sourceCalls;
+  await sleep(20);
+  assert.equal(sourceCalls, callsAtCancel);
 });
 
 test('SSE route binds every batch to the original revocable session lease', () => {
