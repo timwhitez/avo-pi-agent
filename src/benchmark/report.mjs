@@ -19,45 +19,90 @@ export function findNewJsonReports(root, before) {
     .map((item) => item.file);
 }
 
+export function selectRunReport(files, { runId, kind = 'official-public-environments' } = {}) {
+  const matches = [];
+  for (const file of files) {
+    let report;
+    try {
+      report = readJson(file);
+    } catch {
+      continue;
+    }
+    if (String(report?.runId || '') !== String(runId || '')) continue;
+    if (String(report?.kind || '') !== kind) continue;
+    matches.push({ file, report, records: extractGameRecords(report) });
+  }
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one ${kind} report for runId=${runId}; found ${matches.length}`);
+  }
+  if (matches[0].records.length === 0) {
+    throw new Error('production runner report contains no per-game records');
+  }
+  return matches[0];
+}
+
 export function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
 export function extractGameRecords(report) {
   const records = [];
-  visit(report, (value) => {
+  visitWithPath(report, '$', (value, currentPath) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    const gameId = value.gameId ?? value.game_id ?? value.id;
+    const gameId = value.gameId ?? value.game_id;
     const hasResultShape = 'state' in value || 'levelsCompleted' in value || 'levels_completed' in value
       || 'actions' in value || 'actionCount' in value || 'won' in value;
     if (!gameId || !hasResultShape) return;
     records.push({
       gameId: normalizeGameId(gameId),
+      versionedGameId: String(gameId),
       state: String(value.state ?? value.gameState ?? value.game_state ?? 'UNKNOWN'),
       levelsCompleted: number(value.levelsCompleted ?? value.levels_completed ?? value.levels ?? 0),
       winLevels: number(value.winLevels ?? value.win_levels ?? 0),
       actions: number(value.actions ?? value.actionCount ?? value.action_count ?? 0),
       won: Boolean(value.won ?? /WIN/i.test(String(value.state ?? ''))),
       error: value.error ? String(value.error) : null,
+      loop: typeof value.loop === 'string' ? value.loop : null,
+      sourcePath: currentPath,
     });
   });
-  const byId = new Map();
-  for (const record of records) {
-    const existing = byId.get(record.gameId);
-    if (!existing || completeness(record) > completeness(existing)) byId.set(record.gameId, record);
+  return records;
+}
+
+export function validateProductionLoops(records, expectedGames) {
+  if (!Array.isArray(records) || records.length !== expectedGames) {
+    throw new Error(`production loop attestation requires exactly ${expectedGames} game records; found ${records?.length ?? 0}`);
   }
-  return [...byId.values()].toSorted((a, b) => a.gameId.localeCompare(b.gameId));
+  const missing = records.filter((record) => !record.loop).map((record) => record.gameId);
+  const invalid = records.filter((record) => record.loop && record.loop !== 'pi-sdk')
+    .map((record) => ({ gameId: record.gameId, loop: record.loop }));
+  if (missing.length || invalid.length) {
+    throw new Error(`production loop attestation failed: ${JSON.stringify({ missing, invalid })}`);
+  }
+  return { complete: true, attestedCount: records.length, loop: 'pi-sdk' };
 }
 
 export function validateCompleteGameSet(expectedGames, records) {
   const expected = expectedGames.map((game) => normalizeGameId(game.gameId ?? game));
+  if (expected.length === 0) throw new Error('expected public game set is empty');
+  const duplicateExpected = duplicates(expected);
+  if (duplicateExpected.length) throw new Error(`expected public game set contains duplicates: ${duplicateExpected.join(', ')}`);
+
   const actual = records.map((record) => normalizeGameId(record.gameId));
-  const duplicateIds = actual.filter((id, index) => actual.indexOf(id) !== index);
+  const duplicateIds = duplicates(actual);
   const missing = expected.filter((id) => !actual.includes(id));
   const unexpected = actual.filter((id) => !expected.includes(id));
   const errors = records.filter((record) => record.error).map((record) => ({ gameId: record.gameId, error: record.error }));
-  if (duplicateIds.length || missing.length || unexpected.length || errors.length) {
-    const detail = { duplicateIds: [...new Set(duplicateIds)], missing, unexpected, errors };
+  const countMismatch = actual.length !== expected.length;
+  if (duplicateIds.length || missing.length || unexpected.length || errors.length || countMismatch) {
+    const detail = {
+      duplicateIds,
+      missing,
+      unexpected,
+      errors,
+      expectedCount: expected.length,
+      actualCount: actual.length,
+    };
     throw new Error(`public game completeness gate failed: ${JSON.stringify(detail)}`);
   }
   return {
@@ -112,6 +157,8 @@ export function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const descriptor = fs.openSync(temporary, 'r');
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
   fs.renameSync(temporary, file);
 }
 
@@ -124,12 +171,10 @@ function number(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function completeness(record) {
-  return Number(Boolean(record.state && record.state !== 'UNKNOWN'))
-    + Number(record.levelsCompleted > 0)
-    + Number(record.actions > 0)
-    + Number(record.winLevels > 0)
-    + Number(record.won);
+function duplicates(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) || 0) + 1);
+  return [...counts.entries()].filter(([, count]) => count > 1).map(([value]) => value).sort();
 }
 
 function walk(root, files) {
@@ -137,17 +182,6 @@ function walk(root, files) {
     const file = path.join(root, entry.name);
     if (entry.isDirectory()) walk(file, files);
     else if (entry.isFile()) files.push(file);
-  }
-}
-
-function visit(value, callback, seen = new WeakSet()) {
-  if (!value || typeof value !== 'object' || seen.has(value)) return;
-  seen.add(value);
-  callback(value);
-  if (Array.isArray(value)) {
-    for (const child of value) visit(child, callback, seen);
-  } else {
-    for (const child of Object.values(value)) visit(child, callback, seen);
   }
 }
 
