@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -79,9 +80,56 @@ function isNodeExecutable(executable) {
 
 function classifyCanonicalEntrypoint(candidate) {
   const relative = projectRelative(candidate);
-  if (arcEntrypointPattern.test(relative)) return 'arc';
-  if (agentEntrypointPattern.test(relative)) return 'agent';
-  return 'utility';
+  const profile = arcEntrypointPattern.test(relative)
+    ? 'arc'
+    : agentEntrypointPattern.test(relative)
+      ? 'agent'
+      : 'utility';
+  if (profile === 'utility') return profile;
+  return isTrustedEntrypoint(candidate, relative) ? profile : 'utility';
+}
+
+function isTrustedEntrypoint(candidate, relative) {
+  if (!candidate || !relative) return false;
+  const segments = relative.split('/');
+  let current = projectRoot;
+  let descriptor = null;
+  try {
+    const rootStat = fs.lstatSync(projectRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return false;
+
+    for (let index = 0; index < segments.length; index += 1) {
+      current = path.join(current, segments[index]);
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink()) return false;
+      const final = index === segments.length - 1;
+      if (!final) {
+        if (!stat.isDirectory()) return false;
+        continue;
+      }
+      if (!stat.isFile() || stat.nlink !== 1) return false;
+      descriptor = fs.openSync(current, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      const opened = fs.fstatSync(descriptor);
+      if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== stat.dev || opened.ino !== stat.ino) {
+        return false;
+      }
+    }
+
+    const realpath = fs.realpathSync.native || fs.realpathSync;
+    const realRoot = realpath(projectRoot);
+    const realCandidate = realpath(candidate);
+    const realRelative = path.relative(realRoot, realCandidate);
+    return Boolean(realRelative)
+      && !path.isAbsolute(realRelative)
+      && realRelative !== '..'
+      && !realRelative.startsWith(`..${path.sep}`);
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
 }
 
 function resolveCandidate(value, cwd) {
