@@ -90,11 +90,13 @@ container isolation.
 npm run local:preflight
 ```
 
-The preflight performs a real `/responses` attestation, verifies the installed
-ARC distributions, obtains an anonymous ARC key through the official SDK, and
-freezes the dynamically discovered public game list. Output contains hashes and
-safe metadata only; provider endpoint, key, model identifier, and ARC key are
-absent.
+The preflight performs a real non-streaming `/responses` freshness attestation,
+then verifies the exact production Pi streaming/tool-call protocol in the same
+filtered Agent child environment used by the benchmark. It also verifies the
+installed ARC distributions, obtains an anonymous ARC key through the official
+SDK, and freezes the dynamically discovered public game list. Output contains
+hashes and safe metadata only; provider endpoint, key, model identifier, and ARC
+key are absent.
 
 ## One complete local execution
 
