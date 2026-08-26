@@ -70,6 +70,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       timeoutMs: streamTimeoutMs,
       maxRetries: streamMaxRetries,
     });
+  const transcriptOptions = {
+    recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
+    maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
+  };
 
   return {
     kind: 'pi-sdk',
@@ -113,6 +117,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           messages: [],
         },
         streamFn: resilientStreamFn,
+        transformContext: (messages) => boundTranscript(messages, transcriptOptions),
         toolExecution: 'sequential',
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
@@ -194,4 +199,50 @@ function positiveEnvInt(name, fallback) {
     throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
+}
+
+const ELIDED_TOOL_OUTPUT = '[older tool output elided to stay within the model context window; durable memory, the knowledge tool and the scratch workspace retain the details]';
+
+/**
+ * Bound the replayed transcript before every provider request.
+ *
+ * Long ARC runs execute hundreds of environment actions, and each observe/act
+ * tool result embeds a full textual frame. Replaying every historical payload
+ * eventually exceeds the provider context window (observed as
+ * context_too_large after roughly twenty actions), so older tool outputs are
+ * elided in favor of the durable per-game memory that the agent already
+ * recovers on every turn.
+ */
+export function boundTranscript(messages, { recentToolResults = 6, maxMessages = 160 } = {}) {
+  if (!Array.isArray(messages)) return messages;
+  const toolIndices = [];
+  messages.forEach((message, index) => {
+    if (message?.role === 'toolResult') toolIndices.push(index);
+  });
+  if (toolIndices.length <= recentToolResults && messages.length <= maxMessages) return messages;
+
+  const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
+  const overflow = Math.max(0, messages.length - maxMessages);
+  const kept = [];
+  let droppedOverflow = 0;
+  messages.forEach((message, index) => {
+    const droppable = index < overflow && message?.role !== 'user';
+    if (droppable) { droppedOverflow += 1; return; }
+    if (message?.role === 'toolResult' && !keepTools.has(index)) {
+      kept.push({
+        ...message,
+        content: [{ type: 'text', text: ELIDED_TOOL_OUTPUT }],
+      });
+      return;
+    }
+    kept.push(message);
+  });
+  if (droppedOverflow > 0) {
+    kept.unshift({
+      role: 'user',
+      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; recover any needed detail from durable memory before acting]` }],
+      timestamp: messages[0]?.timestamp ?? Date.now(),
+    });
+  }
+  return kept;
 }
