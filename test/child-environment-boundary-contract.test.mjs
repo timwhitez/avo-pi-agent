@@ -22,7 +22,8 @@ test('canonical local execution boundaries use the shared child environment poli
   const provenance = source('src/benchmark/provenance.mjs');
   assert.match(provenance, /buildArcChildEnvironment/);
   assert.match(provenance, /buildUtilityChildEnvironment/);
-  assert.doesNotMatch(provenance, /env\s*=\s*process\.env/);
+  assert.doesNotMatch(provenance, /env:\s*process\.env/);
+  assert.doesNotMatch(provenance, /env:\s*\{\s*\.\.\.process\.env/s);
 
   const processRunner = source('src/benchmark/process-runner.mjs');
   assert.match(processRunner, /env\s*=\s*buildUtilityChildEnvironment/);

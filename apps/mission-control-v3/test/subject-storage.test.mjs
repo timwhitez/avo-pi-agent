@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildRunLaunch } from '../lib/run-contract.mjs';
 
 function launch(subject) {
@@ -51,7 +52,7 @@ test('unsafe or browser-shaped namespaces are rejected', () => {
 });
 
 test('authenticated wrapper supplies the server-derived subject namespace', () => {
-  const source = fs.readFileSync(path.resolve(process.cwd(), 'lib', 'control-plane.mjs'), 'utf8');
+  const source = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'lib', 'control-plane.mjs'), 'utf8');
   assert.match(source, /storageNamespace:\s*owner/);
   assert.doesNotMatch(source, /storageNamespace:\s*input/);
 });
