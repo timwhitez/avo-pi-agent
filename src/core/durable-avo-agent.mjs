@@ -13,7 +13,10 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     this.evidenceStore = new EvidenceStore(
       path.join(config.memoryDir, 'evidence'),
       gameId,
-      config.evidenceLimits,
+      {
+        ...config.evidenceLimits,
+        authorityRoot: config.memoryDir,
+      },
     ).load();
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
