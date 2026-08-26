@@ -1,33 +1,62 @@
 # Reproduction Status
 
-This file separates implemented mechanisms, local validation and real external
-execution. No synthetic or mocked result is treated as an ARC-AGI-3 score.
+This file separates implemented mechanisms, historical local observations, and
+real external execution. No synthetic or mocked result is treated as an
+ARC-AGI-3 score.
 
-## Current status
+## Current acceptance status
+
+There is **no accepted official public-run result**. There is also no accepted
+current exact-tip full-suite result, complete public-set run, or official score
+recorded for this repository. The benchmark remains fail-closed until a
+supported-runtime trusted host completes every Provider, Pi, official-ARC,
+exact-game, trajectory-integrity, redaction, and official-score gate on the
+exact review commit.
+
+## Implementation status
 
 | Area | Status | Evidence |
 |---|---|---|
-| Pi Agent production loop | Implemented | `src/loop/pi-sdk.mjs` uses official Pi packages and dynamic continuation. |
-| Public AVO mechanism audit | Implemented for the reviewed public sources | `docs/AVO_CONFORMANCE.md` maps claims to code and tests. |
-| Pre-experiment proposal and external commit gate | Implemented | `src/core/evaluator.mjs`, lineage and memory schema v3. |
-| Failed-attempt retention and continuous lineage | Implemented | Separate proposals, attempts and committed records. |
-| Conditional evidence-backed supervisor | Implemented | Repeated-state/cycle detector with multiple directions. |
-| Confined persistent scratch workspace | Implemented as an engineering adaptation | Node wrapper plus resource-limited Python helper. |
-| Offline test suite | Passed locally | 235 tests passed in the audited implementation worktree. |
-| Offline synthetic contract demo | Passed locally | 25/25 synthetic environments, 75/75 synthetic levels, 816 actions. |
-| Real provider preflight | Passed locally | Fresh Responses nonce attestation and a Pi SDK streaming tool-call attestation both passed without publishing provider values. |
-| Official ARC-AGI-3 public-set run | No accepted result recorded | The complete local runner remains fail-closed until all dynamically discovered games and the official-score gate succeed. |
-| Concrete official score | Unavailable | Must come from the official runtime/scorecard. |
-| Real trajectory diagnosis and repair | Pending real run | Detector/replay workstream is tracked separately. |
-| CopilotKit frontend | Pending backend contract stabilization | Intentionally scheduled last. |
+| Pi Agent production loop | Implemented | `src/loop/pi-sdk.mjs` uses the official Pi packages and dynamic continuation. |
+| Public AVO mechanism audit | Implemented for reviewed public sources | `docs/AVO_CONFORMANCE.md` maps claims to code and tests. |
+| Pre-experiment proposal and external commit gate | Implemented | `src/core/evaluator.mjs`, lineage, and durable memory/evidence stores. |
+| Failed-attempt retention and continuous lineage | Implemented | Separate proposals, attempts, and committed records. |
+| Conditional evidence-backed supervisor | Implemented | Repeated-state/cycle episodes with bounded interventions. |
+| Files-only workspace default | Implemented engineering boundary | Arbitrary Python is unavailable unless a separately attested OS-isolation backend is configured. |
+| Official ARC-AGI-3 public-set run | No accepted result recorded | The complete local runner remains fail-closed. |
+| Concrete official score | Unavailable | Must come from an accepted official runtime/scorecard origin. |
+| Real trajectory diagnosis and repair | Pending accepted real run | Detector/replay workstream is tracked separately. |
+| CopilotKit frontend deterministic install/build gate | Pending | Tracked by Issue #71. |
+
+## Historical combined-worktree observations — 2026-08-24
+
+A separate trusted-local **combined worktree** was reported to have produced the
+following observations on **2026-08-24**:
+
+- 235 Node tests passed;
+- the deterministic offline contract demo completed 25 synthetic environments,
+  75 synthetic levels, and 816 synthetic actions;
+- a fresh Responses challenge and a Pi SDK streaming tool-call preflight passed;
+- installed official ARC packages were inspected;
+- anonymous ARC bootstrap and discovery of 25 public games succeeded.
+
+These are historical combined-worktree observations. They were not reproduced
+on each focused sibling PR head and are not current exact-tip validation. They
+are not an official benchmark, an ARC score, or a substitute for a fresh
+supported-runtime run against the exact canonical review commit.
+
+During the independent audit on **2026-08-25**, the available runtime was Node
+22.16.0, below the repository-declared `>=22.19.0`; the exact private tip could
+not complete dependency installation or reach the supplied Provider. No public
+game or official score was accepted from that audit environment.
 
 ## Why a real score is not recorded here
 
-Local access to the provider and official ARC packages has been verified, but a
-successful preflight is not an ARC score. A score may be recorded only after a
-single fail-closed local run satisfies the complete-game, production-Pi,
-trajectory-integrity, redaction, and explicit official-score-origin gates.
-Runtime credentials remain outside source, issues, pull requests, and logs.
+A Provider or runtime preflight is not an ARC score. A score may be recorded
+only after one fail-closed local run satisfies the complete-game,
+production-Pi, trajectory-integrity, redaction, and accepted
+official-score-origin gates. Runtime credentials remain outside source, issues,
+pull requests, and public logs.
 
 The local benchmark workstream must:
 
@@ -36,7 +65,7 @@ The local benchmark workstream must:
 3. freeze the dynamically discovered public game set;
 4. run every requested game without silent skip or duplication;
 5. preserve raw trajectories privately;
-6. emit a redacted manifest, per-game metrics and exact official score origin;
+6. emit a redacted manifest, per-game metrics, and exact official score origin;
 7. reject any attempt to present a diagnostic/resumed aggregate as an official
    one-shot competition score.
 
@@ -44,12 +73,12 @@ The local benchmark workstream must:
 
 Official NVIDIA material reports NVIDIA's own AVO result. That result is useful
 as design context but is not evidence that this repository reproduced it. This
-repository will publish only scores returned by its own real official-runtime
-execution.
+repository will publish only scores returned by its own accepted
+official-runtime execution.
 
 ## Review policy
 
 A pull request may describe a blocked real-run attempt only when it includes
-redacted, reproducible failure evidence. It must not translate infrastructure
-failure into an Agent score, and it must not claim success because offline
-contract tests passed.
+redacted, reproducible failure evidence tied to the exact tested commit. It must
+not translate infrastructure failure into an Agent score or claim success
+because historical/offline contract checks passed.
