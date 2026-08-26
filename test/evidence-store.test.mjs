@@ -68,3 +68,29 @@ test('enforces event and file limits before memory exhaustion', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('evidence persistence rejects symlink roots and dangling store targets', () => {
+  const dir = root();
+  const outside = root();
+  try {
+    const linkedRoot = path.join(dir, 'linked');
+    fs.symlinkSync(outside, linkedRoot);
+    assert.throws(
+      () => new EvidenceStore(linkedRoot, 'game-f').load(),
+      /evidence root must be a regular non-symlink directory/,
+    );
+
+    const regular = path.join(dir, 'regular');
+    fs.mkdirSync(regular);
+    const store = new EvidenceStore(regular, 'game-g').load();
+    fs.symlinkSync(path.join(outside, 'missing.jsonl'), store.file);
+    assert.throws(
+      () => store.append({ type: 'observation' }),
+      /regular non-symlink file/,
+    );
+    assert.equal(fs.lstatSync(store.file).isSymbolicLink(), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});

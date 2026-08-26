@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import { PersistentMemory } from './memory.mjs';
 
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
@@ -19,14 +18,10 @@ export class DurableMemory extends PersistentMemory {
       maxProposals: integer(options.maxProposals, 1, 100_000, DEFAULT_MAX_PROPOSALS),
       pendingMaxAgeMs: integer(options.pendingMaxAgeMs, 1, 365 * 24 * 60 * 60 * 1000, DEFAULT_PENDING_MAX_AGE_MS),
     };
+    this.maxMemoryBytes = this.limits.maxMemoryBytes;
   }
 
   load() {
-    if (fs.existsSync(this.file)) {
-      const stat = fs.lstatSync(this.file);
-      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('memory state must be a regular non-symlink file');
-      if (stat.size > this.limits.maxMemoryBytes) throw new Error(`memory state exceeds ${this.limits.maxMemoryBytes} bytes`);
-    }
     super.load();
     const changed = this.expireOrphanedProposals() + this.compactEvolution();
     if (changed) super.save();

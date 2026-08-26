@@ -22,11 +22,14 @@ export class EvidenceStore {
   load() {
     this.events = [];
     this.sequence = 0;
-    if (!fs.existsSync(this.file)) return this;
-    const stat = fs.lstatSync(this.file);
+    const rootStat = optionalLstat(this.root);
+    if (!rootStat) return this;
+    assertEvidenceRoot(rootStat);
+    const stat = optionalLstat(this.file);
+    if (!stat) return this;
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('evidence store must be a regular non-symlink file');
     if (stat.size > this.maxFileBytes) throw new Error(`evidence store exceeds ${this.maxFileBytes} bytes`);
-    this.#readLines((line, lineNumber) => this.#acceptParsed(parseLine(line, lineNumber), lineNumber));
+    this.#readLines(stat, (line, lineNumber) => this.#acceptParsed(parseLine(line, lineNumber), lineNumber));
     return this;
   }
 
@@ -46,11 +49,24 @@ export class EvidenceStore {
     const bytes = Buffer.byteLength(line, 'utf8');
     if (bytes > this.maxEventBytes) throw new Error(`evidence event exceeds ${this.maxEventBytes} bytes`);
     if (this.events.length >= this.maxEvents) throw new Error(`evidence store exceeds ${this.maxEvents} events; compact before append`);
-    const currentSize = fs.existsSync(this.file) ? fs.statSync(this.file).size : 0;
-    if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
-    const fd = fs.openSync(this.file, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY, 0o600);
+    assertEvidenceRoot(fs.lstatSync(this.root));
+    const before = optionalLstat(this.file);
+    if (before && (before.isSymbolicLink() || !before.isFile())) {
+      throw new Error('evidence store must be a regular non-symlink file');
+    }
+    const currentSize = before?.size ?? 0;
+    if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
+    const fd = fs.openSync(
+      this.file,
+      fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | noFollowFlag(),
+      0o600,
+    );
     try {
+      const opened = fs.fstatSync(fd);
+      if (!opened.isFile() || (before && !sameFileIdentity(before, opened))) {
+        throw new Error('evidence store changed during secure append');
+      }
       fs.writeFileSync(fd, line, 'utf8');
       fs.fsyncSync(fd);
     } finally {
@@ -94,12 +110,16 @@ export class EvidenceStore {
     this.sequence = event.sequence;
   }
 
-  #readLines(onLine) {
-    const fd = fs.openSync(this.file, 'r');
+  #readLines(before, onLine) {
+    const fd = fs.openSync(this.file, fs.constants.O_RDONLY | noFollowFlag());
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
     let carry = '';
     let lineNumber = 0;
     try {
+      const opened = fs.fstatSync(fd);
+      if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+        throw new Error('evidence store changed during secure open');
+      }
       for (;;) {
         const bytes = fs.readSync(fd, buffer, 0, buffer.length, null);
         if (!bytes) break;
@@ -116,6 +136,8 @@ export class EvidenceStore {
         lineNumber += 1;
         onLine(carry, lineNumber);
       }
+      const after = fs.fstatSync(fd);
+      if (!sameFileIdentity(opened, after)) throw new Error('evidence store changed while being read');
     } finally {
       fs.closeSync(fd);
     }
@@ -123,6 +145,11 @@ export class EvidenceStore {
 
   #rewrite(events) {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    assertEvidenceRoot(fs.lstatSync(this.root));
+    const target = optionalLstat(this.file);
+    if (target && (target.isSymbolicLink() || !target.isFile())) {
+      throw new Error('evidence store must be a regular non-symlink file');
+    }
     const temporary = `${this.file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     const fd = fs.openSync(temporary, 'wx', 0o600);
     try {
@@ -137,6 +164,29 @@ export class EvidenceStore {
   }
 }
 
+function optionalLstat(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+function assertEvidenceRoot(stat) {
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error('evidence root must be a regular non-symlink directory');
+  }
+}
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+function noFollowFlag() {
+  return Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
+}
 function parseLine(line, lineNumber) {
   try { return JSON.parse(line); } catch (error) { throw new Error(`evidence line ${lineNumber} is invalid JSON`, { cause: error }); }
 }
