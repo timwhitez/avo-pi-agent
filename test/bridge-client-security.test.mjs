@@ -4,7 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { ArcBridgeClient, buildArcChildEnv, normalizeArcAuthMode } from '../src/arc/bridge-client.mjs';
+import {
+  ArcBridgeClient,
+  buildArcChildEnv,
+  isChildRunning,
+  normalizeArcAuthMode,
+} from '../src/arc/bridge-client.mjs';
 
 test('ARC child environment excludes provider, GitHub, cloud and registry secrets', () => {
   const env = {
@@ -63,10 +68,24 @@ test('registered ARC mode passes only the ARC credential and fails without it', 
   );
 });
 
-test('a timed-out request terminates the bridge instead of desynchronizing FIFO responses', async () => {
+test('child liveness rejects signal exit and destroyed stdin even when exitCode is null', () => {
+  const live = {
+    pid: 123,
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    stdin: { destroyed: false, writable: true, writableEnded: false },
+  };
+  assert.equal(isChildRunning(live), true);
+  assert.equal(isChildRunning({ ...live, signalCode: 'SIGKILL' }), false);
+  assert.equal(isChildRunning({ ...live, stdin: { ...live.stdin, destroyed: true } }), false);
+  assert.equal(isChildRunning({ ...live, stdin: { ...live.stdin, writableEnded: true } }), false);
+});
+
+test('a timed-out request permanently closes the client and never reuses destroyed stdin', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-bridge-timeout-'));
   const script = path.join(root, 'hang.mjs');
-  fs.writeFileSync(script, 'process.stdin.resume();\n', { mode: 0o600 });
+  fs.writeFileSync(script, 'process.stdin.resume(); setInterval(() => {}, 1000);\n', { mode: 0o600 });
   const client = new ArcBridgeClient({
     python: process.execPath,
     script,
@@ -75,13 +94,23 @@ test('a timed-out request terminates the bridge instead of desynchronizing FIFO 
   });
   try {
     await client.start();
+    const originalPid = client.child.pid;
     const exited = onceExit(client.child, 2_000);
     await assert.rejects(client.request({ command: 'hang' }), /timed out/);
     const result = await exited;
+
     assert.equal(client.pending.length, 0);
+    assert.equal(client.closed, true);
     assert.equal(result.signal, 'SIGKILL');
     assert.equal(client.child.signalCode, 'SIGKILL');
     assert.equal(client.child.stdin.destroyed, true);
+    assert.equal(isChildRunning(client.child), false);
+
+    await assert.rejects(client.ensureProcess(), /closed|not running/);
+    assert.equal(client.child.pid, originalPid);
+    assert.throws(() => client.request({ command: 'again' }), /closed/);
+    await client.close();
+    await client.close();
   } finally {
     await client.close();
     fs.rmSync(root, { recursive: true, force: true });

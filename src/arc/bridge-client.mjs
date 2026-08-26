@@ -64,6 +64,21 @@ export function buildArcChildEnv(env = process.env) {
   return child;
 }
 
+export function isChildRunning(child) {
+  return Boolean(
+    child
+      && Number.isInteger(child.pid)
+      && child.pid > 0
+      && child.exitCode === null
+      && child.signalCode === null
+      && child.killed !== true
+      && child.stdin
+      && child.stdin.destroyed !== true
+      && child.stdin.writable !== false
+      && child.stdin.writableEnded !== true,
+  );
+}
+
 export class ArcBridgeClient {
   constructor({
     python,
@@ -94,24 +109,35 @@ export class ArcBridgeClient {
   }
 
   async ensureProcess() {
-    if (this.child && this.child.exitCode === null && !this.child.killed) return;
+    if (isChildRunning(this.child)) return;
+    if (this.child) {
+      this.closed = true;
+      throw new Error('ARC bridge process is not running; create a new client instance');
+    }
     if (this.closed) throw new Error('ARC bridge is closed');
-    this.child = spawn(this.python, [this.script], {
+
+    const child = spawn(this.python, [this.script], {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
       env: buildArcChildEnv(process.env),
     });
-    this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk) => this.appendDiagnostic(chunk));
-    this.child.on('error', (error) => this.abortBridge(error));
-    this.child.on('exit', (code, signal) => {
+    this.child = child;
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => this.appendDiagnostic(chunk));
+    child.on('error', (error) => {
+      if (this.child === child) this.abortBridge(error);
+    });
+    child.on('exit', (code, signal) => {
+      if (this.child !== child) return;
+      this.closed = true;
       const suffix = this.stderr ? `: ${this.stderr.trim()}` : '';
       this.rejectPending(new Error(`ARC bridge exited with code ${code ?? 'null'}${signal ? ` (${signal})` : ''}${suffix}`));
     });
-    const lines = readline.createInterface({ input: this.child.stdout });
+
+    const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => {
-      if (!line.trim()) return;
+      if (this.child !== child || !line.trim()) return;
 
       let response;
       try {
@@ -159,31 +185,33 @@ export class ArcBridgeClient {
   }
 
   abortBridge(error) {
+    this.closed = true;
     this.rejectPending(error);
     this.terminateChild();
   }
 
   terminateChild() {
     const child = this.child;
-    if (!child || child.exitCode !== null) return;
-    try {
-      if (process.platform === 'win32') child.kill('SIGKILL');
-      else process.kill(-child.pid, 'SIGKILL');
-    } catch {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    if (process.platform === 'win32') {
       try { child.kill('SIGKILL'); } catch {}
+      return;
     }
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    try { child.kill('SIGKILL'); } catch {}
   }
 
   request(payload, { timeoutMs = this.requestTimeoutMs } = {}) {
-    if (!this.child || this.child.exitCode !== null || this.child.killed) {
+    if (this.closed) throw new Error('ARC bridge is closed');
+    if (!isChildRunning(this.child)) {
+      this.closed = true;
       throw new Error('ARC bridge is not running');
     }
     const deadlineMs = positiveTimeout(timeoutMs);
     return new Promise((resolve, reject) => {
       const item = { resolve, reject, timer: null, settled: false };
       item.timer = setTimeout(() => {
-        const error = new Error(`ARC bridge request timed out after ${deadlineMs}ms`);
-        this.abortBridge(error);
+        this.abortBridge(new Error(`ARC bridge request timed out after ${deadlineMs}ms`));
       }, deadlineMs);
       item.timer.unref?.();
       this.pending.push(item);
@@ -229,15 +257,19 @@ export class ArcBridgeClient {
   }
 
   async close() {
-    if (this.closed) return;
+    if (this.closed) {
+      this.terminateChild();
+      return;
+    }
     try {
-      if (this.child && this.child.exitCode === null && !this.child.killed) {
+      if (isChildRunning(this.child)) {
         await this.request({ command: 'close' }, { timeoutMs: Math.min(5_000, this.requestTimeoutMs) });
       }
     } catch {
       // Cleanup is best-effort; the process group is terminated below.
     } finally {
       this.closed = true;
+      this.rejectPending(new Error('ARC bridge closed'));
       this.terminateChild();
     }
   }
