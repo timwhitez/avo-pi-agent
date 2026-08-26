@@ -71,12 +71,14 @@ export class EvidenceStore {
     ensureEvidenceRoot(this.authorityRoot, this.root);
     const lock = acquireEvidenceWriteLock({ root: this.root, file: this.lockFile, owner: this.gameId });
     let persistedIdentity;
+    let createdFile = false;
     try {
       const before = optionalLstat(this.file);
       assertExpectedFileState(this.fileIdentity, before);
       const currentSize = before ? fileSize(before) : 0;
       if (currentSize + bytes > this.maxFileBytes) throw new Error(`evidence store would exceed ${this.maxFileBytes} bytes; compact before append`);
       const { fd, created } = openEvidenceAppendFile(this.file, before);
+      createdFile = created;
       try {
         const opened = fs.fstatSync(fd, { bigint: true });
         assertEvidenceFile(opened, 'evidence store append target');
@@ -99,6 +101,7 @@ export class EvidenceStore {
       } finally {
         fs.closeSync(fd);
       }
+      if (createdFile) fsyncDirectory(this.root);
     } finally {
       lock.release();
     }
@@ -286,7 +289,10 @@ function ensureEvidenceRoot(authorityRoot, root) {
   if (!relative) return;
   for (const component of relative.split(path.sep)) {
     current = path.join(current, component);
-    if (!optionalLstat(current)) fs.mkdirSync(current, { mode: 0o700 });
+    if (!optionalLstat(current)) {
+      fs.mkdirSync(current, { mode: 0o700 });
+      fsyncDirectory(path.dirname(current));
+    }
     const opened = fs.lstatSync(current, { bigint: true });
     assertEvidenceRoot(opened, 'evidence parent');
     assertContained(realAuthority, fs.realpathSync(current));
