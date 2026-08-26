@@ -9,11 +9,21 @@ import {
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const COPILOT_FORWARD_STRIP_HEADERS = Object.freeze([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'x-avo-csrf',
+]);
+
 export async function POST(request) {
   try {
     const session = requireSession(request, { requireCsrf: false });
     assertRateLimit('copilotkit', session.subject, { limit: 60, windowMs: 60_000 });
-    const boundedRequest = await createBoundedRequestBody(request, { maxBytes: 1024 * 1024 });
+    const boundedRequest = await createBoundedRequestBody(request, {
+      maxBytes: 1024 * 1024,
+      stripHeaders: COPILOT_FORWARD_STRIP_HEADERS,
+    });
     const kit = await import('@copilotkit/runtime');
     const Runtime = kit.CopilotRuntime;
     const endpointFactory = kit.copilotRuntimeNextJSAppRouterEndpoint;
