@@ -1,40 +1,65 @@
-# Validation results — 2026-08-22
+# Validation Results
 
-This record distinguishes tests that actually ran from production paths that
-could not run in the original build sandbox. It contains no provider endpoint,
-model identifier, API key, ARC credential, or raw model output.
+## Local implementation validation
 
-## Completed locally
+The AVO conformance implementation was exercised in a network-isolated local
+worktree with the production code paths imported but without contacting a model
+provider or official ARC service.
 
-- All 13 Node test cases passed, including the production Pi adapter contract,
-  TypeBox schema conversion, CLI entrypoint, Python bridge syntax, cumulative
-  one-process Arcade session, exact-grid serialization, persistent memory,
-  candidate lineage, supervisor behavior, and runtime redaction.
-- A mocked official-boundary integration completed 25 dynamically listed games
-  through one cumulative Arcade process and captured an aggregate scorecard; no
-  official environment or model was used in that contract test.
-- Secret scanning passed. The source-package audit found zero exact private
-  provider values and zero generic secret-pattern hits; the packaged Git object
-  database passed `git fsck`.
-- All 25 synthetic contract environments completed: 25 wins, 75 levels, 816
-  environment actions.
-- JavaScript syntax, Python bytecode compilation, shell syntax, and JSON parsing
-  checks passed.
-- The source tree was subsequently published to the private GitHub repository
-  `timwhitez/avo-pi-agent` after another exact-value and generic-secret scan.
+Completed checks:
 
-The synthetic environments test orchestration and invariants only. They are not
-ARC-AGI-3 public environments, do not yield an official ARC score, and are
-labeled `offline-contract-demo` in reports.
+- Node test suite: **20 passed, 0 failed**.
+- Secret scan: **passed**.
+- Python syntax compilation for the official ARC bridge and scratch helper:
+  **passed**.
+- Deterministic offline contract demo: **25/25 synthetic games completed**,
+  **75/75 synthetic levels**, **816 synthetic environment actions**.
+- Existing `main` regression tests against the updated core: **passed**.
 
-## Not completed in the original build sandbox
+## What these checks establish
 
-- The configured Responses-compatible provider was unreachable from that
-  execution sandbox; the redacted probe result was `fetch failed`.
-- The sandbox could not resolve package registries, so `arc-agi>=0.9.6` and the
-  official public environment cache could not be installed.
+They establish that:
 
-Consequently, this record does not claim that the official 25-game public demo
-ran and does not claim an ARC score. Run `scripts/run-public-demo.sh` in a
-network-enabled environment and retain its gitignored report before changing
-that status.
+- candidate proposals precede their evaluation baseline;
+- model-authored score/correctness/acceptance fields are not part of the tool
+  contract;
+- only post-proposal objective evidence can satisfy prediction checks;
+- rejected attempts remain persisted but absent from committed lineage;
+- stale-parent and worse-objective candidates are rejected;
+- supervisor intervention is conditional, evidence-referenced and multi-option;
+- Pi continuation has a visible outer-turn exhaustion failure mode;
+- workspace path escape, network and subprocess attempts are blocked by the
+  helper's defense-in-depth controls;
+- provider and ARC secrets are absent from committed fixtures.
+
+## What these checks do not establish
+
+They do **not** establish:
+
+- connectivity or compatibility with the supplied real provider;
+- model quality on any ARC public game;
+- an official ARC score or RHAE value;
+- completion of the full public game set;
+- that real trajectories contain no unresolved failure modes;
+- equivalence with NVIDIA's private implementation.
+
+The offline aggregate has `officialScore = null` by design. It must never be
+quoted as an ARC-AGI-3 result.
+
+## Required real-run evidence
+
+A future real benchmark report must contain, at minimum:
+
+- official package and runner versions;
+- a non-secret provider/configuration fingerprint;
+- exact dynamically discovered public game IDs;
+- one record per game with terminal state, levels, actions, latency and
+  token/cost aggregates;
+- mock/runtime rejection attestation;
+- score origin: official scorecard, local diagnostic metric, or unavailable;
+- private raw-trajectory artifact hashes;
+- explicit skipped/duplicate/incomplete-game failures;
+- trajectory detector findings and triage state.
+
+Until those artifacts exist, the repository's official public-run status remains
+**not executed** and its official score remains **unavailable**.

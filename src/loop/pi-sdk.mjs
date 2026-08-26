@@ -93,17 +93,25 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         shouldStopAfterTurn: async () => shouldStop(),
       });
       agent.subscribe((event) => onEvent(event));
-      for (let index = 1; index < config.maxOuterTurns; index += 1) {
+      let outerTurns = 1;
+      await agent.prompt(initialPrompt);
+      while (!shouldStop() && !agent.state.errorMessage && outerTurns < config.maxOuterTurns) {
         agent.followUp({
           role: 'user',
-          content: 'The environment is not complete. Read memory, observe the exact current frame, and continue with a materially useful experiment. Do not stop until WIN or the action budget is exhausted.',
-          timestamp: Date.now() + index,
+          content: 'The environment is not complete. Re-ground in exact evidence and durable memory, then continue with a materially useful direct-interaction experiment. Do not stop until WIN or the action budget is exhausted.',
+          timestamp: Date.now() + outerTurns,
         });
+        await agent.continue();
+        outerTurns += 1;
       }
-      await agent.prompt(initialPrompt);
+      const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       return {
         messages: agent.state.messages,
-        error: agent.state.errorMessage,
+        error: agent.state.errorMessage || (exhaustedOuterTurns
+          ? `Pi outer-turn budget exhausted at ${outerTurns} turns before the ARC run reached a terminal condition`
+          : null),
+        outerTurns,
+        exhaustedOuterTurns,
       };
     },
   };

@@ -12,6 +12,7 @@ recordings/
 runs/*
 !runs/.gitkeep
 .avo-memory/
+.avo-workspaces/
 *.log
 .DS_Store
 coverage/

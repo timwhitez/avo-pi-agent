@@ -1,54 +1,150 @@
 # Architecture
 
-## Design goal
+## Objective
 
-Reconstruct the public AVO system pattern rather than imitate a single prompt.
-The production path is:
+`avo-pi-agent` is a clean-room reconstruction of the publicly documented AVO
+mechanism, adapted to ARC-AGI-3 and implemented on the official Pi Agent core
+loop. The architecture keeps model agency broad while making environment facts,
+objective evaluation, lineage commits and secret boundaries non-negotiable.
+
+## Runtime flow
 
 ```text
-official ARC environment
-        │ exact FrameData / legal actions
-        ▼
-Python JSONL bridge (arc-agi >= 0.9.6)
-        │
-        ▼
-AVO ARC controller
-  ├─ exact 64×64 text observation
+real Responses-compatible provider
+                │
+                ▼
+@earendil-works/pi-agent-core
+  dynamic long-horizon continuation
+                │
+                ▼
+AvoArcAgent — autonomous variation operator
+  ├─ exact observe / scarce act
+  ├─ source-backed domain knowledge
   ├─ persistent structured memory
-  ├─ evaluated candidate lineage
-  ├─ action-efficiency proxy evaluator
-  └─ stall/cycle supervisor
-        │ narrow tools only
-        ▼
-Pi Agent core loop
-        │ OpenAI Responses-compatible wire API
-        ▼
-runtime-selected reasoning model
+  ├─ pre-experiment candidate proposals
+  ├─ immutable environment evidence
+  ├─ external objective evaluator
+  ├─ failed-attempt archive
+  ├─ committed parent-linked lineage
+  ├─ conditional stagnation supervisor
+  └─ confined persistent scratch workspace
+                │
+                ▼
+Node JSONL bridge client
+                │
+                ▼
+Python bridge using official arc-agi / arcengine
+                │
+                ▼
+ARC-AGI-3 public environment and official scorecard
 ```
 
-## Public AVO mechanism mapping
+## AVO control plane
 
-| Publicly described AVO concept | Reconstruction |
-|---|---|
-| Agent owns the variation operator | The Pi agent owns inspect, hypothesis, action, evaluation and revision rather than merely choosing from a fixed policy. |
-| Persistent history/knowledge | Per-game structured JSON memory survives turns, levels and reruns. |
-| Continuous lineage | Every evidence-backed hypothesis is committed with parent, score and acceptance state. |
-| Evaluator-gated persistence | Acceptance is computed from observed progress, state novelty and action cost; the model cannot self-approve. |
-| Supervisor intervention | Repeated frames and short action cycles trigger a forced strategy branch and failed-hypothesis record. |
-| Generic agent, task tools | The loop is generic. ARC-specific behavior lives in six narrow tools and the environment adapter. |
-| Direct environment interaction | Frames are represented as exact text grids; there is no hidden hand-coded solver for official games. |
+The model is not placed in a fixed inspect-plan-act checklist. It chooses when
+to consult memory, full evolution history, domain knowledge or scratch files;
+when to create a durable proposal; which direct interaction discriminates among
+hypotheses; and when enough objective evidence exists for evaluation.
+
+### Proposal lifecycle
+
+1. `candidate_propose` stores a normalized hypothesis, plan, structured action
+   predictions, objective baseline and current committed parent.
+2. Direct environment actions produce immutable evidence events with stable IDs,
+   before/after state hashes, action index, level delta and terminal state.
+3. `candidate_evaluate` accepts only a proposal ID and evidence references.
+4. `CandidateEvaluator` checks that evidence belongs to the game, occurred after
+   proposal creation and matches every structured prediction claim.
+5. A commit additionally requires a current parent, non-duplication and an
+   objective vector that matches or improves the best committed version.
+6. Rejected attempts stay queryable but are never inserted into committed
+   lineage.
+
+### Objective boundary
+
+The local objective vector is derived only from environment state:
+
+```text
+WIN → levels completed → progress since proposal
+    → fewer actions since proposal → novel-state coverage
+```
+
+It gates candidate lineage. It is not official ARC scoring. Official score
+claims require the scorecard returned by a real official-runtime execution.
+
+### Conditional supervisor
+
+`StallSupervisor` retains a bounded event window. It intervenes only when it
+finds a no-progress repeated-state plateau or periodic action cycle. An
+intervention cites evidence and offers multiple alternatives: contrast a prior
+transition, test omitted controls, reframe object/action semantics, or perform a
+planned reset with a different opening. It does not replace the main agent on
+healthy turns.
+
+## Long-horizon Pi loop
+
+The production path uses `@earendil-works/pi-agent-core`; the portable loop is
+restricted to offline deterministic tests. After a Pi prompt settles, the
+wrapper queues a follow-up and calls `continue()` while the ARC environment is
+non-terminal. It stops only on:
+
+- environment WIN;
+- ARC action-budget exhaustion;
+- provider/runtime error;
+- explicit outer-turn exhaustion, reported as an error rather than success.
+
+## Persistent state
+
+Per-game memory schema v3 stores:
+
+- action semantics, objects, goals and invariants;
+- failed hypotheses and proven strategies;
+- candidate proposals and pending proposals;
+- all evaluated attempts;
+- accepted parent-linked lineage;
+- supervisor interventions.
+
+Writes are bounded, atomic and mode-restricted. Legacy memory is migrated while
+preserving failed and accepted records.
+
+## Scratch workspace
+
+The optional workspace persists compact analysis outside the model context. It
+is deliberately secondary to direct environment interaction. Its Python helper
+runs with stripped environment variables, resource limits, audit-hook blocks on
+network/subprocess activity and file confinement. The container/host sandbox is
+still the primary security boundary.
 
 ## Trust boundaries
 
-The model receives no shell, arbitrary file, browser or generic network tool.
-Only the ARC bridge and structured memory are callable. Provider credentials are
-resolved by Pi from process environment and are never passed to ARC, persisted
-in memory, or included in reports.
+### Trusted objective sources
 
-## Production versus offline loop
+- official ARC environment frames and legal actions;
+- levels/terminal state returned by the runtime;
+- action counts maintained by the harness;
+- official scorecard output when available.
 
-`src/loop/pi-sdk.mjs` is the production loop and directly constructs the
-official Pi `Agent`. `src/loop/portable-pi.mjs` is a dependency-free,
-deterministic test double used to validate tool contracts when package or model
-network access is unavailable. Its 25 synthetic contract environments are not
-ARC public games and produce no official score.
+### Untrusted until verified
+
+- model claims about progress, correctness or score;
+- model-authored memory and hypotheses;
+- provider prose/reasoning;
+- resumed diagnostic aggregates presented as competition scores.
+
+### Secrets
+
+Provider endpoint, model ID, API key and ARC credentials are runtime-only. They
+must not enter source, client-side UI state, URLs, committed reports or raw
+public logs. Raw trajectories remain private artifacts; only redacted aggregate
+reports and artifact hashes may be proposed to git.
+
+## Production versus validation paths
+
+- **Production:** Pi Agent SDK + real Responses-compatible provider + official
+  `arc-agi` runtime.
+- **Offline contract validation:** portable deterministic loop + synthetic
+  environments. This validates orchestration only and can never produce an ARC
+  score.
+
+See `AVO_CONFORMANCE.md` for claim provenance and
+`REPRODUCTION_STATUS.md` for what has and has not been executed.
