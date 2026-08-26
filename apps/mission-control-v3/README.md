@@ -47,8 +47,6 @@ Sessions are bound to the authenticated Basic username. Every list, detail, life
 
 Durable AVO memory and scratch workspaces are namespaced from the authenticated subject after strict server-side validation. The namespace is never accepted from the browser. Same-subject runs keep long-horizon memory continuity, while different subjects receive distinct storage roots. Trajectories and reports remain bound to the exact run ID.
 
-Durable AVO memory and scratch workspaces are namespaced from the authenticated subject after strict server-side validation. The namespace is never accepted from the browser. Same-subject runs keep long-horizon memory continuity, while different subjects receive distinct storage roots. Trajectories and reports remain bound to the exact run ID.
-
 The service fails closed with HTTP 503 if `AVO_MISSION_CONTROL_ACCESS_TOKEN` is missing or shorter than 24 characters. Do not put this value in source, URLs, browser storage, `NEXT_PUBLIC_*`, logs, Issues, or PR text.
 
 Request bodies are incrementally bounded by actual bytes before parsing or downstream forwarding. Missing, malformed, oversized, or understated `Content-Length` values cannot bypass the stream limit. JSON input additionally receives fatal UTF-8 decoding and bounded object complexity. The CopilotKit runtime receives a replacement request containing only accepted bounded bytes, never the original unbounded stream.
