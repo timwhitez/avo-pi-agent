@@ -142,6 +142,99 @@ test('abort and stream failures expose stable messages without raw body details'
   });
 });
 
+test('invalid timeout configuration fails before acquiring a body reader', async () => {
+  let readerAcquisitions = 0;
+  const request = {
+    headers: new Headers(),
+    signal: new AbortController().signal,
+    body: {
+      getReader() {
+        readerAcquisitions += 1;
+        throw new Error('reader must not be acquired');
+      },
+    },
+  };
+  await assert.rejects(
+    () => readBoundedRequestBody(request, { maxBytes: 128, timeoutMs: 0 }),
+    /timeoutMs must be an integer/,
+  );
+  assert.equal(readerAcquisitions, 0);
+});
+
+test('a stalled request body is canceled at one absolute read deadline', async () => {
+  let canceled = false;
+  const body = new ReadableStream({
+    start() {},
+    cancel(reason) {
+      canceled = true;
+      assert.equal(reason, 'request body read timed out');
+    },
+  });
+  const request = new Request('http://localhost/api', {
+    method: 'POST', body, duplex: 'half',
+  });
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => readBoundedRequestBody(request, { maxBytes: 128, timeoutMs: 25 }),
+    (error) => {
+      assert.equal(error.status, 408);
+      assert.equal(error.message, 'Request body read timed out');
+      return true;
+    },
+  );
+  assert.equal(canceled, true);
+  assert.ok(Date.now() - startedAt < 1000);
+});
+
+test('the absolute body deadline is not reset after each accepted chunk', async () => {
+  let reads = 0;
+  let canceled = false;
+  const reader = {
+    async read() {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { done: false, value: new Uint8Array([reads]) };
+    },
+    async cancel() { canceled = true; },
+    releaseLock() {},
+  };
+  const request = {
+    headers: new Headers(),
+    signal: new AbortController().signal,
+    body: { getReader() { return reader; } },
+  };
+  await assert.rejects(
+    () => readBoundedRequestBody(request, { maxBytes: 128, timeoutMs: 45 }),
+    (error) => error.status === 408 && error.message === 'Request body read timed out',
+  );
+  assert.equal(canceled, true);
+  assert.ok(reads <= 3);
+});
+
+test('a synchronous reader failure clears the pending deadline timer', async () => {
+  const request = {
+    headers: new Headers(),
+    signal: new AbortController().signal,
+    body: {
+      getReader() {
+        return {
+          read() { throw new Error('private-body-fragment'); },
+          async cancel() {},
+          releaseLock() {},
+        };
+      },
+    },
+  };
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => readBoundedRequestBody(request, { maxBytes: 128, timeoutMs: 5000 }),
+    (error) => error.status === 400
+      && error.message === 'Request body could not be read'
+      && !error.message.includes('private-body-fragment'),
+  );
+  assert.ok(Date.now() - startedAt < 1000);
+});
+
 test('CopilotKit route forwards only the bounded replacement request', () => {
   const route = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
   assert.match(route, /createBoundedRequestBody\(request, \{ maxBytes: 1024 \* 1024 \}\)/);
