@@ -13,7 +13,7 @@
     "demo:public": "node src/cli.mjs run-public --all",
     "provider:check": "node src/cli.mjs provider-check",
     "local:preflight": "node scripts/local-preflight.mjs",
-    "benchmark:local": "node scripts/run-real-public.mjs",
+    "benchmark:local": "node scripts/run-real-public-locked.mjs",
     "repair:local": "node scripts/run-trajectory-repair-loop.mjs",
     "complete:local": "node scripts/run-local-complete.mjs",
     "security:scan": "node scripts/secret-scan.mjs",

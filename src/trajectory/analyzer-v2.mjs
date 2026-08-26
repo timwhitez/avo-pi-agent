@@ -3,7 +3,28 @@ import * as base from './analyzer.mjs';
 export const DETECTOR_IDS = base.DETECTOR_IDS;
 export const loadTrajectoryEvents = base.loadTrajectoryEvents;
 export const loadMemoryByGame = base.loadMemoryByGame;
-export const redactedAnalysis = base.redactedAnalysis;
+
+export function redactedAnalysis(analysis) {
+  return {
+    ...base.redactedAnalysis(analysis),
+    integrity: analysis?.integrity ? {
+      recorderSchemaVersion: Number(analysis.integrity.recorderSchemaVersion || 0),
+      methodProtocolObserved: analysis.integrity.methodProtocolObserved === true,
+      expectedGameCount: Number(analysis.integrity.expectedGameCount || 0),
+      observedGameCount: Number(analysis.integrity.observedGameCount || 0),
+      transitionGameCount: Number(analysis.integrity.transitionGameCount || 0),
+      transitionCount: Number(analysis.integrity.transitionCount || 0),
+      missingTransitionGames: Array.isArray(analysis.integrity.missingTransitionGames)
+        ? analysis.integrity.missingTransitionGames.map(String)
+        : [],
+      missingFrameHashGames: Array.isArray(analysis.integrity.missingFrameHashGames)
+        ? analysis.integrity.missingFrameHashGames.map(String)
+        : [],
+      unknownOperationResponses: Number(analysis.integrity.unknownOperationResponses || 0),
+      passed: analysis.integrity.passed === true,
+    } : null,
+  };
+}
 
 export function analyzeTrajectory(args) {
   const analysis = base.analyzeTrajectory(args);
@@ -37,6 +58,7 @@ export function analyzeTrajectory(args) {
     passed: recorderSchemaVersion >= 5
       && methodProtocolObserved
       && games.length > 0
+      && observedGames.length === games.length
       && missingTransitionGames.length === 0
       && missingFrameHashGames.length === 0
       && unknownOperationResponses === 0,
@@ -71,6 +93,16 @@ export function analyzeTrajectory(args) {
       'State-loop, ineffective-action, and exploration detectors cannot be grounded without exact frame evidence.',
       'Rerun with private exact-frame capture and SHA-256 frame hashes enabled.',
       { gameId },
+    ));
+  }
+  if (observedGames.length !== games.length) {
+    findings.push(integrityFinding(
+      'game-set-mismatch',
+      null,
+      `Trajectory corpus covers ${observedGames.length}/${games.length} expected games.`,
+      'The replay corpus and frozen benchmark game set disagree.',
+      'Reject the round, preserve the partial artifact, and rerun the exact frozen public set.',
+      { expectedGames: games, observedGames },
     ));
   }
   if (unknownOperationResponses > 0) {

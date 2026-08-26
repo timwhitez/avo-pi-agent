@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('complete:local refuses to run inside GitHub Actions');
@@ -11,13 +12,11 @@ if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
 const options = parseOptions(process.argv.slice(2));
 const maxRounds = integer(options.maxRounds ?? process.env.AVO_REPAIR_MAX_ROUNDS ?? 6, 1, 20, 'maxRounds');
 const runId = safeId(options.runId || `local-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`);
-const lockFile = path.resolve('runs/private/.local-complete.lock');
 const reportFile = path.resolve(`runs/public/local-complete-${runId}.redacted.json`);
+const lock = acquireLocalExecutionLock({ runId, kind: 'complete-local' });
 let activeChild = null;
-let lockFd = null;
 let terminal = false;
 
-acquireLock();
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.once(signal, () => void interrupt(signal));
 }
@@ -34,9 +33,9 @@ const stages = [
 ];
 
 const summary = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   runId,
-  execution: 'local',
+  execution: 'local-only',
   startedAt: new Date().toISOString(),
   completedAt: null,
   status: 'running',
@@ -71,19 +70,30 @@ try {
     const repairPath = path.resolve(summary.repairReport);
     const repair = JSON.parse(fs.readFileSync(repairPath, 'utf8'));
     const finalScore = repair?.final?.officialScore?.value;
-    if (repair.status !== 'complete' || repair.clean !== true || !Number.isFinite(Number(finalScore))) {
+    const accepted = repair.status === 'complete'
+      && repair.clean === true
+      && repair?.final?.authoritative === true
+      && Number(repair?.final?.findingCount) === 0
+      && Number(repair?.final?.openFindingCount) === 0
+      && Number.isFinite(Number(finalScore));
+    if (!accepted) {
       summary.status = 'failed';
       summary.failure = {
         stage: 'acceptance',
         repairStatus: repair?.status ?? null,
+        authoritative: repair?.final?.authoritative === true,
         clean: repair?.clean === true,
+        findingCount: Number(repair?.final?.findingCount ?? -1),
+        openFindingCount: Number(repair?.final?.openFindingCount ?? -1),
         officialScorePresent: Number.isFinite(Number(finalScore)),
       };
       process.exitCode = 2;
     } else {
       summary.status = 'complete';
       summary.result = {
+        authoritative: true,
         clean: true,
+        findingCount: 0,
         officialScore: Number(finalScore),
         scoreOrigin: repair?.final?.officialScore?.origin || 'official-scorecard',
         rounds: Array.isArray(repair.rounds) ? repair.rounds.length : null,
@@ -91,15 +101,18 @@ try {
     }
   }
 } catch (error) {
-  summary.status = 'failed';
-  summary.failure = { stage: 'orchestrator', errorClass: error?.name || 'Error' };
-  console.error(`[local-complete] failed: ${String(error?.message || error).slice(0, 1000)}`);
-  process.exitCode = 1;
+  summary.status = terminal ? 'interrupted' : 'failed';
+  summary.failure = { stage: terminal ? 'signal' : 'orchestrator', errorClass: error?.name || 'Error' };
+  console.error(`[local-complete] failed: ${safeText(error?.message || error)}`);
+  process.exitCode = terminal ? 130 : 1;
 } finally {
   terminal = true;
   summary.completedAt = new Date().toISOString();
   writeSummary();
-  releaseLock();
+  try { lock.release(); } catch (error) {
+    console.error(`[local-complete] lock release failed: ${safeText(error?.message || error)}`);
+    if (!process.exitCode) process.exitCode = 1;
+  }
 }
 
 async function runStage(stage) {
@@ -113,6 +126,7 @@ async function runStage(stage) {
       ARC_API_KEY: '',
       AVO_ARC_AUTH_MODE: 'anonymous-auto',
       AVO_REPAIR_RUN_ID: runId,
+      AVO_LOCAL_LOCK_TOKEN: lock.token,
     },
   });
   return await new Promise((resolve) => {
@@ -136,7 +150,7 @@ async function interrupt(signal) {
   summary.completedAt = new Date().toISOString();
   writeSummary();
   await terminateActiveChild(signal);
-  releaseLock();
+  try { lock.release(); } catch {}
   process.exit(130);
 }
 
@@ -156,47 +170,12 @@ async function terminateActiveChild(signal) {
   console.error(`[local-complete] terminated child process group after ${signal}`);
 }
 
-function acquireLock() {
-  fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
-  try {
-    lockFd = fs.openSync(lockFile, 'wx', 0o600);
-  } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
-    const previous = readLock();
-    if (previous?.pid && !isAlive(previous.pid)) {
-      fs.rmSync(lockFile, { force: true });
-      lockFd = fs.openSync(lockFile, 'wx', 0o600);
-    } else {
-      throw new Error(`another local execution is active${previous?.pid ? ` (pid ${previous.pid})` : ''}`);
-    }
-  }
-  fs.writeFileSync(lockFd, `${JSON.stringify({ pid: process.pid, runId, createdAt: new Date().toISOString() })}\n`);
-  fs.fsyncSync(lockFd);
-}
-
-function readLock() {
-  try { return JSON.parse(fs.readFileSync(lockFile, 'utf8')); } catch { return null; }
-}
-
-function isAlive(pid) {
-  try { process.kill(Number(pid), 0); return true; } catch { return false; }
-}
-
-function releaseLock() {
-  if (lockFd !== null) {
-    try { fs.closeSync(lockFd); } catch {}
-    lockFd = null;
-  }
-  try {
-    const current = readLock();
-    if (!current || current.pid === process.pid) fs.rmSync(lockFile, { force: true });
-  } catch {}
-}
-
 function writeSummary() {
   fs.mkdirSync(path.dirname(reportFile), { recursive: true, mode: 0o700 });
-  const temporary = `${reportFile}.${process.pid}.tmp`;
+  const temporary = `${reportFile}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+  const descriptor = fs.openSync(temporary, 'r');
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
   fs.renameSync(temporary, reportFile);
 }
 
@@ -210,15 +189,10 @@ function parseOptions(values) {
   }
   return result;
 }
-
-function safeId(value) {
-  return String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 96);
-}
-
+function safeId(value) { return String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 96); }
 function integer(value, min, max, name) {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-    throw new Error(`${name} must be an integer from ${min} to ${max}`);
-  }
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
   return parsed;
 }
+function safeText(value) { return String(value || '').replace(/https?:\/\/\S+/gi, '<redacted-url>').slice(0, 1000); }
