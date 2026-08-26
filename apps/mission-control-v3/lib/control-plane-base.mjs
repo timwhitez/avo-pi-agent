@@ -8,6 +8,12 @@ import {
   loadExactRunReport,
   signalProcessTree,
 } from './run-contract.mjs';
+import {
+  initialAuthority,
+  normalizeReasoningLevel,
+  requireRunMode,
+  summarizeMissionControlReport,
+} from './run-authority.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -19,12 +25,13 @@ const store = globalThis.__avoMissionControlStore || (globalThis.__avoMissionCon
 });
 
 export function validateStartOptions(input = {}) {
-  const mode = input.mode === 'competition' ? 'competition' : 'diagnostic';
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw requestError(400, 'Run options must be an object');
+  }
+  const mode = requireRunMode(input.mode);
   const games = normalizeGames(input.games);
   const actionBudget = integer(input.actionBudget ?? 1000, 1, 5000, 'actionBudget');
-  const reasoningLevel = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(input.reasoningLevel)
-    ? input.reasoningLevel
-    : 'max';
+  const reasoningLevel = normalizeReasoningLevel(input.reasoningLevel);
   if (mode === 'competition' && games.length > 0) {
     throw requestError(400, 'Competition mode must execute the complete dynamically discovered public set');
   }
@@ -41,12 +48,17 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     options,
     storageNamespace,
   });
+  const authority = initialAuthority(options.mode);
   const now = new Date().toISOString();
   const run = {
     id,
     state: 'starting',
     mode: options.mode,
-    official: options.mode === 'competition',
+    requestedMode: authority.requestedMode,
+    executionMode: authority.executionMode,
+    official: authority.official,
+    authorityState: authority.authorityState,
+    authorityReasons: [...authority.authorityReasons],
     games: options.games,
     actionBudget: options.actionBudget,
     reasoningLevel: options.reasoningLevel,
@@ -67,8 +79,10 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
   };
   store.runs.set(id, run);
   emit(run, 'run.created', {
-    mode: run.mode,
+    requestedMode: run.requestedMode,
+    executionMode: run.executionMode,
     official: run.official,
+    authorityState: run.authorityState,
     games: run.games,
     actionBudget: run.actionBudget,
     reasoningLevel: run.reasoningLevel,
@@ -86,6 +100,10 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     run.state = 'failed';
     run.endedAt = new Date().toISOString();
     run.lastError = safeText(error?.message || error);
+    if (run.executionMode === 'competition') {
+      run.authorityState = 'rejected';
+      run.authorityReasons = ['run process could not start'];
+    }
     emit(run, 'run.process_error', { errorClass: safeText(error?.name || 'Error') });
     return sanitizeRun(run);
   }
@@ -218,7 +236,11 @@ export function sanitizeRun(run) {
     id: run.id,
     state: run.state,
     mode: run.mode,
+    requestedMode: run.requestedMode,
+    executionMode: run.executionMode,
     official: run.official,
+    authorityState: run.authorityState,
+    authorityReasons: [...(run.authorityReasons || [])],
     games: [...run.games],
     actionBudget: run.actionBudget,
     reasoningLevel: run.reasoningLevel,
@@ -257,10 +279,18 @@ function finalizeRun(run, state, { code, signal, stdout, stderr }) {
   try {
     report = loadExactRunReport(run.reportContract);
     run.reportStatus = String(report.status || 'unknown');
-    run.summary = summarizeRunReport(report, run.mode);
+    run.summary = summarizeMissionControlReport(report, run.executionMode);
+    run.official = run.summary.official === true;
+    run.authorityState = String(run.summary.authorityState || (run.executionMode === 'competition' ? 'rejected' : 'diagnostic'));
+    run.authorityReasons = Array.isArray(run.summary.authorityReasons) ? [...run.summary.authorityReasons] : [];
   } catch (error) {
     reportError = error;
     run.reportStatus = 'unavailable';
+    run.official = false;
+    if (run.executionMode === 'competition') {
+      run.authorityState = 'rejected';
+      run.authorityReasons = [safeText(error?.message || error)];
+    }
   }
 
   if (run.state === 'aborting') {
@@ -282,6 +312,11 @@ function finalizeRun(run, state, { code, signal, stdout, stderr }) {
     exitCode: run.exitCode,
     signal: run.signal,
     reportStatus: run.reportStatus,
+    requestedMode: run.requestedMode,
+    executionMode: run.executionMode,
+    official: run.official,
+    authorityState: run.authorityState,
+    authorityReasons: run.authorityReasons,
     summary: run.summary,
   });
 }
@@ -379,43 +414,10 @@ function emit(run, type, payload) {
 
 function loadSummaryForRun(run) {
   try {
-    return summarizeRunReport(loadExactRunReport(run.reportContract), run.mode);
+    return summarizeMissionControlReport(loadExactRunReport(run.reportContract), run.executionMode);
   } catch {
     return null;
   }
-}
-
-function summarizeRunReport(report, mode) {
-  if (mode === 'competition') {
-    const aggregates = report?.aggregates || {};
-    return deepSanitize({
-      kind: 'real-public-benchmark',
-      status: report?.status,
-      executionMode: 'competition',
-      official: report?.status === 'complete',
-      officialScore: finiteOrNull(report?.officialScore?.value),
-      scoreOrigin: String(report?.officialScore?.origin || 'unavailable'),
-      games: finite(report?.completeness?.actualCount),
-      wins: finite(aggregates.wins),
-      totalLevels: finite(aggregates.totalLevels),
-      totalActions: finite(aggregates.totalActions),
-      openFindings: finite(report?.openFindings),
-    });
-  }
-  const summary = report?.summary || {};
-  return deepSanitize({
-    kind: report?.kind,
-    status: report?.status,
-    executionMode: 'diagnostic',
-    official: false,
-    diagnosticScore: finiteOrNull(summary.diagnosticScore),
-    scoreOrigin: String(summary.diagnosticScoreOrigin || 'diagnostic-unavailable'),
-    games: finite(summary.games),
-    wins: finite(summary.wins),
-    totalLevels: finite(summary.totalLevels),
-    totalActions: finite(summary.totalActions),
-    openFindings: finite(report?.openFindings),
-  });
 }
 
 function loadMemorySnapshot(dir, games) {
@@ -532,7 +534,7 @@ function safeText(value) {
     .slice(0, 1000);
 }
 
-function deepSanitize(value, key = '') {
+function deepSanitize(value) {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return safeText(value);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
@@ -543,7 +545,7 @@ function deepSanitize(value, key = '') {
       if (/(?:api.?key|authorization|token|secret|base.?url|endpoint|model.?id|raw.?reasoning)/i.test(childKey)) {
         out[childKey] = '<redacted>';
       } else {
-        out[childKey] = deepSanitize(childValue, childKey);
+        out[childKey] = deepSanitize(childValue);
       }
     }
     return out;
@@ -584,14 +586,4 @@ function metricDelta(left, right) {
   const a = Number(left);
   const b = Number(right);
   return Number.isFinite(a) && Number.isFinite(b) ? b - a : null;
-}
-
-function finite(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
-}
-
-function finiteOrNull(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
