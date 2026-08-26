@@ -76,3 +76,29 @@ test('rejects oversized or malformed memory patches', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('memory persistence rejects symlink roots and dangling state targets', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-paths-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-outside-'));
+  try {
+    const linkedRoot = path.join(root, 'linked');
+    fs.symlinkSync(outside, linkedRoot);
+    assert.throws(
+      () => new PersistentMemory(linkedRoot, 'game-c').load(),
+      /memory root must be a regular non-symlink directory/,
+    );
+
+    const memoryRoot = path.join(root, 'regular');
+    fs.mkdirSync(memoryRoot);
+    const memory = new PersistentMemory(memoryRoot, 'game-d').load();
+    fs.symlinkSync(path.join(outside, 'missing.json'), memory.file);
+    assert.throws(
+      () => memory.merge({ notes: ['must fail closed'] }),
+      /regular non-symlink file/,
+    );
+    assert.equal(fs.lstatSync(memory.file).isSymbolicLink(), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});

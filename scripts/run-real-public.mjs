@@ -13,6 +13,7 @@ import {
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
 import { runProcess } from '../src/benchmark/process-runner.mjs';
+import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import {
   aggregateGameMetrics,
   copyRegularFileExclusive,
@@ -59,6 +60,10 @@ try {
   console.log('[real-run] validating a non-mock Responses request');
   const providerPreflight = await preflightResponsesProvider(provider);
 
+  stage.value = 'pi-stream-preflight';
+  console.log('[real-run] validating the production Pi streaming/tool protocol');
+  const piStreamPreflight = await attestPiProviderStream({ cwd: root });
+
   stage.value = 'arc-runtime-attestation';
   console.log('[real-run] validating official arc-agi runtime');
   const python = process.env.ARC_PYTHON || '.venv/bin/python';
@@ -73,6 +78,7 @@ try {
   const provenance = buildProvenance({
     provider,
     providerPreflight,
+    piStreamPreflight,
     arcRuntime,
     games,
     runId,

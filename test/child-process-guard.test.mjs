@@ -25,6 +25,7 @@ function source() {
 test('guard classifies canonical child targets', () => {
   assert.equal(classifyChild(process.execPath, ['scripts/run-real-public.mjs']), 'agent');
   assert.equal(classifyChild(process.execPath, ['scripts/local-preflight.mjs']), 'agent');
+  assert.equal(classifyChild(process.execPath, ['scripts/pi-provider-smoke.mjs']), 'agent');
   assert.equal(classifyChild('python3', ['bridge/arc_bridge.py']), 'arc');
   assert.equal(classifyChild('git', ['rev-parse', 'HEAD']), 'utility');
   assert.equal(classifyChild(process.execPath, ['--test']), 'utility');

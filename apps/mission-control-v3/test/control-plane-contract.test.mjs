@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const appRoot = path.resolve(process.cwd());
+const appRoot = fileURLToPath(new URL('..', import.meta.url));
 const baseSource = fs.readFileSync(path.join(appRoot, 'lib', 'control-plane-base.mjs'), 'utf8');
 const launchSource = fs.readFileSync(path.join(appRoot, 'lib', 'run-contract.mjs'), 'utf8');
 const evidenceSource = fs.readFileSync(path.join(appRoot, 'lib', 'mission-control-evidence.mjs'), 'utf8');

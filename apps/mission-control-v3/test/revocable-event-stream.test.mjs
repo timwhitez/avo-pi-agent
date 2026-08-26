@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createRevocableEventStream } from '../lib/revocable-event-stream.mjs';
 
 const decoder = new TextDecoder();
@@ -149,7 +150,7 @@ test('client cancellation clears timers and stops source polling', async () => {
 
 test('SSE route binds every batch to the original revocable session lease', () => {
   const source = fs.readFileSync(
-    path.join(process.cwd(), 'app', 'api', 'runs', '[id]', 'events', 'route.js'),
+    path.join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'api', 'runs', '[id]', 'events', 'route.js'),
     'utf8',
   );
   assert.match(source, /const lease = createSessionLease\(session\)/);

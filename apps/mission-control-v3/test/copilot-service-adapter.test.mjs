@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   copilotAdapterConfigurationStatus,
   createCopilotServiceAdapter,
@@ -114,7 +115,7 @@ test('safe configuration status never returns Provider values', () => {
 });
 
 test('CopilotKit route delegates adapter selection and contains no silent fallback', () => {
-  const source = fs.readFileSync(path.join(process.cwd(), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
+  const source = fs.readFileSync(path.join(fileURLToPath(new URL('..', import.meta.url)), 'app', 'api', 'copilotkit', 'route.js'), 'utf8');
   assert.match(source, /createCopilotServiceAdapter/);
   assert.doesNotMatch(source, /new kit\.ExperimentalEmptyAdapter/);
   assert.doesNotMatch(source, /else if \(typeof kit\.ExperimentalEmptyAdapter/);

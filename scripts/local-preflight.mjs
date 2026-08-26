@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { loadLocalEnv } from '../src/config.mjs';
 import { redactRuntimeSecrets } from '../src/redaction.mjs';
+import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import {
   discoverPublicGames,
   inspectOfficialArcRuntime,
@@ -20,6 +21,7 @@ try {
 
   const provider = requireRealProviderEnvironment();
   const providerPreflight = await preflightResponsesProvider(provider);
+  const piStreamPreflight = await attestPiProviderStream();
   const python = process.env.AVO_REAL_PYTHON || '.venv/bin/python';
   const arcRuntime = await inspectOfficialArcRuntime({ python });
 
@@ -38,6 +40,8 @@ try {
     provider: {
       wireApi: 'responses',
       requestAttested: providerPreflight.ok === true,
+      piStreamAttested: piStreamPreflight.ok === true,
+      piStream: piStreamPreflight,
       responseIdHash: providerPreflight.responseIdHash,
       usage: providerPreflight.usage,
     },

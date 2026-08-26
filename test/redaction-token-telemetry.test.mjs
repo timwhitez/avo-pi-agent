@@ -48,6 +48,21 @@ test('credential tokens, provider location and model identity remain redacted', 
   assertNoPrivateMaterial(JSON.stringify(output));
 });
 
+test('raw model reasoning is redacted while numeric reasoning telemetry survives', () => {
+  const output = redact({
+    rawReasoning: 'private chain of thought',
+    reasoningContent: 'private reasoning payload',
+    thinkingContent: 'private thinking payload',
+    chainOfThought: 'private hidden state',
+    reasoningTokens: 42,
+  });
+  assert.equal(output.rawReasoning, '<redacted>');
+  assert.equal(output.reasoningContent, '<redacted>');
+  assert.equal(output.thinkingContent, '<redacted>');
+  assert.equal(output.chainOfThought, '<redacted>');
+  assert.equal(output.reasoningTokens, 42);
+});
+
 test('benign names containing token are not silently erased', () => {
   const output = redact({ tokenizerVersion: 'v1', tokenLatencyMs: 17, tokenBudget: 9000 });
   assert.deepEqual(output, { tokenizerVersion: 'v1', tokenLatencyMs: 17, tokenBudget: 9000 });

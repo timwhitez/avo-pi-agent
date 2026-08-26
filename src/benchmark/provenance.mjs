@@ -195,7 +195,7 @@ export async function discoverPublicGames({ python = '.venv/bin/python', cwd = p
   return games;
 }
 
-export function buildProvenance({ provider, providerPreflight, arcRuntime, games, runId, gitSha = null }) {
+export function buildProvenance({ provider, providerPreflight, piStreamPreflight = null, arcRuntime, games, runId, gitSha = null }) {
   const salt = crypto.createHash('sha256').update(String(runId)).digest('hex');
   return {
     runId,
@@ -209,6 +209,7 @@ export function buildProvenance({ provider, providerPreflight, arcRuntime, games
     providerEndpointFingerprint: fingerprint(provider.baseUrl, salt),
     providerModelFingerprint: fingerprint(provider.model, salt),
     providerPreflight,
+    piStreamPreflight,
     arcRuntime,
     arcAuth: games.arcAuth || {
       mode: 'unknown',
