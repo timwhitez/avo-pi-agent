@@ -19,7 +19,9 @@ test('canonical local execution boundaries use the shared child environment poli
   assert.match(benchmark, /buildAgentChildEnvironment/);
   assert.doesNotMatch(benchmark, /env:\s*\{\s*\.\.\.process\.env/s);
 
-  const provenance = source('src/benchmark/provenance.mjs');
+  // Since PR #114 the provenance module is a thin transport wrapper over
+  // provenance-core.mjs, which owns every subprocess launch.
+  const provenance = source('src/benchmark/provenance-core.mjs');
   assert.match(provenance, /buildArcChildEnvironment/);
   assert.match(provenance, /buildUtilityChildEnvironment/);
   assert.doesNotMatch(provenance, /env:\s*process\.env/);
