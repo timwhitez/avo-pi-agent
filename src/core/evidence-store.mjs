@@ -235,7 +235,19 @@ export class EvidenceStore {
       temporary = `${this.file}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
       const fd = fs.openSync(temporary, 'wx', 0o600);
       try {
-        for (const event of events) fs.writeFileSync(fd, `${JSON.stringify(event)}\n`, 'utf8');
+        let totalBytes = 0;
+        for (const event of events) {
+          const record = `${JSON.stringify(event)}\n`;
+          const bytes = Buffer.byteLength(record, 'utf8');
+          if (bytes > this.maxEventBytes) {
+            throw new Error(`compacted evidence record exceeds ${this.maxEventBytes} bytes`);
+          }
+          totalBytes += bytes;
+          if (totalBytes > this.maxFileBytes) {
+            throw new Error(`compacted evidence store would exceed ${this.maxFileBytes} bytes; retain fewer events`);
+          }
+          fs.writeFileSync(fd, record, 'utf8');
+        }
         fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);
