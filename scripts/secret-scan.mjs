@@ -14,7 +14,7 @@ const patterns = [
   ['GitHub token', new RegExp(`\\b(?:${githubPrefixes.join('|')})[A-Za-z0-9_]{20,}\\b`, 'g')],
   ['private key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g],
   ['literal bearer token', /Authorization\s*[:=]\s*["']?Bearer\s+[A-Za-z0-9._-]{16,}/gi],
-  ['literal non-placeholder IPv4 endpoint', /https?:\/\/(?!127\.0\.0\.1|0\.0\.0\.0|localhost)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/g],
+  ['literal non-placeholder IPv4 endpoint', /https?:\/\/(?!127\.0\.0\.1|0\.0\.0\.0|localhost|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?/g],
 ];
 
 const gitCandidates = listGitCandidates(root);
