@@ -58,6 +58,9 @@ export class EvidenceStore {
     if (!this.loaded) throw new Error('evidence store must be loaded before append');
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('evidence event must be an object');
     const sequence = this.sequence + 1;
+    if (!Number.isSafeInteger(sequence)) {
+      throw new Error('evidence sequence reached Number.MAX_SAFE_INTEGER; archive the ledger before further appends');
+    }
     const core = boundedClone({ ...input, gameId: this.gameId, sequence });
     delete core.id;
     delete core.digest;
@@ -148,7 +151,7 @@ export class EvidenceStore {
       return;
     }
     if (event.gameId !== this.gameId) throw new Error(`evidence line ${lineNumber} belongs to another game`);
-    if (!Number.isInteger(event.sequence) || event.sequence <= this.sequence) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence <= this.sequence) {
       throw new Error(`evidence line ${lineNumber} has non-monotonic sequence`);
     }
     const { id, digest, ...core } = event;
@@ -419,7 +422,12 @@ function boundedInteger(value, min, max, fallback) {
   return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 function boundedClone(value, depth = 0) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    if (Object.is(value, -0)) return 0;
+    return value;
+  }
   if (typeof value === 'string') return value.slice(0, 16_000);
   if (depth >= 8) return String(value).slice(0, 2000);
   if (Array.isArray(value)) return value.slice(0, 256).map((item) => boundedClone(item, depth + 1));
