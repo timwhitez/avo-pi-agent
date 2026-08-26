@@ -46,6 +46,29 @@ test('older tool results are elided while recent ones and identity fields surviv
   }
 });
 
+test('historical reasoning blocks are elided while the latest turn keeps its thinking', () => {
+  const messages = [user(0)];
+  for (let index = 1; index <= 8; index += 1) {
+    messages.push({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: `reasoning-${index}`.repeat(200), thinkingSignature: JSON.stringify({ type: 'reasoning', summary: [] }) },
+        { type: 'text', text: `turn ${index}` },
+      ],
+      timestamp: index,
+    });
+    messages.push(toolResult(index));
+  }
+  const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 160 });
+  const assistants = bounded.filter((message) => message.role === 'assistant');
+  const withThinking = assistants.filter((message) => message.content.some((block) => block.type === 'thinking'));
+  assert.equal(withThinking.length, 1, 'only the final assistant message may keep thinking');
+  assert.match(withThinking[0].content.find((block) => block.type === 'text').text, /turn 8/);
+  for (const message of assistants) {
+    assert.ok(message.content.some((block) => block.type === 'text'), 'text content survives the thinking elision');
+  }
+});
+
 test('hard message cap drops oldest non-user messages and discloses the compaction', () => {
   const messages = [user(0)];
   for (let index = 1; index <= 40; index += 1) messages.push(assistant(index), toolResult(index));
