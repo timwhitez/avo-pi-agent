@@ -21,6 +21,20 @@ The legacy `AVO_PROVIDER_*` family is not consumed or aliased by the current
 runtime. Supplying only that family makes the real-provider preflight fail
 closed before any benchmark game starts.
 
+### Plaintext endpoint opt-in (operator risk acceptance)
+
+`OPENAI_BASE_URL` must use HTTPS by default. An operator who owns a plaintext
+HTTP endpoint and explicitly accepts that the bearer credential traverses the
+network unencrypted may set:
+
+- `AVO_PROVIDER_ALLOW_PLAINTEXT=1`
+
+The flag changes nothing else: URL credentials, query strings, fragments,
+loopback endpoints, placeholder values and portable/test modes remain rejected,
+and the published provenance records `providerTransport:
+"http-operator-opt-in"` so every redacted public report discloses the decision.
+Leave the flag unset for any endpoint you do not fully control.
+
 ARC authentication defaults to automatic anonymous bootstrap:
 
 - `AVO_ARC_AUTH_MODE=anonymous-auto` — default; `ARC_API_KEY` is forced empty
@@ -46,7 +60,8 @@ publication, or client-side frontend configuration.
 `scripts/run-real-public.mjs` executes these stages in order:
 
 1. validate that Provider configuration is present, non-placeholder, valid
-   HTTPS, non-loopback, and not in portable/test mode;
+   HTTPS (or explicitly opted-in plaintext), non-loopback, and not in
+   portable/test mode;
 2. issue a real `/responses` request and require a response ID plus model output
    satisfying a fresh challenge-bound attestation;
 3. require a real Pi SDK streaming turn that completes exactly one tool call in

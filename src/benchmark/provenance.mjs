@@ -11,8 +11,10 @@ export function requireRealProviderEnvironment(env = process.env) {
     OPENAI_BASE_URL: String(env.OPENAI_BASE_URL || '').trim(),
   };
   const config = requireCoreRealProviderEnvironment(source);
+  const allowPlaintext = env.AVO_PROVIDER_ALLOW_PLAINTEXT === '1';
   return {
     ...config,
-    baseUrl: normalizeRealProviderBaseUrl(config.baseUrl),
+    baseUrl: normalizeRealProviderBaseUrl(config.baseUrl, { allowPlaintext }),
+    plaintextTransportAllowed: allowPlaintext,
   };
 }

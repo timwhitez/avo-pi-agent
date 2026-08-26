@@ -207,6 +207,7 @@ export function buildProvenance({ provider, providerPreflight, piStreamPreflight
     noMockAttestation: providerPreflight?.challengeVerified === true
       && providerPreflight?.responseFreshnessVerified === true,
     wireApi: 'responses',
+    providerTransport: provider.plaintextTransportAllowed === true ? 'http-operator-opt-in' : 'https',
     reasoningEffort: provider.reasoningEffort,
     providerFingerprint: fingerprint(`${provider.baseUrl}\0${provider.model}`, salt),
     providerEndpointFingerprint: fingerprint(provider.baseUrl, salt),
