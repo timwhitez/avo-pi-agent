@@ -47,6 +47,7 @@ export default function Page() {
       const payload = await request('/api/runs');
       setRuns(payload.runs || []);
       if (!selectedId && payload.runs?.[0]) setSelectedId(payload.runs[0].id);
+      setError('');
     } catch (cause) {
       setError(cause.message);
     }
@@ -57,7 +58,18 @@ export default function Page() {
     try {
       const payload = await request(`/api/runs/${encodeURIComponent(selectedId)}`);
       setSelected(payload.run);
+      setError('');
     } catch (cause) {
+      if (/not found/i.test(cause.message)) {
+        // The run was pruned or revoked: return to the neutral empty state
+        // instead of flashing a persistent error every two seconds.
+        setSelectedId('');
+        setSelected(null);
+        setEvents([]);
+        cursorRef.current = 0;
+        setError('');
+        return;
+      }
       setError(cause.message);
     }
   }, [csrf, request, selectedId]);
@@ -249,7 +261,8 @@ export default function Page() {
                     if (confirmation) await control('abort', selectedId, confirmation);
                   }}>Abort</button>
                 </div>
-                {selectedId && <p className="notice" style={{ marginTop: 10 }}>Abort confirmation is the exact run ID: <code>{selectedId}</code></p>}
+                {selectedId && ['running', 'paused'].includes(selected?.state)
+                  && <p className="notice" style={{ marginTop: 10 }}>Abort confirmation is the exact run ID: <code>{selectedId}</code></p>}
               </section>
 
               <section className="sidebar-section">
@@ -478,11 +491,13 @@ function normalizeFindings(value) {
 }
 
 function extractLineage(memory) {
+  // The persisted memory writer uses candidateProposals / candidateAttempts /
+  // committedLineage; keep the older nested-shape fallbacks for robustness.
   return memory.map((entry) => ({
     gameId: entry.gameId,
-    proposals: entry.value?.proposals || entry.value?.lineage?.proposals || [],
-    attempts: entry.value?.attempts || entry.value?.lineage?.attempts || [],
-    committed: entry.value?.committed || entry.value?.lineage?.committed || [],
+    proposals: entry.value?.candidateProposals || entry.value?.proposals || entry.value?.lineage?.proposals || [],
+    attempts: entry.value?.candidateAttempts || entry.value?.attempts || entry.value?.lineage?.attempts || [],
+    committed: entry.value?.committedLineage || entry.value?.committed || entry.value?.lineage?.committed || [],
   }));
 }
 
