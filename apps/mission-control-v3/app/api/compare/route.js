@@ -1,12 +1,13 @@
 import { compareRuns } from '../../../lib/control-plane.mjs';
-import { jsonError, requireSession } from '../../../lib/session.mjs';
+import { assertRateLimit, jsonError, requireSession } from '../../../lib/session.mjs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
   try {
-    requireSession(request, { requireCsrf: false });
+    const session = requireSession(request, { requireCsrf: false });
+    assertRateLimit('run-compare', session.subject, { limit: 120, windowMs: 60_000 });
     const url = new URL(request.url);
     const baseline = url.searchParams.get('baseline');
     const candidate = url.searchParams.get('candidate');
@@ -15,7 +16,10 @@ export async function GET(request) {
       error.status = 400;
       throw error;
     }
-    return Response.json({ ok: true, comparison: compareRuns(baseline, candidate) }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: true, comparison: compareRuns(baseline, candidate, { subject: session.subject }) },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
   } catch (error) {
     return jsonError(error);
   }
