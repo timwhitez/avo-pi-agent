@@ -2,6 +2,22 @@ import crypto from 'node:crypto';
 
 const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{16,256}$/;
 const RESPONSE_PREFIX = 'REAL_PROVIDER_OK:';
+export const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_CONFIGURED_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+class ProviderResponseTooLargeError extends Error {
+  constructor() {
+    super('provider attestation response exceeded byte limit');
+    this.name = 'ProviderResponseTooLargeError';
+  }
+}
+
+class BoundedReaderUnavailableError extends Error {
+  constructor() {
+    super('provider attestation bounded response reader is unavailable');
+    this.name = 'BoundedReaderUnavailableError';
+  }
+}
 
 /**
  * Execute a real OpenAI Responses-compatible request and prove that the
@@ -14,9 +30,11 @@ const RESPONSE_PREFIX = 'REAL_PROVIDER_OK:';
 export async function preflightResponsesProvider(config, {
   fetchImpl = globalThis.fetch,
   timeoutMs = 90_000,
+  maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
   nonce = crypto.randomBytes(32).toString('base64url'),
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('provider attestation fetch is unavailable');
+  const responseLimit = normalizeResponseLimit(maxResponseBytes);
   const challenge = validateChallenge(nonce);
   const expected = `${RESPONSE_PREFIX}${challenge}`;
   const controller = new AbortController();
@@ -49,7 +67,7 @@ export async function preflightResponsesProvider(config, {
       }),
       signal: controller.signal,
     });
-    const text = await response.text();
+    const text = await readResponseTextLimited(response, { maxBytes: responseLimit });
     try {
       payload = JSON.parse(text);
     } catch {
@@ -59,6 +77,8 @@ export async function preflightResponsesProvider(config, {
     if (controller.signal.aborted || error?.name === 'AbortError') {
       throw new Error('provider attestation timed out');
     }
+    if (error instanceof ProviderResponseTooLargeError) throw error;
+    if (error instanceof BoundedReaderUnavailableError) throw error;
     if (/^provider attestation returned non-JSON/.test(String(error?.message || ''))) throw error;
     throw new Error(`provider attestation request failed (${safeErrorClass(error)})`);
   } finally {
@@ -90,6 +110,46 @@ export async function preflightResponsesProvider(config, {
     proofHash: sha256(`${responseId}\0${challenge}\0${outputText}`),
     usage: normalizeUsage(payload.usage),
   });
+}
+
+export async function readResponseTextLimited(response, {
+  maxBytes = DEFAULT_MAX_RESPONSE_BYTES,
+} = {}) {
+  const limit = normalizeResponseLimit(maxBytes);
+  const declaredLength = parseContentLength(response?.headers?.get?.('content-length'));
+  if (declaredLength !== null && declaredLength > limit) {
+    await cancelBody(response?.body);
+    throw new ProviderResponseTooLargeError();
+  }
+
+  const reader = response?.body?.getReader?.();
+  if (!reader) {
+    if (declaredLength === null) throw new BoundedReaderUnavailableError();
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > limit) throw new ProviderResponseTooLargeError();
+    return text;
+  }
+
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let text = '';
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+      totalBytes += chunk.byteLength;
+      if (totalBytes > limit) {
+        try { await reader.cancel(); } catch {}
+        throw new ProviderResponseTooLargeError();
+      }
+      text += decoder.decode(chunk, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
 }
 
 export function validateChallenge(value) {
@@ -125,6 +185,25 @@ function normalizeUsage(usage = {}) {
 function finiteNonNegative(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function normalizeResponseLimit(value) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > MAX_CONFIGURED_RESPONSE_BYTES) {
+    throw new Error(`provider attestation maxResponseBytes must be an integer from 1 to ${MAX_CONFIGURED_RESPONSE_BYTES}`);
+  }
+  return number;
+}
+
+function parseContentLength(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return null;
+  const number = Number(text);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+async function cancelBody(body) {
+  try { await body?.cancel?.(); } catch {}
 }
 
 function safeProviderCode(value) {
