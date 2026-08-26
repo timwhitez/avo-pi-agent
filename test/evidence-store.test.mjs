@@ -94,3 +94,43 @@ test('evidence persistence rejects symlink roots and dangling store targets', ()
     fs.rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test('file appearing between absent lstat and exclusive create is rejected without append', () => {
+  const dir = root();
+  const maxFileBytes = 1024;
+  const store = new EvidenceStore(dir, 'game-race', { maxFileBytes, maxEventBytes: 512 }).load();
+  const originalOpenSync = fs.openSync;
+  let injected = false;
+  fs.openSync = function patchedOpenSync(file, flags, mode) {
+    const numericFlags = Number(flags);
+    const isExclusiveCreate = Number.isInteger(numericFlags)
+      && (numericFlags & fs.constants.O_CREAT) !== 0
+      && (numericFlags & fs.constants.O_EXCL) !== 0;
+    if (!injected && isExclusiveCreate && path.resolve(String(file)) === path.resolve(store.file)) {
+      injected = true;
+      const attackFd = originalOpenSync(
+        file,
+        fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC,
+        0o600,
+      );
+      try {
+        fs.writeSync(attackFd, Buffer.alloc(maxFileBytes, 0x41));
+      } finally {
+        fs.closeSync(attackFd);
+      }
+    }
+    return originalOpenSync(file, flags, mode);
+  };
+  try {
+    assert.throws(
+      () => store.append({ type: 'observation', note: 'synthetic' }),
+      /appeared during secure create/,
+    );
+    assert.equal(fs.statSync(store.file).size, maxFileBytes);
+    assert.equal(store.events.length, 0);
+    assert.equal(store.sequence, 0);
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
