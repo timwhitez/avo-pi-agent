@@ -1,7 +1,11 @@
+const CANONICAL_NUMBER = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
+
 export function finiteNumberOrNull(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string' && value.trim() === '') return null;
-  const number = Number(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || !CANONICAL_NUMBER.test(text)) return null;
+  const number = Number(text);
   return Number.isFinite(number) ? number : null;
 }
 

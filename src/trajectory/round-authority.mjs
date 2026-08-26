@@ -1,7 +1,10 @@
+import { finiteNumberOrNull } from '../local/numeric.mjs';
+
 export function evaluateRoundAuthority({ roundId, processResult, benchmark, analysis } = {}) {
   const reasons = [];
   const expectedGames = normalizeGames(benchmark?.completeness?.gameIds || benchmark?.provenance?.publicGameIds || []);
   const officialScore = benchmark?.officialScore;
+  const officialScoreValue = finiteNumberOrNull(officialScore?.value);
   const acceptance = analysis?.acceptance || {};
   const integrity = analysis?.integrity || {};
   const provenance = benchmark?.provenance || {};
@@ -15,7 +18,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   requireCondition(Number(benchmark?.completeness?.expectedCount) === expectedGames.length, 'benchmark expected game count is inconsistent', reasons);
   requireCondition(Number(benchmark?.completeness?.actualCount) === expectedGames.length, 'benchmark did not execute the complete expected game set', reasons);
   requireCondition(benchmark?.loopAttestation?.complete === true && benchmark?.loopAttestation?.loop === 'pi-sdk', 'production Pi loop attestation failed', reasons);
-  requireCondition(Number.isFinite(Number(officialScore?.value)), 'official score is absent', reasons);
+  requireCondition(officialScoreValue !== null, 'official score is absent or non-numeric', reasons);
   requireCondition(isOfficialScoreOrigin(officialScore?.origin), 'score origin is not an explicit official scorecard field', reasons);
 
   requireCondition(provenance?.noMockAttestation === true, 'no-mock provider attestation is absent', reasons);
@@ -73,8 +76,8 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     authoritative,
     clean,
     reasons,
-    officialScore: Number.isFinite(Number(officialScore?.value))
-      ? { value: Number(officialScore.value), origin: String(officialScore.origin || '') }
+    officialScore: officialScoreValue !== null
+      ? { value: officialScoreValue, origin: String(officialScore?.origin || '') }
       : { value: null, origin: String(officialScore?.origin || 'unavailable') },
     expectedGameCount: expectedGames.length,
     expectedGames,
@@ -85,7 +88,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     recorderSchemaVersion: Number(integrity?.recorderSchemaVersion || 0),
     transitionCount: Number(integrity?.transitionCount || 0),
     providerAttestationVersion: Number(providerPreflight?.attestationVersion || 0),
-    rule: 'authoritative requires a nonce-bound real-provider freshness proof, official runtime, exact public set, official score, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
+    rule: 'authoritative requires a nonce-bound real-provider freshness proof, official runtime, exact public set, strict numeric official score, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
   });
 }
 
