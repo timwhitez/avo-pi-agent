@@ -7,7 +7,7 @@ REJECTED_ADDRESSES.addAddress('::1', 'ipv6');
 REJECTED_ADDRESSES.addAddress('::', 'ipv6');
 REJECTED_ADDRESSES.addSubnet('::ffff:7f00:0', 104, 'ipv6');
 
-export function normalizeRealProviderBaseUrl(value) {
+export function normalizeRealProviderBaseUrl(value, { allowPlaintext = false } = {}) {
   const raw = String(value ?? '').trim();
   let parsed;
   try {
@@ -28,8 +28,8 @@ export function normalizeRealProviderBaseUrl(value) {
   if (isLoopbackOrUnspecified(hostname)) {
     throw new Error('loopback provider endpoints are rejected for real-run attestation');
   }
-  if (parsed.protocol !== 'https:') {
-    throw new Error('OPENAI_BASE_URL must use HTTPS for real-run attestation');
+  if (parsed.protocol !== 'https:' && !(allowPlaintext === true && parsed.protocol === 'http:')) {
+    throw new Error('OPENAI_BASE_URL must use HTTPS for real-run attestation; set AVO_PROVIDER_ALLOW_PLAINTEXT=1 only for an operator-owned plaintext endpoint whose risk is accepted');
   }
 
   const pathname = parsed.pathname.replace(/\/+$/, '');
