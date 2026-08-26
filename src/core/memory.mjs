@@ -1,8 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CandidateLineage } from './lineage.mjs';
+import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
+import { writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 
 const MAX_PATCH_BYTES = 64 * 1024;
+const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
 
 function initial(gameId) {
   return {
@@ -28,13 +31,21 @@ export class PersistentMemory {
     this.root = root;
     this.gameId = gameId;
     this.file = path.join(root, `${safe(gameId)}.json`);
+    this.maxMemoryBytes = DEFAULT_MAX_MEMORY_BYTES;
     this.data = initial(gameId);
     this.lineage = new CandidateLineage();
   }
 
   load() {
-    if (fs.existsSync(this.file)) {
-      const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    const rootStat = optionalLstat(this.root);
+    if (rootStat) assertMemoryRoot(rootStat);
+    const fileStat = optionalLstat(this.file);
+    if (fileStat) {
+      const parsed = readJsonFileEvidence(this.file, {
+        root: this.root,
+        maxBytes: this.maxMemoryBytes,
+        purpose: 'memory state',
+      }).value;
       this.data = migrate({ ...initial(this.gameId), ...parsed, gameId: this.gameId });
       this.lineage = new CandidateLineage({
         proposals: this.data.candidateProposals,
@@ -136,11 +147,13 @@ export class PersistentMemory {
 
   save() {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    assertMemoryRoot(fs.lstatSync(this.root));
     this.data.updatedAt = new Date().toISOString();
     this.syncEvolution();
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify(this.data, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(tmp, this.file);
+    writeJsonAtomic(this.file, this.data, {
+      root: this.root,
+      maxBytes: this.maxMemoryBytes,
+    });
   }
 
   syncEvolution() {
@@ -149,6 +162,21 @@ export class PersistentMemory {
     this.data.committedLineage = state.committed;
     this.data.candidateAttempts = state.attempts;
     delete this.data.lineage;
+  }
+}
+
+function optionalLstat(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function assertMemoryRoot(stat) {
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error('memory root must be a regular non-symlink directory');
   }
 }
 
