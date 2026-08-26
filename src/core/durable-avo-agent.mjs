@@ -2,6 +2,7 @@ import path from 'node:path';
 import { AvoArcAgent as BaseAvoArcAgent } from './avo-agent-base.mjs';
 import { DurableMemory } from './durable-memory.mjs';
 import { EvidenceStore } from './evidence-store.mjs';
+import { configuredEvidenceRetainRecent } from './evidence-retention.mjs';
 import { normalizeCandidate } from './evaluator.mjs';
 import { frameHash } from './observation.mjs';
 
@@ -41,7 +42,7 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     });
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
-    const retainRecent = Number(this.config.evidenceRetainRecent || 2000);
+    const retainRecent = configuredEvidenceRetainRecent(this.config.evidenceRetainRecent);
     if (this.evidenceLedger.length > Math.max(4000, retainRecent * 2)) this.compactEvidence();
     return event;
   }
@@ -104,7 +105,7 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     if (!this.evidenceStore) return { removed: 0, retained: 0 };
     const result = this.evidenceStore.compact({
       protectedIds: this.memory.protectedEvidenceIds(),
-      retainRecent: Number(this.config.evidenceRetainRecent || 2000),
+      retainRecent: configuredEvidenceRetainRecent(this.config.evidenceRetainRecent),
     });
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;

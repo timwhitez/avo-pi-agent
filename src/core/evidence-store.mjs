@@ -8,6 +8,7 @@ const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_EVENT_BYTES = 128 * 1024;
 const DEFAULT_MAX_EVENTS = 100_000;
 const READ_CHUNK_BYTES = 64 * 1024;
+const SEQUENCE_CHECKPOINT_RECORD = 'avo.evidence.sequence-checkpoint.v1';
 
 export class EvidenceStore {
   constructor(root, gameId, options = {}) {
@@ -24,6 +25,7 @@ export class EvidenceStore {
     this.sequence = 0;
     this.loaded = false;
     this.fileIdentity = null;
+    this.checkpointSeen = false;
   }
 
   load() {
@@ -31,6 +33,7 @@ export class EvidenceStore {
     this.sequence = 0;
     this.loaded = false;
     this.fileIdentity = null;
+    this.checkpointSeen = false;
     if (!inspectEvidenceRoot(this.authorityRoot, this.root)) {
       this.loaded = true;
       return this;
@@ -58,6 +61,7 @@ export class EvidenceStore {
     const core = boundedClone({ ...input, gameId: this.gameId, sequence });
     delete core.id;
     delete core.digest;
+    delete core.__avoEvidenceRecord;
     const digest = digestFor(core);
     const event = Object.freeze({
       ...core,
@@ -120,18 +124,29 @@ export class EvidenceStore {
     const protectedSet = new Set(protectedIds.map(String));
     const missing = [...protectedSet].filter((id) => !this.get(id));
     if (missing.length) throw new Error(`protected evidence is missing: ${missing.join(', ')}`);
-    const recent = this.events.slice(-boundedInteger(retainRecent, 0, this.maxEvents, 2000));
+    const retainCount = boundedInteger(retainRecent, 0, this.maxEvents, 2000);
+    const recent = retainCount === 0 ? [] : this.events.slice(-retainCount);
     const keep = new Set([...protectedSet, ...recent.map((event) => event.id)]);
     if (keep.size === this.events.length) return { removed: 0, retained: this.events.length };
     const retained = this.events.filter((event) => keep.has(event.id));
     const removed = this.events.length - retained.length;
-    this.fileIdentity = this.#rewrite(retained);
+    const highWaterSequence = this.sequence;
+    const retainedHighWater = retained.reduce((max, event) => Math.max(max, event.sequence), 0);
+    const records = retainedHighWater < highWaterSequence
+      ? [...retained, sequenceCheckpoint(this.gameId, highWaterSequence)]
+      : retained;
+    this.fileIdentity = this.#rewrite(records);
     this.events = retained;
-    this.sequence = retained.reduce((max, event) => Math.max(max, event.sequence), 0);
+    this.sequence = highWaterSequence;
+    this.checkpointSeen = records.length > retained.length;
     return { removed, retained: retained.length };
   }
 
   #acceptParsed(event, lineNumber) {
+    if (isSequenceCheckpoint(event)) {
+      this.#acceptCheckpoint(event, lineNumber);
+      return;
+    }
     if (event.gameId !== this.gameId) throw new Error(`evidence line ${lineNumber} belongs to another game`);
     if (!Number.isInteger(event.sequence) || event.sequence <= this.sequence) {
       throw new Error(`evidence line ${lineNumber} has non-monotonic sequence`);
@@ -143,6 +158,20 @@ export class EvidenceStore {
     if (this.events.length >= this.maxEvents) throw new Error(`evidence store exceeds ${this.maxEvents} events`);
     this.events.push(Object.freeze(event));
     this.sequence = event.sequence;
+  }
+
+  #acceptCheckpoint(record, lineNumber) {
+    if (this.checkpointSeen) throw new Error(`evidence line ${lineNumber} contains a duplicate sequence checkpoint`);
+    if (record.gameId !== this.gameId) throw new Error(`evidence line ${lineNumber} belongs to another game`);
+    if (!Number.isSafeInteger(record.sequence) || record.sequence <= this.sequence) {
+      throw new Error(`evidence line ${lineNumber} has a non-monotonic sequence checkpoint`);
+    }
+    const { digest, ...core } = record;
+    if (!constantEqual(digest, digestFor(core))) {
+      throw new Error(`evidence line ${lineNumber} failed sequence checkpoint integrity validation`);
+    }
+    this.sequence = record.sequence;
+    this.checkpointSeen = true;
   }
 
   #readLines(before, onLine) {
@@ -209,6 +238,26 @@ export class EvidenceStore {
       lock.release();
     }
   }
+}
+
+function sequenceCheckpoint(gameId, sequence) {
+  const core = Object.freeze({
+    __avoEvidenceRecord: SEQUENCE_CHECKPOINT_RECORD,
+    gameId,
+    sequence,
+  });
+  return Object.freeze({ ...core, digest: digestFor(core) });
+}
+
+function isSequenceCheckpoint(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  return value.__avoEvidenceRecord === SEQUENCE_CHECKPOINT_RECORD
+    && keys.length === 4
+    && keys[0] === '__avoEvidenceRecord'
+    && keys[1] === 'digest'
+    && keys[2] === 'gameId'
+    && keys[3] === 'sequence';
 }
 
 function fsyncDirectory(directory) {
