@@ -59,6 +59,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   const resolvedModel = models.getModel(providerId, config.provider.model);
   if (!resolvedModel) throw new Error('Pi could not register the runtime model');
 
+  // Reasoning-heavy turns can stay silent for a long time before the first
+  // byte, and single transient provider faults must not end an entire game.
+  // streamFn is the only seam where pi-ai accepts per-request transport knobs.
+  const streamTimeoutMs = positiveEnvInt('AVO_PROVIDER_STREAM_TIMEOUT_MS', 20 * 60 * 1000);
+  const streamMaxRetries = positiveEnvInt('AVO_PROVIDER_STREAM_MAX_RETRIES', 4);
+  const resilientStreamFn = (model, context, options) =>
+    models.streamSimple.call(models, model, context, {
+      ...options,
+      timeoutMs: streamTimeoutMs,
+      maxRetries: streamMaxRetries,
+    });
+
   return {
     kind: 'pi-sdk',
     async run({ systemPrompt, tools, initialPrompt, shouldStop }) {
@@ -100,7 +112,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           tools: piTools,
           messages: [],
         },
-        streamFn: models.streamSimple.bind(models),
+        streamFn: resilientStreamFn,
         toolExecution: 'sequential',
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
@@ -172,4 +184,14 @@ function toTypeBox(schema, Type) {
 function metadata(schema) {
   const keys = ['description', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems'];
   return Object.fromEntries(keys.filter((key) => schema[key] !== undefined).map((key) => [key, schema[key]]));
+}
+
+function positiveEnvInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
