@@ -1,5 +1,12 @@
 import { getEventsSince, getRun } from '../../../../../lib/control-plane.mjs';
-import { assertRateLimit, jsonError, requireSession } from '../../../../../lib/session.mjs';
+import { createRevocableEventStream } from '../../../../../lib/revocable-event-stream.mjs';
+import {
+  assertRateLimit,
+  createSessionLease,
+  jsonError,
+  requireSession,
+  requireSessionLease,
+} from '../../../../../lib/session.mjs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -7,41 +14,18 @@ export const dynamic = 'force-dynamic';
 export async function GET(request, context) {
   try {
     const session = requireSession(request, { requireCsrf: false });
+    const lease = createSessionLease(session);
     assertRateLimit('event-stream-open', session.subject, { limit: 60, windowMs: 60_000 });
     const { id } = await context.params;
     getRun(id, { subject: session.subject });
     const requestUrl = new URL(request.url);
-    let cursor = Math.max(0, Number(requestUrl.searchParams.get('cursor')) || 0);
-    const encoder = new TextEncoder();
-    let timer;
+    const initialCursor = requestUrl.searchParams.get('cursor');
 
-    const stream = new ReadableStream({
-      start(controller) {
-        const send = () => {
-          try {
-            const events = getEventsSince(id, cursor, 1000, { subject: session.subject });
-            for (const event of events) {
-              cursor = event.cursor;
-              controller.enqueue(encoder.encode(`id: ${event.cursor}\nevent: avo\ndata: ${JSON.stringify(event)}\n\n`));
-            }
-            controller.enqueue(encoder.encode(`event: heartbeat\ndata: ${JSON.stringify({ cursor, at: new Date().toISOString() })}\n\n`));
-          } catch {
-            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: 'Event stream closed' })}\n\n`));
-            clearInterval(timer);
-            controller.close();
-          }
-        };
-        send();
-        timer = setInterval(send, 1000);
-        timer.unref?.();
-        request.signal.addEventListener('abort', () => {
-          clearInterval(timer);
-          try { controller.close(); } catch {}
-        }, { once: true });
-      },
-      cancel() {
-        clearInterval(timer);
-      },
+    const stream = createRevocableEventStream({
+      request,
+      initialCursor,
+      revalidate: () => requireSessionLease(request, lease),
+      getEvents: ({ subject, cursor, limit }) => getEventsSince(id, cursor, limit, { subject }),
     });
 
     return new Response(stream, {

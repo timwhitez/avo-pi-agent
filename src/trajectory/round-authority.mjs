@@ -5,6 +5,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   const acceptance = analysis?.acceptance || {};
   const integrity = analysis?.integrity || {};
   const provenance = benchmark?.provenance || {};
+  const providerPreflight = provenance?.providerPreflight || {};
 
   requireCondition(processResult?.code === 0 && !processResult?.signal, 'benchmark process did not exit cleanly', reasons);
   requireCondition(benchmark?.status === 'complete', 'benchmark report is not complete', reasons);
@@ -19,7 +20,23 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
 
   requireCondition(provenance?.noMockAttestation === true, 'no-mock provider attestation is absent', reasons);
   requireCondition(provenance?.wireApi === 'responses', 'provider wire API is not Responses', reasons);
-  requireCondition(provenance?.providerPreflight?.ok === true && provenance?.providerPreflight?.outputVerified === true, 'real-provider nonce attestation failed', reasons);
+  requireCondition(
+    providerPreflight?.ok === true
+      && providerPreflight?.outputVerified === true
+      && providerPreflight?.challengeVerified === true
+      && providerPreflight?.responseFreshnessVerified === true,
+    'real-provider nonce-bound freshness attestation failed',
+    reasons,
+  );
+  requireCondition(Number(providerPreflight?.attestationVersion) >= 2, 'provider attestation schema is older than v2', reasons);
+  for (const [name, value] of [
+    ['response ID', providerPreflight?.responseIdHash],
+    ['challenge', providerPreflight?.challengeHash],
+    ['response', providerPreflight?.responseHash],
+    ['proof', providerPreflight?.proofHash],
+  ]) {
+    requireCondition(isSha256(value), `provider ${name} attestation digest is absent or malformed`, reasons);
+  }
   requireCondition(provenance?.arcRuntime?.officialPackageAttested === true, 'official ARC package attestation failed', reasons);
   requireCondition(provenance?.arcAuth?.keyAcquired === true, 'official ARC runtime did not acquire a key', reasons);
   requireCondition(['anonymous-auto', 'registered'].includes(String(provenance?.arcAuth?.mode || '')), 'ARC authentication mode is not accepted', reasons);
@@ -51,7 +68,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     && openFindingCount === 0;
 
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     roundId: String(roundId || ''),
     authoritative,
     clean,
@@ -67,7 +84,8 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     openFindingCount,
     recorderSchemaVersion: Number(integrity?.recorderSchemaVersion || 0),
     transitionCount: Number(integrity?.transitionCount || 0),
-    rule: 'authoritative requires real-provider, official-runtime, exact public-set, official-score, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
+    providerAttestationVersion: Number(providerPreflight?.attestationVersion || 0),
+    rule: 'authoritative requires a nonce-bound real-provider freshness proof, official runtime, exact public set, official score, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
   });
 }
 
@@ -82,6 +100,9 @@ function normalizeGames(values) {
 function isOfficialScoreOrigin(value) {
   const origin = String(value || '');
   return /(?:^|\.)scorecard(?:\.|$)/i.test(origin) || origin === 'aggregateScorecard.score';
+}
+function isSha256(value) {
+  return /^[a-f0-9]{64}$/.test(String(value || ''));
 }
 function arrayEmpty(value) {
   return Array.isArray(value) && value.length === 0;
