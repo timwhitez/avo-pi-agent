@@ -1,0 +1,68 @@
+name: Pi real-provider streaming smoke
+
+on:
+  push:
+    branches:
+      - feature/real-public-benchmark
+    paths:
+      - 'diagnostics/trigger/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+env:
+  OPENAI_BASE_URL: ${{ secrets.AVO_PROVIDER_BASE_URL }}
+  OPENAI_API_KEY: ${{ secrets.AVO_PROVIDER_API_KEY }}
+  OPENAI_MODEL: ${{ secrets.AVO_PROVIDER_MODEL }}
+  OPENAI_REASONING_EFFORT: ${{ vars.AVO_PROVIDER_REASONING_EFFORT || 'max' }}
+  AVO_PI_SMOKE_TIMEOUT_MS: '180000'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          package-manager-cache: false
+      - name: Validate encrypted provider configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${OPENAI_BASE_URL:-}" ]]
+          [[ -n "${OPENAI_API_KEY:-}" ]]
+          [[ -n "${OPENAI_MODEL:-}" ]]
+      - run: npm install --ignore-scripts
+      - name: Exercise real Pi streaming and tool protocol
+        run: node scripts/pi-provider-smoke.mjs
+      - name: Upload content-free diagnostic result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: pi-provider-smoke-${{ github.run_id }}
+          path: runs/diagnostics/pi-provider-smoke.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Publish diagnostic status
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          state=failure
+          description='real Pi streaming diagnostic failed'
+          if [[ -s runs/diagnostics/pi-provider-smoke.json ]] && node -e "const r=require('./runs/diagnostics/pi-provider-smoke.json');process.exit(r.ok?0:1)"; then
+            state=success
+            description='real Pi streaming tool protocol passed'
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="$state" -f context=pi-provider-stream-smoke \
+            -f description="$description" -f target_url="$TARGET_URL"

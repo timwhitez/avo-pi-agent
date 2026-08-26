@@ -178,8 +178,9 @@ class Env:
         return Frame(self)
 
 class Arcade:
-    def __init__(self, operation_mode=None):
+    def __init__(self, operation_mode=None, logger=None):
         self.environments = {}
+        self.arc_api_key = "mock-test-key"
 
     def get_environments(self):
         return [Info(f"g{i:02d}-v1") for i in range(1, 26)]
@@ -205,6 +206,8 @@ class Arcade:
       ...process.env,
       PYTHONPATH: fakePy,
       ARC_PYTHON: 'python',
+      AVO_ARC_AUTH_MODE: 'registered',
+      ARC_API_KEY: 'mock-test-key',
       OPENAI_BASE_URL: 'http://localhost:1/v1',
       OPENAI_API_KEY: 'test-key',
       OPENAI_MODEL: 'test-model',

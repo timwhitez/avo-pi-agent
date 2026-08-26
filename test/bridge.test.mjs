@@ -1,18 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { ArcBridgeClient } from '../src/arc/bridge-client.mjs';
 
 test('python ARC bridge is syntactically valid', () => {
   const result = spawnSync('python', ['-m', 'py_compile', 'bridge/arc_bridge.py'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
 
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { ArcBridgeClient } from '../src/arc/bridge-client.mjs';
-
-test('bridge client reuses one process and one cumulative Arcade session', async () => {
+test('bridge client reuses one process and ignores bounded SDK stdout diagnostics', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-bridge-'));
   const bridgeDir = path.join(root, 'bridge');
   fs.mkdirSync(bridgeDir);
@@ -20,6 +19,7 @@ test('bridge client reuses one process and one cumulative Arcade session', async
 import json, sys
 current = None
 opens = 0
+noise_sent = False
 
 def frame():
     return {
@@ -36,8 +36,28 @@ def frame():
 for line in sys.stdin:
     request = json.loads(line)
     command = request.get("command")
+    if not noise_sent:
+        print("INFO:arc_agi.scorecard:diagnostic on stdout", flush=True)
+        noise_sent = True
     if command == "list":
-        response = {"ok": True, "environments": [{"game_id": "g1-v"}, {"game_id": "g2-v"}]}
+        response = {
+            "ok": True,
+            "arc_auth": {
+                "mode": "anonymous-auto",
+                "keyAcquired": True,
+                "keySource": "official-anonymous-endpoint",
+            },
+            "environments": [{"game_id": "g1-v"}, {"game_id": "g2-v"}],
+        }
+    elif command == "auth":
+        response = {
+            "ok": True,
+            "arc_auth": {
+                "mode": "anonymous-auto",
+                "keyAcquired": True,
+                "keySource": "official-anonymous-endpoint",
+            },
+        }
     elif command == "open":
         current = request["game_id"]
         opens += 1
@@ -60,6 +80,9 @@ for line in sys.stdin:
   const client = new ArcBridgeClient({ python: 'python', cwd: root });
   try {
     assert.equal(await client.start(), null);
+    const auth = await client.auth();
+    assert.equal(auth.mode, 'anonymous-auto');
+    assert.equal(auth.keyAcquired, true);
     const first = await client.open('g1');
     assert.equal(first.guid, 'g1-1');
     const observed = await client.start();
@@ -67,7 +90,9 @@ for line in sys.stdin:
     const second = await client.open('g2');
     assert.equal(second.guid, 'g2-2');
     assert.equal((await client.scorecard()).score, 2);
+    assert.match(client.stderr, /bridge-stdout.*diagnostic/);
   } finally {
     await client.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
