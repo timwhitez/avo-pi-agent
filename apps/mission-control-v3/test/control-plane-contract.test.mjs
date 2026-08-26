@@ -6,6 +6,8 @@ import path from 'node:path';
 const appRoot = path.resolve(process.cwd());
 const baseSource = fs.readFileSync(path.join(appRoot, 'lib', 'control-plane-base.mjs'), 'utf8');
 const launchSource = fs.readFileSync(path.join(appRoot, 'lib', 'run-contract.mjs'), 'utf8');
+const evidenceSource = fs.readFileSync(path.join(appRoot, 'lib', 'mission-control-evidence.mjs'), 'utf8');
+
 
 test('competition UI path uses the locked canonical local runner', () => {
   assert.match(launchSource, /run-real-public-locked\.mjs/);
@@ -14,11 +16,22 @@ test('competition UI path uses the locked canonical local runner', () => {
   assert.doesNotMatch(baseSource, /loadLatestRunSummary/);
 });
 
-test('run completion waits for close and report authority comes from an exact contract', () => {
+test('run completion waits for close and report authority comes from exact digest-bound evidence', () => {
   assert.match(baseSource, /child\.on\('close'/);
-  assert.match(baseSource, /loadExactRunReport\(run\.reportContract\)/);
-  assert.match(launchSource, /run report runId does not match the requested run/);
-  assert.match(launchSource, /regular non-symlink file/);
+  assert.match(baseSource, /loadExactRunReportEvidence\(run\.reportContract\)/);
+  assert.match(launchSource, /run report path does not match the exact run contract/);
+  assert.match(launchSource, /readJsonFileEvidence/);
+  assert.match(baseSource, /reportEvidence: loaded\.evidence/);
+  assert.match(baseSource, /run\.ended/);
+});
+
+test('memory and finding views expose evidence status and errors rather than silently omitting files', () => {
+  assert.match(baseSource, /memoryEvidence/);
+  assert.match(baseSource, /findingsEvidence/);
+  assert.match(baseSource, /evidenceErrors/);
+  assert.match(evidenceSource, /status: errors\.length \? \(records\.length \? 'partial' : 'error'\)/);
+  assert.match(evidenceSource, /readJsonFileEvidence/);
+  assert.doesNotMatch(baseSource, /JSON\.parse\(fs\.readFileSync\(file, 'utf8'\)\)/);
 });
 
 test('pause, resume and abort address the process group and escalate independently of child.killed', () => {

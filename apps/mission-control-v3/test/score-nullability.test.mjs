@@ -8,13 +8,18 @@ import { preserveUnavailableScoreDeltas } from '../lib/metric-deltas.mjs';
 
 function withReport(value, callback) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-score-null-'));
-  const file = path.join(root, 'run.json');
+  const runId = String(value?.runId || 'run-1');
+  const file = path.join(root, `${runId}.json`);
   try {
     fs.writeFileSync(file, JSON.stringify(value));
-    return callback(file);
+    return callback({ file, root, runId });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+function contract({ file, root, runId }, mode) {
+  return { path: file, root, runId, mode };
 }
 
 function diagnostic(score) {
@@ -32,13 +37,13 @@ const invalidScores = [null, undefined, '', '   ', 'not-a-number', false, true, 
 
 test('diagnostic report removes unavailable/non-numeric score but preserves real zero', () => {
   for (const value of invalidScores) {
-    withReport(diagnostic(value), (file) => {
-      const report = loadExactRunReport({ path: file, runId: 'run-1', mode: 'diagnostic' });
+    withReport(diagnostic(value), (location) => {
+      const report = loadExactRunReport(contract(location, 'diagnostic'));
       assert.equal('diagnosticScore' in report.summary, false);
     });
   }
-  withReport(diagnostic(0), (file) => {
-    const report = loadExactRunReport({ path: file, runId: 'run-1', mode: 'diagnostic' });
+  withReport(diagnostic(0), (location) => {
+    const report = loadExactRunReport(contract(location, 'diagnostic'));
     assert.equal(report.summary.diagnosticScore, 0);
   });
 });
@@ -50,15 +55,15 @@ test('complete competition report rejects coercible score values and preserves r
     completeness: { complete: true },
   };
   for (const value of invalidScores) {
-    withReport({ ...base, officialScore: { value, origin: 'aggregateScorecard.score' } }, (file) => {
+    withReport({ ...base, officialScore: { value, origin: 'aggregateScorecard.score' } }, (location) => {
       assert.throws(
-        () => loadExactRunReport({ path: file, runId: 'run-1', mode: 'competition' }),
+        () => loadExactRunReport(contract(location, 'competition')),
         /lacks an official score/,
       );
     });
   }
-  withReport({ ...base, officialScore: { value: 0, origin: 'aggregateScorecard.score' } }, (file) => {
-    const report = loadExactRunReport({ path: file, runId: 'run-1', mode: 'competition' });
+  withReport({ ...base, officialScore: { value: 0, origin: 'aggregateScorecard.score' } }, (location) => {
+    const report = loadExactRunReport(contract(location, 'competition'));
     assert.equal(report.officialScore.value, 0);
   });
 });

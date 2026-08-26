@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import {
   buildRunLaunch,
   createBoundedLineBuffer,
-  loadExactRunReport,
+  loadExactRunReportEvidence,
   signalProcessTree,
 } from './run-contract.mjs';
 import {
@@ -14,6 +14,10 @@ import {
   requireRunMode,
   summarizeMissionControlReport,
 } from './run-authority.mjs';
+import {
+  loadFindingsSnapshotEvidence,
+  loadMemorySnapshotEvidence,
+} from './mission-control-evidence.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -73,6 +77,7 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     progress: { gameIndex: 0, gameTotal: options.games.length || 25, actions: 0, levelsCompleted: 0, winLevels: 0 },
     summary: null,
     reportStatus: null,
+    reportEvidence: null,
     lastError: null,
     reportContract: launch.report,
     memoryDir: launch.env.AVO_MEMORY_DIR,
@@ -183,9 +188,25 @@ export function listRuns() {
 export function getRun(id) {
   const run = requireRun(id);
   const snapshot = sanitizeRun(run);
-  snapshot.memory = loadMemorySnapshot(run.memoryDir, run.games);
+  const memory = loadMemorySnapshotEvidence(run.memoryDir, run.games);
+  const findings = loadFindingsSnapshotEvidence(REPO_ROOT, id);
+  snapshot.memory = memory.records.map((entry) => ({
+    gameId: entry.gameId,
+    value: deepSanitize(entry.value),
+  }));
+  snapshot.memoryEvidence = deepSanitize({
+    status: memory.status,
+    files: memory.evidence,
+    errors: memory.errors,
+  });
   snapshot.trajectory = loadTrajectorySnapshot(id, run.games);
-  snapshot.findings = loadFindings(id);
+  snapshot.findings = findings.value === null ? null : deepSanitize(findings.value);
+  snapshot.findingsEvidence = deepSanitize({
+    status: findings.status,
+    file: findings.evidence,
+    errors: findings.errors,
+  });
+  snapshot.evidenceErrors = deepSanitize([...memory.errors, ...findings.errors]);
   snapshot.provider = providerStatus();
   return snapshot;
 }
@@ -254,6 +275,7 @@ export function sanitizeRun(run) {
     progress: { ...run.progress },
     summary: run.summary,
     reportStatus: run.reportStatus,
+    reportEvidence: run.reportEvidence,
     lastError: run.lastError,
     abortConfirmation: run.id,
   });
@@ -277,14 +299,20 @@ function finalizeRun(run, state, { code, signal, stdout, stderr }) {
   let report = null;
   let reportError = null;
   try {
-    report = loadExactRunReport(run.reportContract);
+    const loaded = loadExactRunReportEvidence(run.reportContract);
+    report = loaded.report;
+    run.reportEvidence = loaded.evidence;
     run.reportStatus = String(report.status || 'unknown');
-    run.summary = summarizeMissionControlReport(report, run.executionMode);
+    run.summary = {
+      ...summarizeMissionControlReport(report, run.executionMode),
+      reportEvidence: loaded.evidence,
+    };
     run.official = run.summary.official === true;
     run.authorityState = String(run.summary.authorityState || (run.executionMode === 'competition' ? 'rejected' : 'diagnostic'));
     run.authorityReasons = Array.isArray(run.summary.authorityReasons) ? [...run.summary.authorityReasons] : [];
   } catch (error) {
     reportError = error;
+    run.reportEvidence = null;
     run.reportStatus = 'unavailable';
     run.official = false;
     if (run.executionMode === 'competition') {
@@ -312,6 +340,7 @@ function finalizeRun(run, state, { code, signal, stdout, stderr }) {
     exitCode: run.exitCode,
     signal: run.signal,
     reportStatus: run.reportStatus,
+    reportEvidence: run.reportEvidence,
     requestedMode: run.requestedMode,
     executionMode: run.executionMode,
     official: run.official,
@@ -414,29 +443,14 @@ function emit(run, type, payload) {
 
 function loadSummaryForRun(run) {
   try {
-    return summarizeMissionControlReport(loadExactRunReport(run.reportContract), run.executionMode);
+    const loaded = loadExactRunReportEvidence(run.reportContract);
+    return {
+      ...summarizeMissionControlReport(loaded.report, run.executionMode),
+      reportEvidence: loaded.evidence,
+    };
   } catch {
     return null;
   }
-}
-
-function loadMemorySnapshot(dir, games) {
-  const root = path.resolve(dir || path.join(REPO_ROOT, 'state', 'mission-control', 'local', 'memory'));
-  if (!fs.existsSync(root)) return [];
-  const wanted = new Set(games);
-  return fs.readdirSync(root)
-    .filter((name) => name.endsWith('.json'))
-    .filter((name) => wanted.size === 0 || wanted.has(path.basename(name, '.json')))
-    .slice(0, 50)
-    .flatMap((name) => {
-      const file = path.join(root, name);
-      try {
-        const stat = fs.lstatSync(file);
-        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) return [];
-        const value = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return [{ gameId: path.basename(name, '.json'), value: deepSanitize(value) }];
-      } catch { return []; }
-    });
 }
 
 function loadTrajectorySnapshot(runId, games) {
@@ -455,22 +469,6 @@ function loadTrajectorySnapshot(runId, games) {
     }
   }
   return { games, eventCount: events.length, events: events.slice(-2000) };
-}
-
-function loadFindings(runId) {
-  const candidates = [
-    path.join(REPO_ROOT, 'runs', 'private', 'analysis', `${runId}.json`),
-    path.join(REPO_ROOT, 'runs', 'analysis', `${runId}.json`),
-  ];
-  for (const file of candidates) {
-    if (!fs.existsSync(file)) continue;
-    try {
-      const stat = fs.lstatSync(file);
-      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) continue;
-      return deepSanitize(JSON.parse(fs.readFileSync(file, 'utf8')));
-    } catch {}
-  }
-  return null;
 }
 
 function normalizeGames(value) {
