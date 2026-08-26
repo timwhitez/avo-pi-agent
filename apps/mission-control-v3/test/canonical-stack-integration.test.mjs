@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildRunLaunch } from '../lib/run-contract.mjs';
 import {
   preserveUnavailableScoreDeltas,
+  preserveUnavailableSummaryDeltas,
   usageTelemetryDeltas,
 } from '../lib/metric-deltas.mjs';
 import { extractUsageMetrics } from '../lib/usage-telemetry.mjs';
@@ -25,22 +27,76 @@ test('subject namespaces remain isolated in the canonical Mission Control launch
   );
 });
 
-test('score and telemetry deltas stay null unless both values are strictly numeric', () => {
-  const comparison = preserveUnavailableScoreDeltas({
-    baseline: { summary: { officialScore: false, diagnosticScore: [] } },
-    candidate: { summary: { officialScore: 1, diagnosticScore: 2 } },
-    delta: {},
+test('every summary delta stays null unless both values are strictly numeric', () => {
+  const comparison = preserveUnavailableSummaryDeltas({
+    baseline: {
+      summary: {
+        officialScore: false,
+        diagnosticScore: [],
+        games: null,
+        wins: true,
+        totalLevels: {},
+        totalActions: '',
+        openFindings: [0],
+      },
+    },
+    candidate: {
+      summary: {
+        officialScore: 1,
+        diagnosticScore: 2,
+        games: 25,
+        wins: 20,
+        totalLevels: 100,
+        totalActions: 500,
+        openFindings: 0,
+      },
+    },
+    delta: {
+      games: 25,
+      wins: 19,
+      totalLevels: 100,
+      totalActions: 500,
+      openFindings: 0,
+    },
   });
-  assert.equal(comparison.delta.officialScore, null);
-  assert.equal(comparison.delta.diagnosticScore, null);
+  for (const field of [
+    'officialScore', 'diagnosticScore', 'games', 'wins', 'totalLevels', 'totalActions', 'openFindings',
+  ]) {
+    assert.equal(comparison.delta[field], null, `${field} must remain unavailable`);
+  }
 
   const valid = preserveUnavailableScoreDeltas({
-    baseline: { summary: { officialScore: 0, diagnosticScore: -1 } },
-    candidate: { summary: { officialScore: 0.75, diagnosticScore: 2 } },
+    baseline: {
+      summary: {
+        officialScore: 0,
+        diagnosticScore: -1,
+        games: 0,
+        wins: 0,
+        totalLevels: 0,
+        totalActions: 0,
+        openFindings: 0,
+      },
+    },
+    candidate: {
+      summary: {
+        officialScore: 0.75,
+        diagnosticScore: 2,
+        games: 25,
+        wins: 20,
+        totalLevels: 100,
+        totalActions: 500,
+        openFindings: 0,
+      },
+    },
     delta: {},
   });
   assert.equal(valid.delta.officialScore, 0.75);
   assert.equal(valid.delta.diagnosticScore, 3);
+  assert.equal(valid.delta.games, 25);
+  assert.equal(valid.delta.wins, 20);
+  assert.equal(valid.delta.totalLevels, 100);
+  assert.equal(valid.delta.totalActions, 500);
+  assert.equal(valid.delta.openFindings, 0);
 
   const telemetry = usageTelemetryDeltas(
     { totals: { inputTokens: [], outputTokens: 0, costUsd: false } },
@@ -71,4 +127,10 @@ test('usage telemetry ignores coercible arrays and booleans while preserving gen
   assert.equal(metrics.reasoningTokens, 12);
   assert.equal('costUsd' in metrics, false);
   assert.equal(metrics.inputCostUsd, 0.25);
+});
+
+test('the authenticated control plane overwrites all base deltas with the strict summary helper', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), 'lib', 'control-plane.mjs'), 'utf8');
+  assert.match(source, /preserveUnavailableSummaryDeltas\(base\.compareRuns/);
+  assert.doesNotMatch(source, /preserveUnavailableScoreDeltas\(base\.compareRuns/);
 });
