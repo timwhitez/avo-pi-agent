@@ -9,6 +9,11 @@ export function finiteNumberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+export function nonNegativeIntegerOrNull(value) {
+  const number = finiteNumberOrNull(value);
+  return number !== null && Number.isInteger(number) && number >= 0 ? number : null;
+}
+
 export function numericDelta(left, right) {
   const a = finiteNumberOrNull(left);
   const b = finiteNumberOrNull(right);

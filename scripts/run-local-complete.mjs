@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { evaluateCompleteLocalAcceptance } from '../src/local/complete-acceptance.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('complete:local refuses to run inside GitHub Actions');
@@ -69,23 +70,18 @@ try {
   if (summary.status === 'running') {
     const repairPath = path.resolve(summary.repairReport);
     const repair = JSON.parse(fs.readFileSync(repairPath, 'utf8'));
-    const finalScore = repair?.final?.officialScore?.value;
-    const accepted = repair.status === 'complete'
-      && repair.clean === true
-      && repair?.final?.authoritative === true
-      && Number(repair?.final?.findingCount) === 0
-      && Number(repair?.final?.openFindingCount) === 0
-      && Number.isFinite(Number(finalScore));
-    if (!accepted) {
+    const acceptance = evaluateCompleteLocalAcceptance(repair);
+    if (!acceptance.accepted) {
       summary.status = 'failed';
       summary.failure = {
         stage: 'acceptance',
         repairStatus: repair?.status ?? null,
-        authoritative: repair?.final?.authoritative === true,
-        clean: repair?.clean === true,
-        findingCount: Number(repair?.final?.findingCount ?? -1),
-        openFindingCount: Number(repair?.final?.openFindingCount ?? -1),
-        officialScorePresent: Number.isFinite(Number(finalScore)),
+        authoritative: acceptance.authoritative,
+        clean: acceptance.clean,
+        officialOrigin: acceptance.officialOrigin,
+        findingCount: acceptance.findingCount,
+        openFindingCount: acceptance.openFindingCount,
+        officialScorePresent: acceptance.officialScore !== null,
       };
       process.exitCode = 2;
     } else {
@@ -93,10 +89,10 @@ try {
       summary.result = {
         authoritative: true,
         clean: true,
-        findingCount: 0,
-        officialScore: Number(finalScore),
-        scoreOrigin: repair?.final?.officialScore?.origin || 'official-scorecard',
-        rounds: Array.isArray(repair.rounds) ? repair.rounds.length : null,
+        findingCount: acceptance.findingCount,
+        officialScore: acceptance.officialScore,
+        scoreOrigin: acceptance.scoreOrigin,
+        rounds: acceptance.rounds,
       };
     }
   }
