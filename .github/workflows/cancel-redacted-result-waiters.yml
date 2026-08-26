@@ -1,0 +1,22 @@
+name: Cancel superseded redacted result waiters
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/real-public-benchmark
+    paths:
+      - 'maintenance/cancel-result-waiters.trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-redacted-arc-results
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'Superseded cross-workflow waiters cancelled; trajectory-repair-v8 publishes its own final redacted result.'
