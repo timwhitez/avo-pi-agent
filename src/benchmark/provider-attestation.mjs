@@ -123,12 +123,7 @@ export async function readResponseTextLimited(response, {
   }
 
   const reader = response?.body?.getReader?.();
-  if (!reader) {
-    if (declaredLength === null) throw new BoundedReaderUnavailableError();
-    const text = await response.text();
-    if (Buffer.byteLength(text, 'utf8') > limit) throw new ProviderResponseTooLargeError();
-    return text;
-  }
+  if (!reader) throw new BoundedReaderUnavailableError();
 
   const decoder = new TextDecoder('utf-8', { fatal: false });
   let text = '';

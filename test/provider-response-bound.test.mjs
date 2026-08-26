@@ -68,19 +68,28 @@ test('bounded reader counts UTF-8 bytes rather than JavaScript characters', asyn
   );
 });
 
-test('text-only fallback requires a trustworthy bounded Content-Length', async () => {
-  const value = '{"ok":true}';
+test('text-only responses fail closed without invoking an unbounded fallback', async () => {
+  let textCalls = 0;
   const fallback = {
     body: null,
-    headers: { get: (name) => name.toLowerCase() === 'content-length' ? String(Buffer.byteLength(value)) : null },
-    text: async () => value,
+    headers: { get: (name) => name.toLowerCase() === 'content-length' ? '1' : null },
+    async text() {
+      textCalls += 1;
+      return 'x'.repeat(1024 * 1024);
+    },
   };
-  assert.equal(await readResponseTextLimited(fallback, { maxBytes: 64 }), value);
+
+  await assert.rejects(
+    readResponseTextLimited(fallback, { maxBytes: 64 }),
+    /bounded response reader is unavailable/,
+  );
+  assert.equal(textCalls, 0);
 
   await assert.rejects(
     readResponseTextLimited({ ...fallback, headers: { get: () => null } }, { maxBytes: 64 }),
     /bounded response reader is unavailable/,
   );
+  assert.equal(textCalls, 0);
 });
 
 test('preflight times out while an HTTP body is still streaming', async () => {
