@@ -15,7 +15,7 @@
     "local:preflight": "node scripts/local-preflight.mjs",
     "benchmark:local": "node scripts/run-real-public-locked.mjs",
     "repair:local": "node scripts/run-trajectory-repair-loop.mjs",
-    "complete:local": "node scripts/run-local-complete.mjs",
+    "complete:local": "node scripts/run-local-complete-secure.mjs",
     "security:scan": "node scripts/secret-scan.mjs",
     "verify": "npm run test && npm run security:scan && npm run demo:offline",
     "publish:private": "./scripts/publish-private.sh"

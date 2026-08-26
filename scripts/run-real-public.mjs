@@ -26,6 +26,7 @@ import {
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
+import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 
 loadLocalEnv();
 
@@ -90,12 +91,13 @@ try {
   const timeoutMs = benchmarkTimeout();
   const child = await runProcess(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
-    env: {
-      ...process.env,
-      GITHUB_ACTIONS: '',
-      AVO_REQUIRE_REAL_PROVIDER: '1',
-      AVO_REAL_RUN_ID: runId,
-    },
+    env: buildAgentChildEnvironment({
+      source: process.env,
+      overrides: {
+        AVO_REQUIRE_REAL_PROVIDER: '1',
+        AVO_REAL_RUN_ID: runId,
+      },
+    }),
     timeoutMs,
     stdoutFile,
     stderrFile,

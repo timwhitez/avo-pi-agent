@@ -3,8 +3,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { loadLocalEnv } from '../src/config.mjs';
+import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
+
+loadLocalEnv();
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('local diagnostic runner refuses GitHub Actions execution');
@@ -37,12 +41,14 @@ try {
   ], {
     cwd: root,
     stdio: 'inherit',
-    env: {
-      ...process.env,
-      GITHUB_ACTIONS: '',
-      AVO_REQUIRE_REAL_PROVIDER: '1',
-      AVO_REAL_RUN_ID: runId,
-    },
+    env: buildAgentChildEnvironment({
+      source: process.env,
+      overrides: {
+        AVO_REQUIRE_REAL_PROVIDER: '1',
+        AVO_REAL_RUN_ID: runId,
+        AVO_LOCAL_LOCK_TOKEN: lock.token,
+      },
+    }),
   });
   ({ code, signal } = await waitForClose(child));
   try {

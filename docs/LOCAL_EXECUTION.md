@@ -43,6 +43,47 @@ provider values in shell command arguments, Git commits, issues, pull requests,
 or public reports. A provider key previously pasted into chat must be rotated
 before use.
 
+## Child-process credential boundary
+
+The trusted parent loads `.env` once, then every benchmark, Pi Agent, ARC,
+recorder, Git, test, and utility child receives a new allowlisted environment.
+The project does not forward the complete Mission Control or login-shell
+environment.
+
+The three profiles are:
+
+- `agent`: minimal OS/locale/certificate values, the exact four Provider values,
+  selected ARC auth/runtime values, and explicit AVO run/memory/workspace/
+  trajectory/budget/lock values;
+- `arc`: the same minimal host values plus ARC and AVO runtime values, but no
+  Provider credential;
+- `utility`: only the minimal OS/locale/temp/certificate boundary.
+
+The following classes are intentionally excluded unless a named profile field
+requires them: Mission Control access tokens, GitHub credentials, cloud and
+registry credentials, SSH agent/socket settings, database/monitoring secrets,
+`NODE_OPTIONS`, `PYTHONPATH`, dynamic-loader/preload settings, and unknown
+variables. Caller overrides are checked against a fixed allowlist.
+
+Every filtered child receives `AVO_DISABLE_DOTENV=1`, so it cannot repopulate a
+removed value from the repository `.env`. Anonymous ARC mode always receives an
+empty `ARC_API_KEY`; registered mode fails before spawn unless an explicit ARC
+key is present.
+
+Proxy variables are excluded by default because proxy URLs may contain
+credentials. Set this only in the trusted parent when the Provider or ARC route
+requires the same proxy configuration:
+
+```dotenv
+AVO_CHILD_ALLOW_PROXY=1
+```
+
+Containerized workspace execution has its own stricter boundary: no network,
+read-only container root, dropped capabilities, no new privileges, resource
+limits, an unprivileged UID, and one writable per-game workspace mount. The
+child-environment allowlist is defense in depth and does not replace OS or
+container isolation.
+
 ## Preflight
 
 ```bash
@@ -67,6 +108,12 @@ The command acquires a local process lock and runs, in order:
 2. the repository secret scan;
 3. the real-provider/official-ARC preflight;
 4. the full public benchmark and detector-driven repair loop.
+
+The package command routes through the guarded entrypoint. Utility stages do
+not receive Provider or ARC credentials; Provider-facing and ARC-facing stages
+receive only their respective profile. The canonical repair command installs
+the same guard before importing the v4 implementation, so nested benchmark and
+Git subprocesses cannot silently recover the parent environment.
 
 Every repair round uses:
 
@@ -100,6 +147,10 @@ node scripts/analyze-trajectories.mjs --help
 real-provider rounds and applies detector guidance. `complete:local` is the
 recommended acceptance command because it includes tests, secret scanning,
 preflight, locking, and final score/cleanliness validation.
+
+The versioned repair-loop implementation files are internal components. Invoke
+the stable package/script entrypoints so the child-process guard and provenance
+boundary are active.
 
 ## No GitHub Actions fallback
 

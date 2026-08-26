@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import {
+  buildArcChildEnvironment,
+  buildUtilityChildEnvironment,
+} from '../local/child-environment.mjs';
 import { fingerprint } from './redaction.mjs';
 
 export { preflightResponsesProvider } from './provider-attestation.mjs';
@@ -60,7 +64,11 @@ out = {
 }
 print(json.dumps(out, separators=(",", ":")))
 `;
-  const result = await run(python, ['-c', script], { cwd, timeoutMs: 30_000 });
+  const result = await run(python, ['-c', script], {
+    cwd,
+    env: buildUtilityChildEnvironment({ source: process.env }),
+    timeoutMs: 30_000,
+  });
   if (result.status !== 0) throw new Error(`official ARC runtime inspection failed: ${result.stderr.slice(-1000)}`);
   const info = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
   return validateArcRuntimeMetadata(info, { cwd });
@@ -122,8 +130,10 @@ export function validateArcRuntimeMetadata(info, { cwd = process.cwd() } = {}) {
 
 export async function discoverPublicGames({ python = '.venv/bin/python', cwd = process.cwd() } = {}) {
   const authMode = String(process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase();
-  const env = { ...process.env, AVO_ARC_AUTH_MODE: authMode };
-  if (authMode === 'anonymous-auto') env.ARC_API_KEY = '';
+  const env = buildArcChildEnvironment({
+    source: process.env,
+    overrides: { AVO_ARC_AUTH_MODE: authMode },
+  });
 
   const result = await run(python, ['bridge/arc_bridge.py', '--list'], {
     cwd,
@@ -212,7 +222,11 @@ export function buildProvenance({ provider, providerPreflight, arcRuntime, games
 }
 
 export async function currentGitSha(cwd = process.cwd()) {
-  const result = await run('git', ['rev-parse', 'HEAD'], { cwd, timeoutMs: 10_000 });
+  const result = await run('git', ['rev-parse', 'HEAD'], {
+    cwd,
+    env: buildUtilityChildEnvironment({ source: process.env }),
+    timeoutMs: 10_000,
+  });
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
@@ -220,7 +234,13 @@ function hashPath(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
-export function run(command, args, { cwd = process.cwd(), env = process.env, timeoutMs = 0, onStdout, onStderr } = {}) {
+export function run(command, args, {
+  cwd = process.cwd(),
+  env = buildUtilityChildEnvironment({ source: process.env }),
+  timeoutMs = 0,
+  onStdout,
+  onStderr,
+} = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
