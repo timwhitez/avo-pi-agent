@@ -178,6 +178,7 @@ export class EvidenceStore {
     inspectEvidenceRoot(this.authorityRoot, this.root);
     const fd = fs.openSync(this.file, fs.constants.O_RDONLY | noFollowFlag());
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
     let carry = '';
     let lineNumber = 0;
     try {
@@ -189,15 +190,26 @@ export class EvidenceStore {
       for (;;) {
         const bytes = fs.readSync(fd, buffer, 0, buffer.length, null);
         if (!bytes) break;
-        carry += buffer.toString('utf8', 0, bytes);
+        try {
+          carry += decoder.decode(buffer.subarray(0, bytes), { stream: true });
+        } catch (error) {
+          throw new Error('evidence store contains invalid UTF-8', { cause: error });
+        }
         const lines = carry.split('\n');
         carry = lines.pop() ?? '';
         for (const line of lines) {
           lineNumber += 1;
+          assertEvidenceLineBytes(line, lineNumber, this.maxEventBytes, 1);
           if (line.trim()) onLine(line, lineNumber);
         }
-        if (Buffer.byteLength(carry, 'utf8') > this.maxEventBytes) throw new Error(`evidence line ${lineNumber + 1} exceeds ${this.maxEventBytes} bytes`);
+        assertEvidenceLineBytes(carry, lineNumber + 1, this.maxEventBytes, 0);
       }
+      try {
+        carry += decoder.decode();
+      } catch (error) {
+        throw new Error('evidence store contains invalid UTF-8', { cause: error });
+      }
+      assertEvidenceLineBytes(carry, lineNumber + 1, this.maxEventBytes, 0);
       if (carry.trim()) {
         lineNumber += 1;
         onLine(carry, lineNumber);
@@ -237,6 +249,12 @@ export class EvidenceStore {
       }
       lock.release();
     }
+  }
+}
+
+function assertEvidenceLineBytes(line, lineNumber, maxEventBytes, terminatorBytes) {
+  if (Buffer.byteLength(line, 'utf8') + terminatorBytes > maxEventBytes) {
+    throw new Error(`evidence line ${lineNumber} exceeds ${maxEventBytes} bytes`);
   }
 }
 
