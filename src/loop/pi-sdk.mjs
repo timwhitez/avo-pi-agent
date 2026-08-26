@@ -216,10 +216,23 @@ const ELIDED_TOOL_OUTPUT = '[older tool output elided to stay within the model c
 export function boundTranscript(messages, { recentToolResults = 6, maxMessages = 160 } = {}) {
   if (!Array.isArray(messages)) return messages;
   const toolIndices = [];
+  const thinkingIndices = [];
+  let lastAssistantIndex = -1;
   messages.forEach((message, index) => {
     if (message?.role === 'toolResult') toolIndices.push(index);
+    if (message?.role === 'assistant' && Array.isArray(message.content)) {
+      lastAssistantIndex = index;
+    }
   });
-  if (toolIndices.length <= recentToolResults && messages.length <= maxMessages) return messages;
+  messages.forEach((message, index) => {
+    if (message?.role === 'assistant' && index !== lastAssistantIndex && Array.isArray(message.content)
+      && message.content.some((block) => block?.type === 'thinking')) {
+      thinkingIndices.push(index);
+    }
+  });
+  if (toolIndices.length <= recentToolResults && messages.length <= maxMessages && thinkingIndices.length === 0) {
+    return messages;
+  }
 
   const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
   const overflow = Math.max(0, messages.length - maxMessages);
@@ -232,6 +245,16 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
       kept.push({
         ...message,
         content: [{ type: 'text', text: ELIDED_TOOL_OUTPUT }],
+      });
+      return;
+    }
+    if (thinkingIndices.includes(index)) {
+      // The Responses transport replays every stored reasoning item verbatim;
+      // at maximal reasoning effort those historical payloads dominate the
+      // context window, so only the latest assistant turn keeps its thinking.
+      kept.push({
+        ...message,
+        content: message.content.filter((block) => block?.type !== 'thinking'),
       });
       return;
     }
