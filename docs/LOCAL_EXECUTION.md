@@ -1,0 +1,109 @@
+# Local-only real-provider execution
+
+This repository no longer uses GitHub Actions for provider checks, ARC public
+benchmarks, trajectory repair, result publication, or frontend validation. All
+of those operations run from a trusted local checkout so they do not consume
+Actions quota and so raw trajectories remain on the operator-controlled host.
+
+## ARC authentication
+
+The default public-demo path uses the official ARC toolkit's anonymous bootstrap:
+
+```dotenv
+AVO_ARC_AUTH_MODE=anonymous-auto
+ARC_API_KEY=
+```
+
+Before importing `arc_agi`, the bridge forces `ARC_API_KEY` to the empty string.
+The official SDK obtains an anonymous key and retains it in the Python process.
+The project never invents a registered key, writes the anonymous value to disk,
+or prints it. An account-bound key is optional and must be selected explicitly
+with `AVO_ARC_AUTH_MODE=registered`; it is not needed for the normal public demo.
+
+## Prerequisites
+
+- Node.js 22.19 or newer
+- Python 3.12 in `.venv/bin/python`
+- the official `arc-agi` and `arcengine` distributions
+- installed Pi packages from `package.json`
+- a reachable real Responses-compatible provider
+- sufficient local disk space for private trajectories and memory
+
+Install once:
+
+```bash
+npm install --ignore-scripts
+./scripts/setup-arc.sh
+cp .env.example .env
+chmod 600 .env
+```
+
+Populate only the provider variables in the local mode-0600 `.env`. Do not put
+provider values in shell command arguments, Git commits, issues, pull requests,
+or public reports. A provider key previously pasted into chat must be rotated
+before use.
+
+## Preflight
+
+```bash
+npm run local:preflight
+```
+
+The preflight performs a real `/responses` attestation, verifies the installed
+ARC distributions, obtains an anonymous ARC key through the official SDK, and
+freezes the dynamically discovered public game list. Output contains hashes and
+safe metadata only; provider endpoint, key, model identifier, and ARC key are
+absent.
+
+## One complete local execution
+
+```bash
+npm run complete:local -- --max-rounds=6
+```
+
+The command acquires a local process lock and runs, in order:
+
+1. all Node regression tests;
+2. the repository secret scan;
+3. the real-provider/official-ARC preflight;
+4. the full public benchmark and detector-driven repair loop.
+
+Every repair round uses:
+
+- the real Pi SDK loop;
+- the complete dynamically discovered public set;
+- automatic anonymous ARC auth;
+- private exact trajectories;
+- the authoritative integrity gate and detector registry;
+- per-game persistent repair guidance for the next real-provider round.
+
+The command exits successfully only when a complete round has an official
+scorecard value, every registered detector executes, trajectory integrity is
+valid, parse errors are zero, and open findings are zero. Reaching the round
+limit, losing provider connectivity, missing a game, or lacking an official
+score fails closed.
+
+Private files are stored under `runs/private/`; redacted reports are stored
+under `runs/public/`. Both paths are ignored by Git except for the existing
+placeholder. `SIGINT`, `SIGTERM`, and `SIGHUP` terminate the active process group,
+write an interrupted report, and release the local lock.
+
+## Lower-level commands
+
+```bash
+npm run benchmark:local
+npm run repair:local -- --max-rounds=6
+node scripts/analyze-trajectories.mjs --help
+```
+
+`benchmark:local` runs one complete public set. `repair:local` repeats complete
+real-provider rounds and applies detector guidance. `complete:local` is the
+recommended acceptance command because it includes tests, secret scanning,
+preflight, locking, and final score/cleanliness validation.
+
+## No GitHub Actions fallback
+
+There is intentionally no workflow or secret-bootstrap path in the active
+branch. GitHub is used only for code review through unmerged issues and pull
+requests. Benchmark execution, raw artifacts, and provider credentials remain
+local.
