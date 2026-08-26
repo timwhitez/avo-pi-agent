@@ -13,6 +13,8 @@ const originalSpawn = childProcess.spawn.bind(childProcess);
 const originalSpawnSync = childProcess.spawnSync.bind(childProcess);
 const guardState = Symbol.for('avo.child-process-guard.installed');
 const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const arcEntrypointPattern = /^bridge\/(?:arc_bridge|recording_python_v\d+)\.py$/;
+const agentEntrypointPattern = /^(?:scripts\/(?:local-preflight|pi-provider-smoke|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs|src\/cli\.mjs)$/;
 
 if (globalThis[guardState] !== true) {
   childProcess.spawn = guardedSpawn;
@@ -44,22 +46,41 @@ export function guardedOptions(command, args = [], options = {}) {
 
 export function classifyChild(command, args = [], { cwd = process.cwd() } = {}) {
   const base = path.resolve(String(cwd || process.cwd()));
-  const candidates = [command, ...(Array.isArray(args) ? args : [])]
-    .map((value) => resolveCandidate(value, base))
-    .filter(Boolean);
+  const commandText = String(command || '');
+  const directProfile = classifyCanonicalEntrypoint(resolveCandidate(commandText, base));
+  if (directProfile !== 'utility') return directProfile;
 
-  if (candidates.some((candidate) => (
-    /^bridge\/(?:arc_bridge|recording_python_v\d+)\.py$/.test(projectRelative(candidate))
-  ))) {
-    return 'arc';
-  }
-  if (candidates.some((candidate) => (
-    /^(?:scripts\/(?:local-preflight|pi-provider-smoke|run-real-public|run-trajectory-repair-loop(?:-v\d+)?)\.mjs|src\/cli\.mjs)$/.test(
-      projectRelative(candidate),
-    )
-  ))) {
-    return 'agent';
-  }
+  const values = Array.isArray(args) ? args.map((value) => String(value)) : [];
+  const executable = path.basename(commandText).toLowerCase();
+  const entrypoint = interpreterEntrypoint(executable, values);
+  if (!entrypoint) return 'utility';
+
+  const profile = classifyCanonicalEntrypoint(resolveCandidate(entrypoint, base));
+  if (profile === 'arc' && isPythonExecutable(executable)) return 'arc';
+  if (profile === 'agent' && isNodeExecutable(executable)) return 'agent';
+  return 'utility';
+}
+
+function interpreterEntrypoint(executable, args) {
+  if (!isPythonExecutable(executable) && !isNodeExecutable(executable)) return null;
+  if (args.length === 0) return null;
+  if (args[0] === '--') return args[1] || null;
+  if (args[0].startsWith('-')) return null;
+  return args[0];
+}
+
+function isPythonExecutable(executable) {
+  return /^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable);
+}
+
+function isNodeExecutable(executable) {
+  return /^(?:node|nodejs)(?:\.exe)?$/.test(executable);
+}
+
+function classifyCanonicalEntrypoint(candidate) {
+  const relative = projectRelative(candidate);
+  if (arcEntrypointPattern.test(relative)) return 'arc';
+  if (agentEntrypointPattern.test(relative)) return 'agent';
   return 'utility';
 }
 
@@ -70,6 +91,7 @@ function resolveCandidate(value, cwd) {
 }
 
 function projectRelative(candidate) {
+  if (!candidate) return '';
   const relative = path.relative(projectRoot, candidate);
   if (!relative || path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
     return '';
