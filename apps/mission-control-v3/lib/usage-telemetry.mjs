@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { sanitizeForClient } from './client-sanitize.mjs';
+import { finiteNumberOrNull } from '../../../src/local/numeric.mjs';
 
 const DEFAULT_LIMITS = Object.freeze({
   maxFiles: 500,
@@ -80,7 +81,7 @@ export function loadUsageTelemetry({ repoRoot, runId, limits = {} }) {
       }
       const sample = sanitizeForClient({
         at: event?.at ?? event?.timestamp ?? event?.time ?? null,
-        sequence: finiteOrNull(event?.sequence ?? event?.seq ?? event?.cursor),
+        sequence: finiteNumberOrNull(event?.sequence ?? event?.seq ?? event?.cursor),
         gameId: event?.gameId ?? event?.game_id ?? null,
         turnId: event?.turnId ?? event?.turn_id ?? null,
         type: event?.type ?? event?.event ?? 'usage',
@@ -132,7 +133,7 @@ function visit(value, pathParts, metrics, depth, seen) {
   const parent = normalizeKey(pathParts.at(-1));
   for (const [key, child] of Object.entries(value).slice(0, 1000)) {
     const normalized = normalizeKey(key);
-    const numeric = finiteOrNull(child);
+    const numeric = finiteNumberOrNull(child);
     const mapped = DIRECT_METRICS.get(normalized) || mapUsageChild(parent, normalized);
     if (mapped && numeric !== null && metrics[mapped] === undefined) metrics[mapped] = numeric;
     if (child && typeof child === 'object') visit(child, [...pathParts, key], metrics, depth + 1, seen);
@@ -189,13 +190,6 @@ function normalizeLimits(value) {
 function boundedInteger(value, fallback, min, max) {
   const number = Number(value ?? fallback);
   return Number.isInteger(number) && number >= min && number <= max ? number : fallback;
-}
-
-function finiteOrNull(value) {
-  if (value === null || value === undefined || typeof value === 'boolean') return null;
-  if (typeof value === 'string' && value.trim() === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function normalizeKey(value) {
