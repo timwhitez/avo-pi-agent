@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   assertRateLimit,
   createSession,
+  createSessionLease,
   destroySession,
   readJsonBody,
   requireSession,
+  requireSessionLease,
 } from '../lib/session.mjs';
 
 const accessToken = 'mission-control-test-token-32-bytes-minimum';
@@ -69,6 +71,52 @@ test('logout revokes the subject-bound session and expires its cookie', () => {
     assert.throws(() => requireSession(request), /missing or expired/);
   } finally {
     restore('AVO_MISSION_CONTROL_ACCESS_TOKEN', previous);
+  }
+});
+
+test('long-lived session leases are revoked by logout, expiry, token rotation and subject mismatch', () => {
+  const previousToken = process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN;
+  const previousUser = process.env.AVO_MISSION_CONTROL_USER;
+  const realNow = Date.now;
+  process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN = accessToken;
+  delete process.env.AVO_MISSION_CONTROL_USER;
+  try {
+    const logoutSession = createSession('avo');
+    const logoutCookie = logoutSession.cookie.split(';')[0];
+    const logoutRequest = authenticatedRequest('http://localhost/api/runs/run/events', { cookie: logoutCookie });
+    const logoutLease = createSessionLease(logoutSession);
+    assert.equal(requireSessionLease(logoutRequest, logoutLease).id, logoutSession.id);
+    destroySession(authenticatedRequest('http://localhost/api/session', {
+      method: 'DELETE', cookie: logoutCookie, csrf: logoutSession.csrf,
+    }));
+    assert.throws(() => requireSessionLease(logoutRequest, logoutLease), /missing or expired/);
+
+    const base = realNow();
+    const expirySession = createSession('avo');
+    const expiryRequest = authenticatedRequest('http://localhost/api/runs/run/events', {
+      cookie: expirySession.cookie.split(';')[0],
+    });
+    const expiryLease = createSessionLease(expirySession);
+    Date.now = () => base + 13 * 60 * 60 * 1000;
+    assert.throws(() => requireSessionLease(expiryRequest, expiryLease), /missing or expired/);
+    Date.now = realNow;
+
+    const rotationSession = createSession('avo');
+    const rotationRequest = authenticatedRequest('http://localhost/api/runs/run/events', {
+      cookie: rotationSession.cookie.split(';')[0],
+    });
+    const rotationLease = createSessionLease(rotationSession);
+    process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN = 'rotated-mission-control-token-32-bytes';
+    assert.throws(() => requireSessionLease(rotationRequest, rotationLease), /authentication required/);
+    process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN = accessToken;
+    assert.throws(
+      () => requireSessionLease(rotationRequest, { ...rotationLease, subject: 'other' }),
+      /lease is no longer valid/,
+    );
+  } finally {
+    Date.now = realNow;
+    restore('AVO_MISSION_CONTROL_ACCESS_TOKEN', previousToken);
+    restore('AVO_MISSION_CONTROL_USER', previousUser);
   }
 });
 

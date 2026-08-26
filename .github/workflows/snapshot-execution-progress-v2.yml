@@ -1,0 +1,110 @@
+name: Snapshot authoritative AVO execution progress v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/real-public-benchmark
+    paths:
+      - 'maintenance/snapshot-progress-v2/**'
+
+permissions:
+  actions: read
+  contents: write
+  issues: write
+
+concurrency:
+  group: snapshot-authoritative-progress-v2
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Query authoritative and prerequisite workflow runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/progress
+          gh run list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json databaseId,workflowName,displayTitle,headBranch,headSha,status,conclusion,createdAt,startedAt,updatedAt,url,event \
+            > /tmp/progress/runs.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const runs = JSON.parse(fs.readFileSync('/tmp/progress/runs.json', 'utf8'));
+          const definitions = [
+            ['recordedBaseline', /^Real ARC-AGI-3 public benchmark recorded$/, 'feature/real-public-benchmark'],
+            ['recorderV5Promotion', /^Promote method-aware full-evidence recorder v5$/, 'feature/trajectory-repair-v3'],
+            ['repairV10', /^Real trajectory multi-job repair and publish v10$/, 'feature/trajectory-repair-v3'],
+            ['frontendSourceV3', /^Harden and verify mission-control runtime v3$/, 'feature/copilotkit-mission-control-v3'],
+            ['frontendRestackV6', /^Restack final hardened mission control v6$/, 'feature/trajectory-repair-v3'],
+            ['frontendV6CIInstall', /^Install mission-control v6 branch CI$/, 'feature/trajectory-repair-v3'],
+            ['frontendV6PR', /^Open verified mission-control v6 Draft PR$/, 'feature/trajectory-repair-v3'],
+            ['prAuditV2', /^Audit AVO Draft PR stack v2$/, 'feature/real-public-benchmark'],
+            ['finalAcceptanceV2', /^Final AVO ARC acceptance gate v2$/, 'feature/real-public-benchmark'],
+          ];
+          const selected = {};
+          for (const [key, pattern, branch] of definitions) {
+            selected[key] = runs.filter((run) => pattern.test(run.workflowName || '') && run.headBranch === branch)
+              .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] || null;
+          }
+          const repairRuns = runs.filter((run) => run.workflowName === 'Real trajectory multi-job repair and publish v10')
+            .sort((a,b) => Date.parse(b.createdAt)-Date.parse(a.createdAt));
+          const out = {
+            schemaVersion: 2,
+            generatedAt: new Date().toISOString(),
+            workflows: selected,
+            latestRepairV10Attempts: repairRuns.slice(0, 5),
+          };
+          fs.writeFileSync('/tmp/progress/progress.json', `${JSON.stringify(out, null, 2)}\n`);
+          const lines = [
+            '# Authoritative AVO execution progress v2', '',
+            `Generated: ${out.generatedAt}`, '',
+            '| Workstream | Run | Branch | Status | Conclusion | Updated |',
+            '|---|---:|---|---|---|---|',
+          ];
+          for (const [key, run] of Object.entries(selected)) {
+            lines.push(run
+              ? `| ${key} | [${run.databaseId}](${run.url}) | \`${run.headBranch}\` | ${run.status} | ${run.conclusion || '—'} | ${run.updatedAt || '—'} |`
+              : `| ${key} | — | — | not-found | — | — |`);
+          }
+          lines.push('', '## Latest repair-v10 attempts', '', '| Run | SHA | Status | Conclusion | Created |', '|---:|---|---|---|---|');
+          for (const run of repairRuns.slice(0, 5)) {
+            lines.push(`| [${run.databaseId}](${run.url}) | \`${String(run.headSha).slice(0, 12)}\` | ${run.status} | ${run.conclusion || '—'} | ${run.createdAt} |`);
+          }
+          lines.push('', '> This snapshot contains workflow metadata only. It contains no credentials, provider values, ARC keys, private trajectories, exact frames, memory text, or reasoning.', '');
+          fs.writeFileSync('/tmp/progress/progress.md', `${lines.join('\n')}\n`);
+          NODE
+      - name: Commit synchronized progress snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$GITHUB_REF_NAME"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          mkdir -p docs/runs/automation
+          cp /tmp/progress/progress.json docs/runs/automation/progress.json
+          cp /tmp/progress/progress.md docs/runs/automation/progress.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/runs/automation/progress.json docs/runs/automation/progress.md
+          if ! git diff --cached --quiet; then
+            git commit -m "docs(progress): publish authoritative execution snapshot v2"
+            for attempt in 1 2 3; do
+              git fetch origin "$GITHUB_REF_NAME"
+              git rebase "origin/${GITHUB_REF_NAME}"
+              if git push origin HEAD:"${GITHUB_REF_NAME}"; then exit 0; fi
+              sleep $((attempt * 5))
+            done
+            exit 1
+          fi
+      - name: Comment progress on Epic
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue comment 1 --repo "$GITHUB_REPOSITORY" --body-file docs/runs/automation/progress.md
