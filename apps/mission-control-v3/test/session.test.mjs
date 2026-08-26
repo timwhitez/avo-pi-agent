@@ -157,3 +157,39 @@ function restore(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
 }
+
+test('same-origin check follows the Host header for local non-localhost access', () => {
+  const previous = process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN;
+  process.env.AVO_MISSION_CONTROL_ACCESS_TOKEN = accessToken;
+  try {
+    const session = createSession('avo');
+    const cookiePair = session.cookie.split(';')[0];
+    // A real Next server presents request.url with an internal hostname while
+    // the browser talks to 127.0.0.1; the Host header must decide.
+    const viaHostHeader = new Request('http://localhost/api/runs', {
+      method: 'POST',
+      headers: {
+        authorization,
+        cookie: cookiePair,
+        origin: 'http://127.0.0.1:4319',
+        host: '127.0.0.1:4319',
+        'x-avo-csrf': session.csrf,
+      },
+    });
+    assert.equal(requireSession(viaHostHeader).id, session.id);
+
+    const mismatchedHost = new Request('http://localhost/api/runs', {
+      method: 'POST',
+      headers: {
+        authorization,
+        cookie: cookiePair,
+        origin: 'http://attacker.invalid',
+        host: '127.0.0.1:4319',
+        'x-avo-csrf': session.csrf,
+      },
+    });
+    assert.throws(() => requireSession(mismatchedHost), /Cross-origin/);
+  } finally {
+    restore('AVO_MISSION_CONTROL_ACCESS_TOKEN', previous);
+  }
+});

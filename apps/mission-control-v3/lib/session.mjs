@@ -123,7 +123,6 @@ export function assertRateLimit(scope, subject, {
 export function assertSameOrigin(request) {
   const origin = request.headers.get('origin');
   if (!origin) return;
-  const requestUrl = new URL(request.url);
   let originUrl;
   try {
     originUrl = new URL(origin);
@@ -132,7 +131,14 @@ export function assertSameOrigin(request) {
     error.status = 403;
     throw error;
   }
-  if (originUrl.protocol !== requestUrl.protocol || originUrl.host !== requestUrl.host) {
+  // Next normalizes request.url to its internal host, which breaks the check
+  // for any other local hostname (for example 127.0.0.1). The Host header is
+  // the authoritative same-origin comparison target on a real server; the
+  // request.url fallback keeps direct Request objects testable.
+  const requestUrl = new URL(request.url);
+  const hostHeader = String(request.headers.get('host') || '').trim();
+  const requestHost = (hostHeader || requestUrl.host).toLowerCase();
+  if (originUrl.protocol !== requestUrl.protocol || !requestHost || originUrl.host.toLowerCase() !== requestHost) {
     const error = new Error('Cross-origin mission-control request rejected');
     error.status = 403;
     throw error;
