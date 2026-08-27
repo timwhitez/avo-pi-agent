@@ -18,7 +18,10 @@ test('production Pi loop uses official SDK and sequential tools', () => {
 test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustion', () => {
   assert.match(source, /agent\.followUp\(/);
   assert.match(source, /await agent\.continue\(\)/);
-  assert.match(source, /outerTurns < config\.maxOuterTurns/);
+  assert.match(source, /outerTurns >= config\.maxOuterTurns/);
+  // transient provider errors recover in place instead of ending the game
+  assert.match(source, /TRANSIENT_SESSION_ERROR/);
+  assert.match(source, /AVO_TRANSIENT_TURN_RECOVERIES/);
   assert.match(source, /exhaustedOuterTurns/);
   assert.match(source, /outer-turn budget exhausted/);
   assert.doesNotMatch(source, /portable-pi/);

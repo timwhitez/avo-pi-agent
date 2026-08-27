@@ -126,7 +126,24 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       agent.subscribe((event) => onEvent(event));
       let outerTurns = 1;
       await agent.prompt(initialPrompt);
-      while (!shouldStop() && !agent.state.errorMessage && outerTurns < config.maxOuterTurns) {
+      // Provider-side stream drops surface as session errors. Recovering the
+      // turn in place keeps every prior action; a whole-game retry would
+      // replay them all. Only an explicit transient allowlist recovers, and
+      // only up to a bounded number of times per game.
+      const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
+      const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection/i;
+      let transientRecoveries = 0;
+      for (;;) {
+        const sessionError = agent.state.errorMessage;
+        if (sessionError) {
+          const recoverable = !shouldStop()
+            && transientRecoveries < maxTransientRecoveries
+            && TRANSIENT_SESSION_ERROR.test(String(sessionError));
+          if (!recoverable) break;
+          transientRecoveries += 1;
+          agent.state.errorMessage = undefined;
+        }
+        if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
         agent.followUp({
           role: 'user',
           content: 'The environment is not complete. Re-ground in exact evidence and durable memory, then continue with a materially useful direct-interaction experiment. Do not stop until WIN or the action budget is exhausted.',
@@ -143,6 +160,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           : null),
         outerTurns,
         exhaustedOuterTurns,
+        transientRecoveries,
       };
     },
   };
