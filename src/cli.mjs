@@ -5,6 +5,7 @@ import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mj
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
 import { loadResumedRecords, resolveResumeDirectory, saveResumedRecord } from './benchmark/resume-cache.mjs';
+import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
@@ -132,14 +133,14 @@ async function runPublic(args) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
 
-    for (const [index, info] of selected.entries()) {
+    const runOneGame = async (index, info, env) => {
       const gameId = String(info.game_id).split('-')[0];
       const ordinal = index + 1;
       if (resumedRecords.has(gameId)) {
-        results.push(resumedRecords.get(gameId));
+        results[index] = resumedRecords.get(gameId);
         console.log(`\n[${ordinal}/${selected.length}] ${gameId} resumed from checkpoint`);
         progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: 0, resumed: true });
-        continue;
+        return;
       }
       const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
@@ -176,10 +177,10 @@ async function runPublic(args) {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          await environment.open(gameId);
+          await env.open(gameId);
           const agent = configureWorkspace(new AvoArcAgent({
             gameId,
-            environment,
+            environment: env,
             loop,
             config: gameConfig,
             captureScorecard: false,
@@ -198,7 +199,7 @@ async function runPublic(args) {
             await sleep(delayMs);
           }
         }
-        results.push(result);
+        results[index] = result;
         saveResumedRecord(resumeDir, gameId, result);
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
@@ -217,6 +218,31 @@ async function runPublic(args) {
         });
         throw error;
       }
+    };
+
+    // Games may run concurrently over one Arcade session: each worker owns a
+    // named environment handle on the shared bridge, so the cumulative
+    // official scorecard keeps its single-session semantics.
+    const concurrency = (() => {
+      const raw = Number(process.env.AVO_GAME_CONCURRENCY || 1);
+      if (!Number.isInteger(raw) || raw < 1 || raw > 8) {
+        throw new Error('AVO_GAME_CONCURRENCY must be an integer from 1 to 8');
+      }
+      return raw;
+    })();
+    if (concurrency === 1) {
+      for (let index = 0; index < selected.length; index += 1) {
+        await runOneGame(index, selected[index], environment);
+      }
+    } else {
+      console.log(`[concurrency] running up to ${concurrency} games in parallel on one Arcade session`);
+      const settled = await runWithConcurrency(selected.map((info, index) => async () => {
+        const gameId = String(info.game_id).split('-')[0];
+        const env = await environment.openTracked(gameId, `game-${index}-${gameId}`);
+        await runOneGame(index, info, env);
+      }), concurrency);
+      const failure = settled.find((item) => item?.error);
+      if (failure) throw failure.error;
     }
   } catch (error) {
     runError = error;
@@ -226,7 +252,8 @@ async function runPublic(args) {
     await progress.flush();
   }
 
-  const report = makeReport('official-public-environments', results, config, {
+  const completed = results.filter(Boolean);
+  const report = makeReport('official-public-environments', completed, config, {
     aggregateScorecard,
     expectedGames: selected.length,
     runError,

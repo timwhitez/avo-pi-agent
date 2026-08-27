@@ -256,6 +256,39 @@ export class ArcBridgeClient {
     return (await this.request({ command: 'scorecard' })).scorecard;
   }
 
+  /**
+   * Open a named environment on the shared Arcade session and return a
+   * per-game proxy with the regular environment interface. Concurrent games
+   * step their own handles over one bridge process, so the cumulative
+   * official scorecard keeps single-session semantics.
+   */
+  async openTracked(gameId, handle) {
+    await this.ensureProcess();
+    const safeHandle = String(handle || '').replace(/[^A-Za-z0-9_.-]/g, '');
+    if (!safeHandle) throw new Error('openTracked requires a handle');
+    await this.request({ command: 'open', game_id: gameId, handle: safeHandle });
+    const client = this;
+    return Object.freeze({
+      gameId,
+      async open(id) {
+        return (await client.request({ command: 'open', game_id: id, handle: safeHandle })).frame;
+      },
+      async observe() {
+        return (await client.request({ command: 'observe', handle: safeHandle })).frame;
+      },
+      async step(action, data = {}, reasoning = undefined) {
+        return (await client.request({ command: 'step', action, data, reasoning, handle: safeHandle })).frame;
+      },
+      async reset(reasoning = undefined) {
+        return (await client.request({ command: 'reset', reasoning, handle: safeHandle })).frame;
+      },
+      async scorecard() {
+        return (await client.request({ command: 'scorecard' })).scorecard;
+      },
+      async close() {},
+    });
+  }
+
   async close() {
     if (this.closed) {
       this.terminateChild();

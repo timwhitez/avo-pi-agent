@@ -80,6 +80,21 @@ publication, or client-side frontend configuration.
 A failure at any stage exits non-zero and writes a redacted failure report. It
 does not invent a score or convert an incomplete run into a partial success.
 
+## Running games concurrently
+
+`AVO_GAME_CONCURRENCY` (integer 1–8, default 1) runs several games at the
+same time. Concurrency is safe for official scoring because every worker
+steps its own named environment on the **single shared Arcade session**;
+the cumulative scorecard keeps its one-session semantics instead of being
+assembled from partial sessions. Each worker keeps its own Pi session,
+per-game durable memory, evidence ledger and checkpoint file, and provider
+load multiplies accordingly — raise the level only as far as the Provider
+endpoint tolerates parallel streams.
+
+Reasoning effort stays `OPENAI_REASONING_EFFORT` (default `max`). A
+different effort level is a different run context: pin a fresh `AVO_REAL_RUN_ID`
+rather than mixing effort levels inside one run.
+
 ## Resuming an interrupted benchmark
 
 A long real-set run can be interrupted (process kill, host reboot, a fix

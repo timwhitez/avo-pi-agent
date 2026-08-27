@@ -162,6 +162,19 @@ def environment_list(arcade: Any) -> list[dict[str, Any]]:
     return [serialize_environment_info(item) for item in arcade.get_environments()]
 
 
+def resolve_environment(request: dict, open_environments: dict):
+    handle = str(request.get("handle") or "").strip()
+    if handle:
+        entry = open_environments.get(handle)
+        if entry is None:
+            raise ValueError(f"No environment is open for handle: {handle}")
+        return entry[0]
+    entry = open_environments.get("default")
+    if entry is None:
+        raise ValueError("No game is open")
+    return entry[0]
+
+
 def resolve_action(GameAction: Any, name: str) -> Any:
     normalized = str(name).upper()
     try:
@@ -226,13 +239,14 @@ def main() -> int:
                 flush=True,
             )
             return 0
-        env = None
+        open_environments: dict[str, tuple[Any, str]] = {}
         current_game_id = None
         if args.game:
-            env = arcade.make(args.game)
-            if env is None:
+            initial_env = arcade.make(args.game)
+            if initial_env is None:
                 fail(f"Could not create ARC environment: {args.game}")
                 return 3
+            open_environments["default"] = (initial_env, args.game)
             current_game_id = args.game
     except Exception as exc:
         fail(f"ARC initialization failed: {type(exc).__name__}: {exc}")
@@ -254,22 +268,27 @@ def main() -> int:
                 requested_game = str(request.get("game_id") or "").strip()
                 if not requested_game:
                     raise ValueError("open requires game_id")
+                handle = str(request.get("handle") or "").strip()
                 env = arcade.make(requested_game)
                 if env is None:
                     raise ValueError(f"Could not create ARC environment: {requested_game}")
+                # One Arcade session may own several environments at once;
+                # the cumulative scorecard keeps official semantics while the
+                # host runs games concurrently through handles. Handle-less
+                # opens keep the single-environment contract via "default".
+                open_environments[handle or "default"] = (env, requested_game)
                 current_game_id = requested_game
                 response = {
                     "ok": True,
-                    "game_id": current_game_id,
+                    "game_id": requested_game,
+                    "handle": handle or None,
                     "frame": serialize_frame(env.observation_space),
                 }
             elif command == "observe":
-                if env is None:
-                    raise ValueError("No game is open")
-                response = {"ok": True, "frame": serialize_frame(env.observation_space)}
+                target = resolve_environment(request, open_environments)
+                response = {"ok": True, "frame": serialize_frame(target.observation_space)}
             elif command in ("step", "reset"):
-                if env is None:
-                    raise ValueError("No game is open")
+                target = resolve_environment(request, open_environments)
                 action_name = "RESET" if command == "reset" else request.get("action")
                 action = resolve_action(GameAction, action_name)
                 data = request.get("data") or {}
@@ -278,7 +297,7 @@ def main() -> int:
                 reasoning = request.get("reasoning")
                 if reasoning is not None and not isinstance(reasoning, dict):
                     reasoning = {"text": str(reasoning)}
-                raw = env.step(action, data=data, reasoning=reasoning)
+                raw = target.step(action, data=data, reasoning=reasoning)
                 response = {"ok": True, "frame": serialize_frame(raw)}
             elif command == "scorecard":
                 response = {
