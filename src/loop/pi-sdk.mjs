@@ -267,5 +267,18 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
       timestamp: messages[0]?.timestamp ?? Date.now(),
     });
   }
-  return kept;
+  // Overflow dropping can sever an assistant turn from its trailing tool
+  // results; a function_call_output without its function_call is a hard
+  // provider 400, so orphaned outputs are dropped as part of the repair.
+  const pairedCallIds = new Set();
+  for (const message of kept) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (block?.type === 'toolCall' && typeof block.id === 'string') {
+        pairedCallIds.add(block.id.split('|')[0]);
+      }
+    }
+  }
+  return kept.filter((message) => message?.role !== 'toolResult'
+    || pairedCallIds.has(String(message.toolCallId || '').split('|')[0]));
 }
