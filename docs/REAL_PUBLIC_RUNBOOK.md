@@ -80,6 +80,29 @@ publication, or client-side frontend configuration.
 A failure at any stage exits non-zero and writes a redacted failure report. It
 does not invent a score or convert an incomplete run into a partial success.
 
+## Resuming an interrupted benchmark
+
+A long real-set run can be interrupted (process kill, host reboot, a fix
+release). The run supports an operator-initiated resume instead of replaying
+every game from scratch:
+
+1. Pin the run ID: `AVO_REAL_RUN_ID=<original-id>`.
+2. Set `AVO_RESUME_RUN=1`.
+3. Relaunch `npm run benchmark:local`.
+
+Resume refuses to start unless the original `provenance.json` exists and the
+repository Git SHA still matches it, and unless neither a completed private
+manifest nor a completed public report exists. Finished games are checkpointed
+under `runs/private/<runId>/resume/<game>.json` as the run progresses; the
+restarted child reloads those checkpoints, prints
+`[resume] N completed game checkpoint(s) loaded`, and skips those games.
+Provider and ARC preflights always rerun; the original provenance file stays
+authoritative, runner logs append, and the final report must still cover the
+complete dynamically discovered game set before it can pass acceptance.
+Without `AVO_RESUME_RUN=1` a pinned run ID is still rejected with
+`runId already exists and cannot be reused`, so accidental reuse stays a hard
+error.
+
 ## Local evidence classes
 
 ### Private evidence — operator-controlled retention
