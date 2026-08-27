@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -45,8 +46,14 @@ const publicDir = path.join(runsRoot, 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
 fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
 fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
+// AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run:
+// finished games are skipped via the per-game checkpoint cache and the
+// original provenance stays authoritative. The context must match exactly.
+const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
 if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
-  throw new Error(`runId already exists and cannot be reused: ${runId}`);
+  if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
+  assertResumableContext({ privateDir, publicFile, runId });
+  console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
 }
 fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
 
@@ -84,10 +91,14 @@ try {
     runId,
     gitSha,
   });
-  writeJsonAtomic(path.join(privateDir, 'provenance.json'), provenance, {
-    root: privateDir,
-    exclusive: true,
-  });
+  if (resuming && fs.existsSync(path.join(privateDir, 'provenance.json'))) {
+    console.log('[real-run] keeping the original provenance of the resumed run');
+  } else {
+    writeJsonAtomic(path.join(privateDir, 'provenance.json'), provenance, {
+      root: privateDir,
+      exclusive: true,
+    });
+  }
 
   stage.value = 'agent-execution';
   const before = snapshotJsonFiles(runsRoot);
@@ -102,9 +113,11 @@ try {
       overrides: {
         AVO_REQUIRE_REAL_PROVIDER: '1',
         AVO_REAL_RUN_ID: runId,
+        ...(resuming ? { AVO_RESUME_DIR: path.join(privateDir, 'resume') } : {}),
       },
     }),
     timeoutMs,
+    appendLogs: resuming,
     stdoutFile,
     stderrFile,
     maxTailChars: 64 * 1024,
@@ -220,4 +233,37 @@ function safeRunId(value) {
   const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
   if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
   return result;
+}
+
+function assertResumableContext({ privateDir, publicFile, runId }) {
+  const provenanceFile = path.join(privateDir, 'provenance.json');
+  if (!fs.existsSync(provenanceFile)) {
+    throw new Error(`cannot resume ${runId}: original provenance.json is missing`);
+  }
+  let original;
+  try {
+    original = JSON.parse(fs.readFileSync(provenanceFile, 'utf8'));
+  } catch (error) {
+    throw new Error(`cannot resume ${runId}: provenance.json is unreadable`, { cause: error });
+  }
+  if (original.gitSha) {
+    const probe = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' });
+    const sha = probe.status === 0 ? String(probe.stdout).trim() : null;
+    if (sha && original.gitSha !== sha) {
+      throw new Error(`cannot resume ${runId}: repository moved from ${original.gitSha.slice(0, 12)} to ${sha.slice(0, 12)}; start a fresh run instead`);
+    }
+  }
+  const manifestFile = path.join(privateDir, 'manifest.private.json');
+  if (fs.existsSync(manifestFile)) {
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    if (manifest.status === 'complete') {
+      throw new Error(`cannot resume ${runId}: the run already completed`);
+    }
+  }
+  if (fs.existsSync(publicFile)) {
+    const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
+    if (prior.status === 'complete') {
+      throw new Error(`cannot resume ${runId}: a complete public report already exists`);
+    }
+  }
 }

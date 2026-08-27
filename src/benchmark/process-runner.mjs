@@ -11,6 +11,7 @@ export async function runProcess(command, args, {
   timeoutMs = 0,
   stdoutFile = null,
   stderrFile = null,
+  appendLogs = false,
   maxTailChars = DEFAULT_TAIL_CHARS,
   maxStdoutBytes = null,
   maxStderrBytes = null,
@@ -20,8 +21,8 @@ export async function runProcess(command, args, {
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
   const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
   const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
-  const stdoutSink = stdoutFile ? createSink(stdoutFile) : null;
-  const stderrSink = stderrFile ? createSink(stderrFile) : null;
+  const stdoutSink = stdoutFile ? createSink(stdoutFile, { append: appendLogs }) : null;
+  const stderrSink = stderrFile ? createSink(stderrFile, { append: appendLogs }) : null;
   const child = spawn(command, args, {
     cwd,
     env,
@@ -109,9 +110,9 @@ export async function runProcess(command, args, {
   };
 }
 
-function createSink(file) {
+function createSink(file, { append = false } = {}) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  return fs.createWriteStream(file, { mode: 0o600, flags: 'w' });
+  return fs.createWriteStream(file, { mode: 0o600, flags: append ? 'a' : 'w' });
 }
 
 function writeWithBackpressure(source, sink, chunk) {

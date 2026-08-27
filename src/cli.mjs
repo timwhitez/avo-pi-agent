@@ -4,6 +4,7 @@ import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
+import { loadResumedRecords, resolveResumeDirectory, saveResumedRecord } from './benchmark/resume-cache.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
@@ -122,9 +123,24 @@ async function runPublic(args) {
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
 
+    // Interrupted runs checkpoint every finished game under AVO_RESUME_DIR;
+    // a restarted run with the same context skips those games instead of
+    // replaying hours of provider work.
+    const resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
+    const resumedRecords = loadResumedRecords(resumeDir);
+    if (resumedRecords.size) {
+      console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
+    }
+
     for (const [index, info] of selected.entries()) {
       const gameId = String(info.game_id).split('-')[0];
       const ordinal = index + 1;
+      if (resumedRecords.has(gameId)) {
+        results.push(resumedRecords.get(gameId));
+        console.log(`\n[${ordinal}/${selected.length}] ${gameId} resumed from checkpoint`);
+        progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: 0, resumed: true });
+        continue;
+      }
       const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
@@ -183,6 +199,7 @@ async function runPublic(args) {
           }
         }
         results.push(result);
+        saveResumedRecord(resumeDir, gameId, result);
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
