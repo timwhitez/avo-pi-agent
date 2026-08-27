@@ -113,7 +113,10 @@ try {
       overrides: {
         AVO_REQUIRE_REAL_PROVIDER: '1',
         AVO_REAL_RUN_ID: runId,
-        ...(resuming ? { AVO_RESUME_DIR: path.join(privateDir, 'resume') } : {}),
+        // Checkpoints are written on fresh runs too: an interruption at any
+        // point must leave a resume trail, not just interruptions of runs
+        // that were already resumed once.
+        AVO_RESUME_DIR: path.join(privateDir, 'resume'),
       },
     }),
     timeoutMs,
