@@ -74,6 +74,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
   };
+  // A single fat read (full lineage, a whole workspace file) kept verbatim in
+  // the recent window can exceed the provider context by itself.
+  const maxToolResultChars = positiveEnvInt('AVO_TOOL_RESULT_MAX_CHARS', 24_000);
 
   return {
     kind: 'pi-sdk',
@@ -100,8 +103,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         executionMode: 'sequential',
         execute: async (_callId, params) => {
           const result = await tool.execute(params);
+          let text = String(result.text ?? '');
+          if (text.length > maxToolResultChars) {
+            text = `${text.slice(0, maxToolResultChars)}\n[tool output truncated at ${maxToolResultChars} characters to stay within the model context window; re-query with narrower limits or specific entries]`;
+          }
           return {
-            content: [{ type: 'text', text: result.text }],
+            content: [{ type: 'text', text }],
             details: result.details ?? {},
             terminate: Boolean(result.terminate),
           };

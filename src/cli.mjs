@@ -200,7 +200,9 @@ async function runPublic(args) {
           }
         }
         results[index] = result;
-        saveResumedRecord(resumeDir, gameId, result);
+        // Never checkpoint an errored attempt: a resume must replay it, not
+        // inherit its failure into the completeness gate.
+        if (!result.error) saveResumedRecord(resumeDir, gameId, result);
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
