@@ -138,7 +138,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       // replay them all. Only an explicit transient allowlist recovers, and
       // only up to a bounded number of times per game.
       const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
-      const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection/i;
+      const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
       for (;;) {
         const sessionError = agent.state.errorMessage;
@@ -148,6 +148,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
             && TRANSIENT_SESSION_ERROR.test(String(sessionError));
           if (!recoverable) break;
           transientRecoveries += 1;
+          const cooldownMs = cooldownWaitMs(sessionError);
+          if (cooldownMs > 0) await sleep(cooldownMs);
           agent.state.errorMessage = undefined;
         }
         if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
@@ -214,6 +216,19 @@ function toTypeBox(schema, Type) {
 function metadata(schema) {
   const keys = ['description', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems'];
   return Object.fromEntries(keys.filter((key) => schema[key] !== undefined).map((key) => [key, schema[key]]));
+}
+
+export function cooldownWaitMs(error, { capMs = 60_000 } = {}) {
+  const text = String(error || '');
+  const match = /reset_seconds[^0-9]{0,8}(\d+)/i.exec(text)
+    ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+)\s*s\b/i.exec(text);
+  const parsed = Number(match?.[1]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.min(parsed * 1000, capMs);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function positiveEnvInt(name, fallback) {
