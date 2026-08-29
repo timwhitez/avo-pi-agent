@@ -385,8 +385,12 @@ function benchmarkTimeout() {
 }
 
 function normalizeCheckpointRecord(value) {
+  const versionedGameId = String(
+    value?.versionedGameId || value?.versioned_game_id || value?.gameId || value?.game_id || '',
+  );
   return {
-    gameId: String(value?.gameId || value?.game_id || '').split('-')[0],
+    gameId: versionedGameId.split('-')[0],
+    versionedGameId,
     state: String(value?.state || '').toUpperCase(),
     levelsCompleted: Number(value?.levelsCompleted ?? value?.levels_completed ?? 0),
     winLevels: Number(value?.winLevels ?? value?.win_levels ?? 0),

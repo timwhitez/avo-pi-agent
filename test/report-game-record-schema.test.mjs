@@ -64,6 +64,21 @@ test('rejects impossible level totals and malformed identity/state fields', () =
   }
 });
 
+test('rejects contradictory explicit and versioned identities before canonicalization', () => {
+  assert.throws(() => normalizeGameRecord(valid({
+    gameId: 'ls20',
+    versionedGameId: 'vc33-version',
+  })), /identity contradicts/);
+  assert.throws(() => extractGameRecords({ games: [
+    valid({ gameId: 'g1', versionedGameId: 'g2-v1' }),
+    valid({ gameId: 'g2', versionedGameId: 'g1-v1' }),
+  ] }), /identity contradicts/);
+  assert.equal(normalizeGameRecord(valid({
+    gameId: 'ls20',
+    versionedGameId: 'ls20-9607627b',
+  })).versionedGameId, 'ls20-9607627b');
+});
+
 test('nested duplicate game-result objects remain visible and fail exact-once validation', () => {
   const report = { games: [valid(), valid({ actions: 1 })] };
   const records = extractGameRecords(report);

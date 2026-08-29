@@ -18,9 +18,15 @@ export function extractGameRecords(report) {
 }
 
 export function normalizeGameRecord(value, sourcePath = '$') {
-  const rawGameId = firstOwn(value, ['versionedGameId', 'versioned_game_id', 'gameId', 'game_id']);
+  const versionedAliases = ownValues(value, ['versionedGameId', 'versioned_game_id']);
+  const explicitAliases = ownValues(value, ['gameId', 'game_id']);
+  const rawGameId = versionedAliases[0] ?? explicitAliases[0];
   const versionedGameId = requireSafeVersionedGameId(rawGameId, sourcePath);
   const gameId = normalizeGameId(versionedGameId);
+  if (versionedAliases.some((candidate) => requireSafeVersionedGameId(candidate, sourcePath) !== versionedGameId)
+      || explicitAliases.some((candidate) => normalizeGameId(requireSafeVersionedGameId(candidate, sourcePath)) !== gameId)) {
+    invalidRecord(sourcePath, 'explicit game identity contradicts its versioned game identity');
+  }
   const state = requireState(firstOwn(value, ['state', 'gameState', 'game_state']), sourcePath);
   const levelsCompleted = optionalCount(
     firstOwn(value, ['levelsCompleted', 'levels_completed', 'levels']),
@@ -149,6 +155,10 @@ export function aggregateGameMetrics(records) {
 function firstOwn(value, keys) {
   for (const key of keys) if (Object.hasOwn(value, key)) return value[key];
   return undefined;
+}
+
+function ownValues(value, keys) {
+  return keys.filter((key) => Object.hasOwn(value, key)).map((key) => value[key]);
 }
 
 function requireSafeVersionedGameId(value, sourcePath) {
