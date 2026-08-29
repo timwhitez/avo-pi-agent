@@ -55,6 +55,17 @@ if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
   if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
   resumeContext = assertResumableContext({ privateDir, publicFile, runId });
   console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
+  // Regenerable private artifacts from earlier passes would trip the
+  // exclusive copy/write guards. Evidence that stays authoritative
+  // (provenance.json, game checkpoints, scorecard checkpoint) is untouched.
+  for (const stale of ['raw-run-report.json', 'manifest.private.json']) {
+    const target = path.join(privateDir, stale);
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  }
+  if (fs.existsSync(publicFile)) {
+    const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
+    if (prior?.status !== 'complete') fs.unlinkSync(publicFile);
+  }
 }
 if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
 
