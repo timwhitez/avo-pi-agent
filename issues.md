@@ -357,7 +357,7 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 
 **Last synchronized:** 2026-08-30
 
-- Open Issues audited: **18/18**. The original 17 remain valid after correction; [#71](https://github.com/timwhitez/avo-pi-agent/issues/71) was re-opened after a supported-runtime clean-checkout failure proved its remaining package-contract defect.
+- Issues audited: **18/18**. **17 remain open**; [#71](https://github.com/timwhitez/avo-pi-agent/issues/71) was proved necessary, fixed by reviewed Draft PR #185, and closed with exact-head evidence.
 - Open implementation PRs: **2** — Draft [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170 and Draft [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) for #71. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) remains the tracking/audit document only.
 - Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
 - PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
@@ -368,7 +368,7 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 | Issue | Audit state | Fix PR | Independent review | Dependency / next state |
 |---|---|---|---|---|
 | #170 | Valid P0; first implementation under repair | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | Changes requested on `1dd1e5d`: state binding, execution revalidation, repair-state propagation, public commitment, isolated-Python identity | Fix every finding, rerun gates, then exact-head re-review; PR remains unmerged |
-| #71 | Valid P0 local-gate defect; implementation complete locally | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | Re-review in progress on `5493bed`; first review found and prompted removal of 2 high/2 moderate vulnerabilities | Await independent verdict; PR remains unmerged |
+| #71 | Closed with evidence; valid P0 local-gate defect fixed | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | **APPROVE** on exact head `716b725`; first review found and prompted removal of 2 high/2 moderate vulnerabilities | PR remains Draft and unmerged for human confirmation |
 | #169 | Valid P0; evidence wording corrected | — | — | After #170 |
 | #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
 | #167 | Valid P0; cross-run chronology corrected | — | — | After #166 |
