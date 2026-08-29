@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
-import { loadResumedRecords, resolveResumeDirectory, saveResumedRecord } from './benchmark/resume-cache.mjs';
+import { loadLatestSessionScorecard, loadResumedRecords, resolveResumeDirectory, saveResumedRecord, saveSessionScorecard } from './benchmark/resume-cache.mjs';
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
@@ -94,6 +94,12 @@ async function offlineDemo(args) {
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
   }
   const report = makeReport('offline-contract-demo', results, config);
+  if (resumeDir) {
+    report.scorecardCoverage = {
+      replayedGames,
+      checkpointedGames: Math.max(0, completed.length - replayedGames),
+    };
+  }
   const reportFile = writeReport(report);
   console.log(JSON.stringify({ ...report.summary, reportFile }, null, 2));
   if (!results.every((r) => r.won)) process.exitCode = 2;
@@ -109,6 +115,7 @@ async function runPublic(args) {
   const config = getRuntimeConfig();
   const selection = parseSelection(args);
   const results = [];
+  let replayedGames = 0;
   const environment = new ArcBridgeClient({ python: config.python });
   const progress = createProgressStatusReporter();
   let aggregateScorecard = null;
@@ -142,6 +149,7 @@ async function runPublic(args) {
         progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: 0, resumed: true });
         return;
       }
+      replayedGames += 1;
       const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
@@ -250,6 +258,16 @@ async function runPublic(args) {
     runError = error;
   } finally {
     aggregateScorecard = await environment.scorecard().catch(() => null);
+    if (resumeDir && replayedGames > 0) {
+      // The session actually played games: its scorecard is the latest real
+      // score evidence for this run.
+      saveSessionScorecard(resumeDir, { replayedGames, scorecard: aggregateScorecard });
+    } else if (resumeDir && replayedGames === 0) {
+      // Every game came from checkpoints; a fresh empty session's scorecard
+      // must not masquerade as the run's official score.
+      const saved = loadLatestSessionScorecard(resumeDir);
+      if (saved?.scorecard) aggregateScorecard = saved.scorecard;
+    }
     await environment.close();
     await progress.flush();
   }
@@ -260,6 +278,12 @@ async function runPublic(args) {
     expectedGames: selected.length,
     runError,
   });
+  if (resumeDir) {
+    report.scorecardCoverage = {
+      replayedGames,
+      checkpointedGames: Math.max(0, completed.length - replayedGames),
+    };
+  }
   const reportFile = writeReport(report);
   console.log(JSON.stringify({ ...report.summary, reportFile }, null, 2));
   if (runError) {

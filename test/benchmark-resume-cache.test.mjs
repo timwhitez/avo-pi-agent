@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  loadLatestSessionScorecard,
   loadResumedRecords,
   resolveResumeDirectory,
   saveResumedRecord,
+  saveSessionScorecard,
 } from '../src/benchmark/resume-cache.mjs';
 
 function sandbox() {
@@ -73,4 +75,18 @@ test('checkpoints are exclusive and validated for schema consistency', () => {
   // tampered or inconsistent checkpoint fails on reload.
   saveResumedRecord(dir, 'xx1', record('xx1', { won: true }));
   assert.throws(() => loadResumedRecords(dir), /contradicts terminal state/);
+});
+
+test('session scorecard checkpoints round-trip and validate', () => {
+  const root = sandbox();
+  const dir = resolveResumeDirectory('runs/private/run-c/resume', { root });
+  assert.equal(loadLatestSessionScorecard(dir), null);
+  saveSessionScorecard(dir, { replayedGames: 8, scorecard: { score: 0.0011, environments: [] } });
+  const loaded = loadLatestSessionScorecard(dir);
+  assert.equal(loaded.replayedGames, 8);
+  assert.equal(loaded.scorecard.score, 0.0011);
+  assert.match(loaded.savedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  fs.writeFileSync(path.join(dir, 'scorecard.json'), '{"savedAt": 5}');
+  assert.throws(() => loadLatestSessionScorecard(dir), /malformed/);
 });
