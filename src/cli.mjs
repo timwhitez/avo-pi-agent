@@ -170,19 +170,20 @@ async function runPublic(args) {
   try {
     await environment.start();
     const available = await environment.list();
-    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, available);
     selected = available.filter((env) => {
       const short = String(env.game_id).split('-')[0];
       return selection.all || selection.games.includes(short) || selection.games.includes(env.game_id);
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
+    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, selected);
 
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
 
-    const runOneGame = async (index, info, env) => {
+    const runOneGame = async (index, info, env, initiallyOpen = false) => {
       const gameId = String(info.game_id).split('-')[0];
+      const versionedGameId = String(info.game_id);
       const ordinal = index + 1;
       if (resumedRecords.has(gameId)) {
         results[index] = resumedRecords.get(gameId);
@@ -226,7 +227,7 @@ async function runPublic(args) {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          await env.open(gameId);
+          if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
             gameId,
             environment: env,
@@ -236,6 +237,7 @@ async function runPublic(args) {
           }), gameConfig);
           result = {
             ...await agent.run(),
+            versionedGameId,
             actionBudget,
             outerTurnBudget: gameConfig.maxOuterTurns,
           };
@@ -293,8 +295,15 @@ async function runPublic(args) {
       console.log(`[concurrency] running up to ${concurrency} games in parallel on one Arcade session`);
       const settled = await runWithConcurrency(selected.map((info, index) => async () => {
         const gameId = String(info.game_id).split('-')[0];
-        const env = await environment.openTracked(gameId, `game-${index}-${gameId}`);
-        await runOneGame(index, info, env);
+        if (resumedRecords.has(gameId)) {
+          await runOneGame(index, info, environment);
+          return;
+        }
+        const env = await environment.openTracked(
+          String(info.game_id),
+          `game-${index}-${gameId}`,
+        );
+        await runOneGame(index, info, env, true);
       }), concurrency);
       const failure = settled.find((item) => item?.error);
       if (failure) throw failure.error;

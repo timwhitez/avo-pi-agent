@@ -6,7 +6,11 @@ import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
 
-export function evaluatePublicRunCapsule(value, { privateCapsuleEvidence = null } = {}) {
+export function evaluatePublicRunCapsule(value, {
+  privateCapsuleEvidence = null,
+  expectedRunId = null,
+  benchmarkReport = null,
+} = {}) {
   const capsule = recordOrEmpty(value);
   const reasons = [];
   requireCondition(capsule.schemaVersion === 1, 'run capsule attestation is absent or malformed', reasons);
@@ -14,11 +18,25 @@ export function evaluatePublicRunCapsule(value, { privateCapsuleEvidence = null 
   requireCondition(isSha256(capsule.capsuleEvidenceSha256), 'run capsule file commitment is absent or malformed', reasons);
   const privateCapsule = recordOrEmpty(privateCapsuleEvidence?.value);
   const privateDefinition = recordOrEmpty(privateCapsule.definition);
+  const privateRunId = String(privateDefinition.runId || '');
+  const publicRunId = String(capsule.runId || '');
   const privateHashValid = privateCapsule.schemaVersion === 1
     && privateDefinition.schema === 'avo.run-capsule.v1'
     && isSha256(privateCapsule.capsuleHash)
     && privateCapsule.capsuleHash === sha256(canonicalJson(privateDefinition));
   requireCondition(privateHashValid, 'private run capsule artifact is absent or internally invalid', reasons);
+  requireCondition(
+    isSafeRunId(publicRunId) && publicRunId === privateRunId,
+    'public and private run capsule identities differ',
+    reasons,
+  );
+  if (expectedRunId !== null) {
+    requireCondition(
+      isSafeRunId(String(expectedRunId)) && publicRunId === String(expectedRunId),
+      'run capsule identity differs from the report run',
+      reasons,
+    );
+  }
   requireCondition(
     isSha256(privateCapsuleEvidence?.sha256)
       && privateCapsuleEvidence.sha256 === capsule.capsuleEvidenceSha256,
@@ -48,6 +66,9 @@ export function evaluatePublicRunCapsule(value, { privateCapsuleEvidence = null 
     } catch {
       reasons.push('private run capsule cannot produce the published public projection');
     }
+  }
+  if (benchmarkReport !== null) {
+    bindBenchmarkReport(privateDefinition, benchmarkReport, reasons);
   }
   const committed = { ...capsule };
   delete committed.commitmentSha256;
@@ -145,6 +166,119 @@ export function evaluatePublicRunCapsule(value, { privateCapsuleEvidence = null 
   });
 }
 
+function bindBenchmarkReport(definition, report, reasons) {
+  const provenance = recordOrEmpty(report?.provenance);
+  const model = recordOrEmpty(definition.modelInterface);
+  const runtime = recordOrEmpty(definition.runtime);
+  const task = recordOrEmpty(definition.task);
+  const expectedRunId = String(definition.runId || '');
+  requireCondition(
+    String(report?.runId || '') === expectedRunId
+      && String(provenance.runId || '') === expectedRunId,
+    'report provenance is not bound to the private capsule run identity',
+    reasons,
+  );
+  requireCondition(
+    String(provenance.gitSha || '') === String(definition.git?.commit || ''),
+    'report provenance Git commit differs from the private capsule',
+    reasons,
+  );
+  requireCondition(
+    provenance.wireApi === model.wireApi
+      && provenance.providerFingerprint === model.providerFingerprint
+      && provenance.providerEndpointFingerprint === model.endpointFingerprint
+      && provenance.providerModelFingerprint === model.modelFingerprint
+      && provenance.reasoningEffort === model.reasoningEffort,
+    'report provider/model provenance differs from the private capsule',
+    reasons,
+  );
+  requireCondition(
+    isRecord(provenance.arcRuntime)
+      && sha256(canonicalJson(provenance.arcRuntime)) === runtime.arcMetadataSha256,
+    'report ARC runtime provenance differs from the private capsule',
+    reasons,
+  );
+  requireCondition(
+    String(provenance.arcAuth?.mode || '') === String(task.arcAuthMode || ''),
+    'report ARC authentication mode differs from the private capsule',
+    reasons,
+  );
+
+  const capsuleGames = normalizeVersionedGameSet(task.versionedGameIds);
+  const provenanceGames = normalizeVersionedGameSet(provenance.publicVersionedGameIds);
+  const completenessGames = normalizeVersionedGameSet(report?.completeness?.versionedGameIds);
+  const recordGames = normalizeVersionedGameSet(
+    Array.isArray(report?.games) ? report.games.map((game) => game?.versionedGameId) : null,
+  );
+  requireCondition(
+    capsuleGames.valid
+      && provenanceGames.valid
+      && completenessGames.valid
+      && recordGames.valid
+      && canonicalJson(capsuleGames.values) === canonicalJson(provenanceGames.values)
+      && canonicalJson(capsuleGames.values) === canonicalJson(completenessGames.values)
+      && canonicalJson(capsuleGames.values) === canonicalJson(recordGames.values),
+    'report exact versioned game set differs from the private capsule',
+    reasons,
+  );
+  const capsuleShortGames = normalizeShortGameSet(
+    capsuleGames.values.map((gameId) => gameId.split('-')[0]),
+  );
+  const provenanceShortGames = normalizeShortGameSet(provenance.publicGameIds);
+  const completenessShortGames = normalizeShortGameSet(report?.completeness?.gameIds);
+  const recordShortGames = normalizeShortGameSet(
+    Array.isArray(report?.games) ? report.games.map((game) => game?.gameId) : null,
+  );
+  requireCondition(
+    capsuleShortGames.valid
+      && provenanceShortGames.valid
+      && completenessShortGames.valid
+      && recordShortGames.valid
+      && canonicalJson(capsuleShortGames.values) === canonicalJson(provenanceShortGames.values)
+      && canonicalJson(capsuleShortGames.values) === canonicalJson(completenessShortGames.values)
+      && canonicalJson(capsuleShortGames.values) === canonicalJson(recordShortGames.values),
+    'report short game identities differ from the private capsule task set',
+    reasons,
+  );
+  requireCondition(
+    Number.isSafeInteger(provenance.publicGameCount)
+      && provenance.publicGameCount === capsuleGames.values.length,
+    'report public-game count differs from the private capsule',
+    reasons,
+  );
+  const salt = sha256(expectedRunId);
+  requireCondition(
+    isSha256(provenance.publicGameSetHash)
+      && provenance.publicGameSetHash === fingerprint(capsuleGames.values.join('\n'), salt),
+    'report public-game set commitment differs from the private capsule',
+    reasons,
+  );
+}
+
+function normalizeVersionedGameSet(values) {
+  if (!Array.isArray(values) || values.length === 0) return { valid: false, values: [] };
+  const normalized = values.map((value) => String(value || '')).sort();
+  const valid = normalized.every((value) => /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value))
+    && new Set(normalized).size === normalized.length;
+  return { valid, values: normalized };
+}
+
+function normalizeShortGameSet(values) {
+  if (!Array.isArray(values) || values.length === 0) return { valid: false, values: [] };
+  const normalized = values.map((value) => String(value || '')).sort();
+  const valid = normalized.every((value) => /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/.test(value))
+    && new Set(normalized).size === normalized.length;
+  return { valid, values: normalized };
+}
+
+function fingerprint(value, salt) {
+  return crypto.createHash('sha256')
+    .update(String(salt))
+    .update('\0')
+    .update(String(value))
+    .digest('hex');
+}
+
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
@@ -167,6 +301,10 @@ function isSha256(value) {
 
 function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function isSafeRunId(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(String(value || ''));
 }
 
 function isRecord(value) {

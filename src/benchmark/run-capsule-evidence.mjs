@@ -26,5 +26,8 @@ export function readPrivateRunCapsuleEvidence({ repositoryRoot = process.cwd(), 
   if (evidence.sha256 !== artifact?.sha256) {
     throw new Error('private run capsule artifact digest differs from the public report');
   }
+  if (String(evidence.value?.definition?.runId || '') !== runId) {
+    throw new Error('private run capsule identity differs from the public report');
+  }
   return Object.freeze(evidence);
 }

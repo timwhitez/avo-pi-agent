@@ -86,9 +86,18 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
-  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, { privateCapsuleEvidence });
+  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, {
+    privateCapsuleEvidence,
+    expectedRunId: report?.runId,
+    benchmarkReport: report,
+  });
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
+  requireCondition(
+    typeof report?.runId === 'string' && report.runId === provenance.runId,
+    'benchmark report and provenance run identities differ',
+    reasons,
+  );
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);
   requireCondition(expectedCount !== null && expectedCount > 0, 'expected public game count is absent or invalid', reasons);
   requireCondition(actualCount !== null && actualCount === expectedCount, 'actual public game count differs from expected', reasons);

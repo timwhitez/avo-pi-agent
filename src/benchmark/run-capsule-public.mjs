@@ -11,6 +11,7 @@ export function projectPublicRunCapsule(capsule, {
   const actualClass = String(runClass || definition.initialState.mode);
   const published = {
     schemaVersion: 1,
+    runId: definition.runId,
     capsuleHash: capsule.capsuleHash,
     capsuleEvidenceSha256: requiredSha(capsuleEvidenceSha256),
     runClass: actualClass,

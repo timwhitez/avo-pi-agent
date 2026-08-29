@@ -370,6 +370,23 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.ok(relabeledAuthority.reasons.some((reason) => /lineage class/.test(reason)));
 
   assert.equal(evaluatePublicRunCapsule(published).accepted, false);
+  assert.equal(evaluatePublicRunCapsule(published, {
+    privateCapsuleEvidence,
+    expectedRunId: 'borrower-run',
+  }).accepted, false);
+  const borrowerDir = path.join(root, 'runs', 'private', 'borrower-run');
+  fs.mkdirSync(borrowerDir);
+  fs.linkSync(file, path.join(borrowerDir, 'run-capsule.json'));
+  assert.throws(
+    () => readPrivateRunCapsuleEvidence({
+      repositoryRoot: root,
+      report: {
+        runId: 'borrower-run',
+        privateArtifactHashes: report.privateArtifactHashes,
+      },
+    }),
+    /identity differs/,
+  );
   assert.throws(
     () => readPrivateRunCapsuleEvidence({
       repositoryRoot: root,

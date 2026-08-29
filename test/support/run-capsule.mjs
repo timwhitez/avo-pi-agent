@@ -2,9 +2,19 @@ import crypto from 'node:crypto';
 
 import { canonicalJson, sealRunCapsule } from '../../src/benchmark/run-capsule.mjs';
 import { projectPublicRunCapsule } from '../../src/benchmark/run-capsule-public.mjs';
+import { fingerprint } from '../../src/benchmark/redaction.mjs';
 
-export function privateRunCapsuleEvidenceFixture() {
-  const capsule = privateRunCapsuleFixture();
+const ARC_RUNTIME = Object.freeze({
+  arcAgiVersion: '0.9.9',
+  arcEngineVersion: '0.9.9',
+  officialPackageAttested: true,
+});
+
+export function privateRunCapsuleEvidenceFixture({
+  runId = 'test-run',
+  versionedGameIds = ['g1-v1'],
+} = {}) {
+  const capsule = privateRunCapsuleFixture(runId, versionedGameIds);
   const text = `${JSON.stringify(capsule, null, 2)}\n`;
   return Object.freeze({
     value: capsule,
@@ -14,8 +24,11 @@ export function privateRunCapsuleEvidenceFixture() {
   });
 }
 
-export function publicRunCapsuleFixture(overrides = {}) {
-  const evidence = privateRunCapsuleEvidenceFixture();
+export function publicRunCapsuleFixture(overrides = {}, {
+  runId = 'test-run',
+  versionedGameIds = ['g1-v1'],
+} = {}) {
+  const evidence = privateRunCapsuleEvidenceFixture({ runId, versionedGameIds });
   const valid = projectPublicRunCapsule(evidence.value, {
     runClass: 'cold-start',
     comparable: true,
@@ -26,7 +39,30 @@ export function publicRunCapsuleFixture(overrides = {}) {
   return { ...value, commitmentSha256: digest(value) };
 }
 
-function privateRunCapsuleFixture() {
+export function runCapsuleProvenanceFixture({
+  runId = 'test-run',
+  versionedGameIds = ['g1-v1'],
+} = {}) {
+  const sorted = versionedGameIds.slice().sort();
+  const salt = digestText(runId);
+  return {
+    runId,
+    gitSha: '1'.repeat(40),
+    wireApi: 'responses',
+    reasoningEffort: 'high',
+    providerFingerprint: '5'.repeat(64),
+    providerEndpointFingerprint: '6'.repeat(64),
+    providerModelFingerprint: '7'.repeat(64),
+    arcRuntime: structuredClone(ARC_RUNTIME),
+    arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
+    publicGameCount: sorted.length,
+    publicGameIds: sorted.map((gameId) => gameId.split('-')[0]),
+    publicVersionedGameIds: sorted,
+    publicGameSetHash: fingerprint(sorted.join('\n'), salt),
+  };
+}
+
+function privateRunCapsuleFixture(runId, versionedGameIds) {
   const initialState = {
     mode: 'cold-start',
     snapshotName: 'cold-test-run',
@@ -40,7 +76,7 @@ function privateRunCapsuleFixture() {
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
   return sealRunCapsule({
     schema: 'avo.run-capsule.v1',
-    runId: 'test-run',
+    runId,
     git: {
       commit: '1'.repeat(40),
       tree: '2'.repeat(40),
@@ -93,7 +129,7 @@ function privateRunCapsuleFixture() {
         pythonPackageCount: 1,
         pythonPackages,
       },
-      arcMetadataSha256: 'c'.repeat(64),
+      arcMetadataSha256: digest(ARC_RUNTIME),
       arcOfficialPackageAttested: true,
       gameConcurrency: 1,
       gameAttempts: 3,
@@ -112,7 +148,7 @@ function privateRunCapsuleFixture() {
         workspaceContainerImage: 'python:3.12-slim',
       },
     },
-    task: { arcAuthMode: 'anonymous-auto', versionedGameIds: ['g1-v1'] },
+    task: { arcAuthMode: 'anonymous-auto', versionedGameIds: versionedGameIds.slice().sort() },
     initialState,
   }, { createdAt: '2026-08-30T00:00:00Z' });
 }

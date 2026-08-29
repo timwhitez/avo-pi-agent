@@ -24,7 +24,11 @@ export function evaluateRoundAuthority({
   const provenance = recordOrEmpty(benchmark?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
   const runCapsule = recordOrEmpty(provenance.runCapsule);
-  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, { privateCapsuleEvidence });
+  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, {
+    privateCapsuleEvidence,
+    expectedRunId: benchmark?.runId,
+    benchmarkReport: benchmark,
+  });
 
   const expectedCount = nonNegativeIntegerOrNull(benchmark?.completeness?.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(benchmark?.completeness?.actualCount);
@@ -48,6 +52,7 @@ export function evaluateRoundAuthority({
   requireCondition(processResult?.code === 0 && !processResult?.signal, 'benchmark process did not exit cleanly', reasons);
   requireCondition(benchmark?.status === 'complete', 'benchmark report is not complete', reasons);
   requireCondition(String(benchmark?.runId || '') === String(roundId || ''), 'benchmark report runId does not match the requested round', reasons);
+  requireCondition(String(provenance.runId || '') === String(roundId || ''), 'benchmark provenance runId does not match the requested round', reasons);
   requireCondition(benchmark?.completeness?.complete === true, 'benchmark game-completeness attestation is absent', reasons);
   requireCondition(expectedSet.valid, 'benchmark expected game set contains an invalid entry', reasons);
   requireCondition(!expectedSet.duplicate, 'benchmark expected game set contains duplicates', reasons);

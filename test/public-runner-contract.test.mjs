@@ -253,12 +253,14 @@ class Env:
 class Arcade:
     def __init__(self, operation_mode=None, logger=None):
         self.environments = {}
+        self.make_calls = 0
         self.arc_api_key = "mock-test-key"
 
     def get_environments(self):
         return [Info(f"g{i:02d}-v1") for i in range(1, 26)]
 
     def make(self, game_id):
+        self.make_calls += 1
         short = game_id.split("-")[0]
         index = int(short[1:])
         env = Env(short, 3 + index % 3)
@@ -268,7 +270,8 @@ class Arcade:
     def get_scorecard(self):
         completed = sum(env.level for env in self.environments.values())
         return {"score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
-                "games": len(self.environments), "levels": completed}
+                "games": len(self.environments), "levels": completed,
+                "make_calls": self.make_calls}
   `);
 
   // The production child-environment boundary deliberately strips
@@ -350,6 +353,7 @@ process.exit(result.status ?? 1);
     })),
     config,
     initialState: runState.initialState,
+    env: { AVO_GAME_CONCURRENCY: '4' },
   });
   const capsuleFile = path.join(privateDir, 'run-capsule.json');
   writeRunCapsule(capsuleFile, capsule, { root: privateDir });
@@ -364,6 +368,7 @@ process.exit(result.status ?? 1);
     OPENAI_API_KEY: 'test-key',
     OPENAI_MODEL: 'test-model',
     OPENAI_REASONING_EFFORT: 'max',
+    AVO_GAME_CONCURRENCY: '4',
     AVO_MAX_ACTIONS: '200',
     AVO_MEMORY_DIR: runState.memoryDir,
     AVO_WORKSPACE_DIR: runState.workspaceDir,
@@ -400,6 +405,16 @@ process.exit(result.status ?? 1);
   assert.doesNotMatch(rejected.stdout, /\[1\/25\]/);
   fs.writeFileSync(configFile, originalConfig);
 
+  const subset = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--game=g01'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: childEnv,
+  });
+  assert.equal(subset.status, 1, subset.stderr || subset.stdout);
+  assert.match(subset.stderr, /effective public game set differs from the sealed run capsule/);
+  assert.doesNotMatch(subset.stdout, /\[1\/1\]/);
+
   const result = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
@@ -417,7 +432,9 @@ process.exit(result.status ?? 1);
   const report = JSON.parse(fs.readFileSync(path.join(root, 'runs', reports[0]), 'utf8'));
   assert.equal(report.aggregateScorecard.games, 25);
   assert.equal(report.aggregateScorecard.levels, 50);
+  assert.equal(report.aggregateScorecard.make_calls, 25);
   assert.equal(report.summary.allWon, true);
+  assert.equal(report.results[0].versionedGameId, 'g01-v1');
   assert.equal(report.runCapsuleHash, capsule.capsuleHash);
   assert.equal(report.runClass, 'cold-start');
   const checkpoint = JSON.parse(fs.readFileSync(path.join(
@@ -471,6 +488,7 @@ process.exit(result.status ?? 1);
     })),
     config,
     initialState: migratedState.initialState,
+    env: { AVO_GAME_CONCURRENCY: '4' },
   });
   const migratedCapsuleFile = path.join(privateDir, `run-capsule.${migratedCapsule.capsuleHash}.json`);
   writeRunCapsule(migratedCapsuleFile, migratedCapsule, { root: privateDir });
@@ -522,6 +540,11 @@ process.exit(result.status ?? 1);
   });
   assert.equal(publishedReport.status, 'complete');
   assert.equal(publishedReport.completeness.actualCount, 25);
+  assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
+  assert.deepEqual(
+    publishedReport.provenance.publicVersionedGameIds,
+    Array.from({ length: 25 }, (_, index) => `g${String(index + 1).padStart(2, '0')}-v1`),
+  );
   assert.equal(evaluatePublicRunCapsule(
     publishedReport.provenance.runCapsule,
     { privateCapsuleEvidence: outerEvidence },
