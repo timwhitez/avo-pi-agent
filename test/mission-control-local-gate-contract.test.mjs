@@ -51,7 +51,8 @@ test('local execution documentation states the current fail-closed boundary', ()
   assert.match(document, /2026-08-26/);
   assert.match(document, /Next\.js 15\.5\.21/);
   assert.match(document, /React\/React DOM[\s\S]*19\.1\.9/);
-  assert.match(document, /intentionally adds the enforcement before selecting[\s\S]*final compatible package set and lockfile/i);
-  assert.match(document, /fail during contract\s+preflight/i);
+  assert.match(document, /CopilotKit 1\.69\.3/);
+  assert.match(document, /Next\.js 15\.5\.24/);
+  assert.match(document, /standalone production build must pass/i);
   assert.match(document, /No GitHub Actions fallback/);
 });

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "npm@12.0.1",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -13,12 +14,12 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@copilotkit/react-core": "latest",
-    "@copilotkit/react-ui": "latest",
-    "@copilotkit/runtime": "latest",
-    "next": "^15.5.2",
-    "openai": "^6.8.1",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "@copilotkit/react-core": "1.69.3",
+    "@copilotkit/react-ui": "1.69.3",
+    "@copilotkit/runtime": "1.69.3",
+    "next": "15.5.24",
+    "openai": "6.49.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   }
 }

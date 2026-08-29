@@ -124,12 +124,11 @@ to the current upstream advisories and are minimums, not a claim that any
 specific CopilotKit combination has already passed this repository's build.
 They must be re-audited when the dependency set changes.
 
-This Draft stack intentionally adds the enforcement before selecting and
-committing the final compatible package set and lockfile. Until the follow-up
-lockfile slice supplies those exact artifacts and a supported-runtime build
-passes, the Mission Control commands and `complete:local` fail during contract
-preflight. That failure is the intended state and must not be presented as a
-completed frontend validation.
+The validated local package contract uses npm 12.0.1, CopilotKit 1.69.3,
+Next.js 15.5.24, OpenAI SDK 6.49.0, and React/React DOM 19.2.8. The matching
+lockfile is committed and `npm ci`, all Mission Control tests, and the
+standalone production build must pass without changing either package file.
+Any missing or stale lock remains a contract-preflight failure.
 
 Install, test, and build children receive a utility-only environment. Provider,
 ARC, GitHub, registry-token, database, and unknown values are not forwarded.
