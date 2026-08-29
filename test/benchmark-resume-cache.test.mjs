@@ -77,6 +77,16 @@ test('checkpoints are exclusive and validated for schema consistency', () => {
   assert.throws(() => loadResumedRecords(dir), /contradicts terminal state/);
 });
 
+test('the scorecard sidecar is not treated as a game record', () => {
+  const root = sandbox();
+  const dir = resolveResumeDirectory('runs/private/run-d/resume', { root });
+  saveResumedRecord(dir, 'ls20', record('ls20'));
+  saveSessionScorecard(dir, { replayedGames: 8, scorecard: { score: 0.0011 } });
+  const loaded = loadResumedRecords(dir);
+  assert.equal(loaded.size, 1);
+  assert.ok(loaded.has('ls20'));
+});
+
 test('session scorecard checkpoints round-trip and validate', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-c/resume', { root });
