@@ -18,7 +18,7 @@ real Responses-compatible provider
                 │
                 ▼
 AvoArcAgent — autonomous variation operator
-  ├─ exact observe / scarce act
+  ├─ exact observe / scarce gameplay act / controller reset
   ├─ source-backed domain knowledge
   ├─ persistent structured memory
   ├─ pre-experiment candidate proposals
@@ -50,8 +50,9 @@ hypotheses; and when enough objective evidence exists for evaluation.
 
 1. `candidate_propose` stores a normalized hypothesis, plan, structured action
    predictions, objective baseline and current committed parent.
-2. Direct environment actions produce immutable evidence events with stable IDs,
-   before/after state hashes, action index, level delta and terminal state.
+2. Direct gameplay actions and controller resets produce immutable evidence
+   events with stable IDs, before/after state hashes, episode identity, action
+   index, level delta and terminal state.
 3. `candidate_evaluate` accepts only a proposal ID and evidence references.
 4. `CandidateEvaluator` checks that evidence belongs to the game, occurred after
    proposal creation and matches every structured prediction claim.
@@ -137,7 +138,7 @@ substitution.
 
 - official ARC environment frames and legal actions;
 - levels/terminal state returned by the runtime;
-- action counts maintained by the harness;
+- gameplay/reset/rejection counts maintained by the harness;
 - official scorecard output when available.
 
 ### Untrusted until verified

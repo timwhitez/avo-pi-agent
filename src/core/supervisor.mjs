@@ -139,7 +139,7 @@ export class StallSupervisor {
       {
         id: 'planned-reset',
         rationale: 'A reset is useful only when it creates a new controlled experiment rather than replaying the failed branch.',
-        nextExperiment: 'Use RESET only after recording the failed hypothesis and specifying a materially different opening sequence.',
+        nextExperiment: 'Call the reset controller only after recording the failed hypothesis and specifying a materially different opening sequence.',
       },
     ];
     if (escalation) {

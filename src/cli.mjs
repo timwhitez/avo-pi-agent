@@ -418,6 +418,10 @@ function makeReport(kind, results, config, { scorecards = [], expectedGames = re
       winRate: safeResults.length ? wins / safeResults.length : 0,
       totalLevels: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
       totalActions: safeResults.reduce((sum, r) => sum + r.actions, 0),
+      totalGameplayActions: sumReportedCount(safeResults, 'gameplayActions'),
+      totalResets: sumReportedCount(safeResults, 'resets'),
+      totalRejectedCommands: sumReportedCount(safeResults, 'rejectedCommands'),
+      totalFullResets: sumReportedCount(safeResults, 'fullResets'),
       allWon: !runError && expectedGames > 0 && safeResults.length === expectedGames && wins === expectedGames,
       officialScore: scoreAuthority.officialScore.value,
     },
@@ -434,6 +438,12 @@ function makeReport(kind, results, config, { scorecards = [], expectedGames = re
       : null,
     results: safeResults,
   };
+}
+
+function sumReportedCount(results, field) {
+  return results.every((result) => Number.isInteger(result?.[field]) && result[field] >= 0)
+    ? results.reduce((sum, result) => sum + result[field], 0)
+    : null;
 }
 
 function requiredCapsuleHash(value) {

@@ -28,7 +28,7 @@ format, supervisor policy, or production source code.
 | A separate supervisor intervenes conditionally on stagnation or cycles and offers multiple fresh directions. | Direct: AVO paper / NVIDIA article | `StallSupervisor` uses bounded trajectory evidence, repeated-state and periodic-action detection, then emits four evidence-backed alternatives without taking over normal turns. | Supervisor tests. |
 | The production agent remains a general long-horizon tool-using agent. | Direct: NVIDIA ARC article; Pi design | The production path is Pi Agent core with dynamic follow-up turns until WIN, error, action exhaustion or explicit outer-turn exhaustion. | Pi continuation tests. |
 | ARC feedback is ground truth and the agent is not given game rules or goals. | Direct: ARC/NVIDIA material | Exact text-grid observations, legal action lists and scorecard state are authoritative. Domain knowledge describes interaction methodology and competition constraints, not per-game solutions. | Prompt/tool inspection. |
-| Direct environment interaction is the primary policy. | Direct: NVIDIA ARC description | `observe` and `act` are primary. The optional scratch workspace is bounded and explicitly prohibited from becoming a hand-written game-specific solver. | Workspace and prompt tests. |
+| Direct environment interaction is the primary policy. | Direct: NVIDIA ARC description | `observe` and frame-authorized gameplay `act` are primary; `reset` is a separate controller operation. The optional scratch workspace is bounded and explicitly prohibited from becoming a hand-written game-specific solver. | Workspace, reset-controller and prompt tests. |
 
 ## ARC-specific objective adaptation
 

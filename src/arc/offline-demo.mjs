@@ -37,7 +37,7 @@ export class OfflineDemoEnvironment {
       win_levels: this.winLevels,
       guid: `${this.gameId}-${this.level}-${this.steps}`,
       full_reset: false,
-      available_actions: ['RESET', ...Object.keys(DIRECTIONS)],
+      available_actions: Object.keys(DIRECTIONS),
     };
   }
 
@@ -45,13 +45,13 @@ export class OfflineDemoEnvironment {
   async observe() { return this.frame(); }
 
   async reset() {
+    this.steps += 1;
     this.resetLevel();
     return this.frame();
   }
 
   async step(action) {
     this.steps += 1;
-    if (action === 'RESET') return this.reset();
     const delta = DIRECTIONS[action];
     if (!delta) throw new Error(`unsupported offline action: ${action}`);
     const x = Math.max(0, Math.min(this.size - 1, this.player[0] + delta[0]));

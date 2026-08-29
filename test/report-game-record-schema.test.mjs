@@ -28,7 +28,64 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
   );
   assert.deepEqual(aggregateGameMetrics([record]), {
     games: 1, wins: 0, levelsCompleted: 0, winLevels: 3, actions: 0,
+    gameplayActions: null, resets: null, rejectedCommands: null, fullResets: null,
   });
+});
+
+test('preserves controller telemetry and validates total environment-action accounting', () => {
+  const record = normalizeGameRecord(valid({
+    actions: 3,
+    gameplayActions: 2,
+    resets: 1,
+    rejectedCommands: 4,
+    fullResets: 1,
+    episodeId: 'episode-000002',
+  }));
+  assert.deepEqual(
+    {
+      actions: record.actions,
+      gameplayActions: record.gameplayActions,
+      resets: record.resets,
+      rejectedCommands: record.rejectedCommands,
+      fullResets: record.fullResets,
+      episodeId: record.episodeId,
+    },
+    {
+      actions: 3,
+      gameplayActions: 2,
+      resets: 1,
+      rejectedCommands: 4,
+      fullResets: 1,
+      episodeId: 'episode-000002',
+    },
+  );
+  assert.deepEqual(aggregateGameMetrics([record]), {
+    games: 1,
+    wins: 0,
+    levelsCompleted: 0,
+    winLevels: 3,
+    actions: 3,
+    gameplayActions: 2,
+    resets: 1,
+    rejectedCommands: 4,
+    fullResets: 1,
+  });
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 3, gameplayActions: 3, resets: 1 })),
+    /actions must equal/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 1, gameplayActions: 1 })),
+    /reported together/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 1, gameplayActions: 0, resets: 1, fullResets: 2 })),
+    /cannot exceed/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ episodeId: 'raw-guid-private' })),
+    /episodeId has an invalid format/,
+  );
 });
 
 test('rejects coercible, negative and fractional game metrics', () => {

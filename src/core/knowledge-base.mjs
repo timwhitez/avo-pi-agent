@@ -27,13 +27,13 @@ const ENTRIES = [
     id: 'arc-actions',
     kind: 'arc',
     source: 'https://docs.arcprize.org/toolkit/arc_agi',
-    text: 'Only actions exposed by the current frame are legal. ACTION6 may require coordinates. A level transition is progress but not necessarily game completion; state WIN is the terminal success signal.',
+    text: 'Gameplay actions must be exposed by the current frame. RESET is a separate controller operation and may be available even when absent from gameplay affordances; trust the returned full_reset flag. ACTION6 may require coordinates. A level transition is progress but state WIN is the terminal success signal.',
   },
   {
     id: 'arc-competition',
     kind: 'arc',
     source: 'https://docs.arcprize.org/toolkit/competition_mode',
-    text: 'Competition mode scores all available environments, permits only level resets, allows make once per environment, permits one scorecard, and does not expose an inflight scorecard.',
+    text: 'Competition mode scores all available environments, constrains environment construction and scorecard access, and uses the toolkit RESET controller semantics. A RESET may be full; the returned frame and official scorecard remain authoritative.',
   },
   {
     id: 'arc-experiment',
@@ -45,7 +45,7 @@ const ENTRIES = [
     id: 'arc-stall',
     kind: 'heuristic',
     source: 'project adaptation',
-    text: 'On a plateau, compare the last distinct transitions, identify untested legal actions or coordinate regions, falsify stale object/goal assumptions, and reset only with a materially different plan.',
+    text: 'On a plateau, compare the last distinct transitions, identify untested legal gameplay actions or coordinate regions, falsify stale object/goal assumptions, and call the reset controller only with a materially different plan.',
   },
 ];
 

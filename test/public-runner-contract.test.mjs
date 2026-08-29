@@ -100,7 +100,15 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         await call('memory_read');
         let frame = (await call('observe')).details.frame;
         if (frame.gameId === 'g01-v1') {
-          frame = (await call('act', { action: 'RESET', reasoning: 'exercise full-reset identity' })).details.frame;
+          if (frame.state !== 'GAME_OVER' || frame.availableActions.includes('RESET')) {
+            throw new Error('reset contract fixture must begin GAME_OVER without RESET gameplay affordance');
+          }
+          const reset = await call('reset', { rationale: 'exercise full-reset identity' });
+          if (!reset.details.fullReset || reset.details.episodeId !== 'episode-000002') {
+            throw new Error('controller reset did not return full-reset episode evidence');
+          }
+          frame = reset.details.frame;
+          if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
         }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
@@ -206,8 +214,7 @@ class Frame:
         self.guid = env.guid
         self.full_reset = env.full_reset
         self.available_actions = [
-            GameAction.RESET, GameAction.ACTION1, GameAction.ACTION2,
-            GameAction.ACTION3, GameAction.ACTION4,
+            GameAction.ACTION1, GameAction.ACTION2, GameAction.ACTION3, GameAction.ACTION4,
         ]
 
 class Scorecard(dict):
@@ -223,8 +230,11 @@ class Env:
         self.level = 0
         self.steps = 0
         self.run_steps = [0]
+        self.run_resets = [0]
         self.full_reset = False
         self.reset_level()
+        if game_id.startswith("g01-"):
+            self.state = "GAME_OVER"
 
     def reset_level(self):
         self.player = [0, 0]
@@ -244,8 +254,12 @@ class Env:
     def step(self, action, data=None, reasoning=None):
         if action is GameAction.RESET:
             self.full_reset = self.steps == 0
+            self.steps += 1
+            self.run_steps[-1] += 1
+            self.run_resets[-1] += 1
             if self.full_reset:
                 self.run_steps.append(0)
+                self.run_resets.append(0)
             self.reset_level()
             return Frame(self)
         self.full_reset = False
@@ -303,7 +317,7 @@ class Arcade:
                     "score": 100.0 if index == len(env.run_steps) - 1 and env.state == "WIN" else 0.0,
                     "levels_completed": env.level if index == len(env.run_steps) - 1 else 0,
                     "actions": actions,
-                    "resets": 0,
+                    "resets": env.run_resets[index],
                     "state": env.state if index == len(env.run_steps) - 1 else "PLAYING",
                     "completed": index == len(env.run_steps) - 1 and env.state == "WIN",
                 } for index, actions in enumerate(env.run_steps)],
@@ -473,6 +487,11 @@ process.exit(result.status ?? 1);
   assert.equal(report.scorecardEvidence.length, 1);
   assert.equal(report.scorecardEvidence[0].gameCount, 25);
   assert.equal(report.scorecardEvidence[0].executionCount, 26);
+  assert.equal(report.results[0].resets, 1);
+  assert.equal(report.results[0].fullResets, 1);
+  assert.equal(report.results[0].episodeId, 'episode-000002');
+  assert.equal(report.results[0].actions, report.results[0].gameplayActions + report.results[0].resets);
+  assert.equal(report.results[0].rejectedCommands, 0);
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
   assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
   assert.equal(report.aggregateScorecard.score, 100);
@@ -589,6 +608,13 @@ process.exit(result.status ?? 1);
     /raw-card-private-123|raw-guid-private-456/,
   );
   assert.equal(publishedReport.completeness.actualCount, 25);
+  assert.equal(publishedReport.games[0].resets, 1);
+  assert.equal(publishedReport.games[0].fullResets, 1);
+  assert.equal(publishedReport.games[0].episodeId, 'episode-000002');
+  assert.equal(
+    publishedReport.games[0].actions,
+    publishedReport.games[0].gameplayActions + publishedReport.games[0].resets,
+  );
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
   assert.deepEqual(
     publishedReport.provenance.publicVersionedGameIds,

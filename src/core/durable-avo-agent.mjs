@@ -38,6 +38,8 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
       state: String(frame?.state || 'UNKNOWN'),
       availableActions: Array.isArray(frame?.availableActions) ? frame.availableActions.slice() : [],
       actionIndex: this.actions,
+      fullReset: Boolean(frame?.fullReset),
+      episodeId: this.episodeId(),
       createdAt: new Date().toISOString(),
     });
     this.evidenceLedger = this.evidenceStore.events.slice();

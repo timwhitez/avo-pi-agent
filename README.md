@@ -21,7 +21,7 @@ in the AVO paper and NVIDIA's ARC-AGI-3 article:
 ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values
 Python bridge
-   ⇅ six narrow tools
+   ⇅ narrow model tools
 AVO controller: memory + lineage + evaluator + supervisor
    ⇅
 @earendil-works/pi-agent-core
@@ -29,9 +29,11 @@ AVO controller: memory + lineage + evaluator + supervisor
 runtime-configured reasoning model
 ```
 
-The agent receives only these capabilities: observe, act, read/update structured
-memory, commit an evaluated candidate, and finish. There is no shell, arbitrary
-filesystem, browser, or generic networking tool in the model's tool set.
+The agent receives only these capabilities: observe, take a frame-authorized
+gameplay action, invoke the separate reset controller, read/update structured
+memory, evaluate a candidate, use a confined scratch workspace, and finish.
+There is no shell, arbitrary host filesystem, browser, or generic networking
+tool in the model's tool set.
 
 ## Requirements
 
@@ -134,10 +136,13 @@ the failed branch.
 
 ### Action efficiency
 
-Only `act` consumes an ARC environment action. Observation, memory, candidate
-evaluation and model deliberation are internal. Reports retain action totals so
-a later RHAE analysis can use the official scorecard rather than a fabricated
-local score.
+`act` and `reset` each consume one ARC environment action. `act` accepts only
+gameplay actions exposed by the current frame; `reset` is a separate controller
+operation and reports whether the runtime performed a full reset. Observation,
+memory, candidate evaluation and model deliberation are internal. Reports keep
+gameplay actions, resets, rejected commands and total environment actions
+separate so later analysis can use the official scorecard rather than a
+fabricated local score.
 
 ## Security and privacy
 

@@ -3,6 +3,7 @@ import { REPORT_LIMITS } from './report-safe-files.mjs';
 const SAFE_VERSIONED_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SAFE_SHORT_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
 const SAFE_STATE = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/;
+const SAFE_EPISODE_ID = /^episode-[0-9]{6}$/;
 
 export function extractGameRecords(report) {
   const records = [];
@@ -34,8 +35,37 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   );
   const winLevels = optionalCount(firstOwn(value, ['winLevels', 'win_levels']), 'winLevels', sourcePath);
   const actions = optionalCount(firstOwn(value, ['actions', 'actionCount', 'action_count']), 'actions', sourcePath);
+  const gameplayActions = reportedCount(
+    ownValues(value, ['gameplayActions', 'gameplay_actions']),
+    'gameplayActions',
+    sourcePath,
+  );
+  const resets = reportedCount(ownValues(value, ['resets']), 'resets', sourcePath);
+  const rejectedCommands = reportedCount(
+    ownValues(value, ['rejectedCommands', 'rejected_commands']),
+    'rejectedCommands',
+    sourcePath,
+  );
+  const fullResets = reportedCount(
+    ownValues(value, ['fullResets', 'full_resets']),
+    'fullResets',
+    sourcePath,
+  );
+  const episodeId = optionalString(firstOwn(value, ['episodeId', 'episode_id']), 'episodeId', sourcePath);
   if (winLevels > 0 && levelsCompleted > winLevels) {
     invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds winLevels=${winLevels}`);
+  }
+  if ((gameplayActions === null) !== (resets === null)) {
+    invalidRecord(sourcePath, 'gameplayActions and resets must be reported together');
+  }
+  if (gameplayActions !== null && actions !== gameplayActions + resets) {
+    invalidRecord(sourcePath, 'actions must equal gameplayActions plus resets');
+  }
+  if (fullResets !== null && (resets === null || fullResets > resets)) {
+    invalidRecord(sourcePath, 'fullResets cannot exceed resets');
+  }
+  if (episodeId !== null && !SAFE_EPISODE_ID.test(episodeId)) {
+    invalidRecord(sourcePath, `episodeId has an invalid format: ${JSON.stringify(episodeId)}`);
   }
 
   const stateWon = state === 'WIN';
@@ -54,6 +84,11 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     levelsCompleted,
     winLevels,
     actions,
+    gameplayActions,
+    resets,
+    rejectedCommands,
+    fullResets,
+    episodeId,
     won,
     error: optionalString(value.error, 'error', sourcePath),
     loop: optionalString(value.loop, 'loop', sourcePath),
@@ -127,7 +162,17 @@ export function aggregateGameMetrics(records) {
     levelsCompleted: records.reduce((sum, record) => sum + record.levelsCompleted, 0),
     winLevels: records.reduce((sum, record) => sum + record.winLevels, 0),
     actions: records.reduce((sum, record) => sum + record.actions, 0),
+    gameplayActions: optionalMetricTotal(records, 'gameplayActions'),
+    resets: optionalMetricTotal(records, 'resets'),
+    rejectedCommands: optionalMetricTotal(records, 'rejectedCommands'),
+    fullResets: optionalMetricTotal(records, 'fullResets'),
   };
+}
+
+function optionalMetricTotal(records, field) {
+  return records.every((record) => Number.isInteger(record[field]))
+    ? records.reduce((sum, record) => sum + record[field], 0)
+    : null;
 }
 
 function firstOwn(value, keys) {
@@ -217,6 +262,15 @@ function optionalCount(value, field, sourcePath) {
     invalidRecord(sourcePath, `${field} must be an explicit finite non-negative integer`);
   }
   return value;
+}
+
+function reportedCount(values, field, sourcePath) {
+  if (values.length === 0) return null;
+  const normalized = values.map((value) => optionalCount(value, field, sourcePath));
+  if (normalized.some((value) => value !== normalized[0])) {
+    invalidRecord(sourcePath, `${field} aliases disagree`);
+  }
+  return normalized[0];
 }
 
 function optionalString(value, field, sourcePath) {

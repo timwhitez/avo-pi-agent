@@ -41,6 +41,10 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     levelsCompleted: 4,
     winLevels: 6,
     actions: 30,
+    gameplayActions: null,
+    resets: null,
+    rejectedCommands: null,
+    fullResets: null,
   });
 });
 

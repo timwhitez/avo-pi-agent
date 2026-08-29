@@ -6,10 +6,11 @@ import { WorkspaceSandbox } from './workspace.mjs';
 import { describeFrame, frameHash, normalizeFrame } from './observation.mjs';
 
 const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
-const ACTIONS = ['RESET', 'ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
+const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
 export const AVO_TOOL_NAMES = Object.freeze([
   'observe',
   'act',
+  'reset',
   'knowledge_read',
   'workspace_list',
   'workspace_read',
@@ -52,6 +53,11 @@ export class AvoArcAgent {
     this.frame = null;
     this.previousFrame = null;
     this.actions = 0;
+    this.gameplayActions = 0;
+    this.resets = 0;
+    this.rejectedCommands = 0;
+    this.fullResets = 0;
+    this.episodeSequence = 1;
     this.uniqueStates = new Set();
     this.finished = false;
     this.lastResult = null;
@@ -97,12 +103,12 @@ export class AvoArcAgent {
       {
         name: 'act',
         label: 'Take one ARC environment action',
-        description: 'Execute exactly one legal ARC action. ACTION6 may take x/y coordinates. Environment actions are scarce; state competing predictions before using one.',
+        description: 'Execute one gameplay action currently exposed by the frame. ACTION6 may take x/y coordinates. Use the separate reset controller when abandoning an episode.',
         parameters: {
           type: 'object',
           required: ['action'],
           properties: {
-            action: { type: 'string', enum: ACTIONS },
+            action: { type: 'string', enum: GAMEPLAY_ACTIONS },
             x: { type: 'integer', minimum: 0, maximum: 63 },
             y: { type: 'integer', minimum: 0, maximum: 63 },
             reasoning: { type: 'string' },
@@ -110,6 +116,18 @@ export class AvoArcAgent {
           additionalProperties: false,
         },
         execute: async (params) => this.act(params),
+      },
+      {
+        name: 'reset',
+        label: 'Reset the ARC environment episode',
+        description: 'Invoke the controller RESET operation even when RESET is absent from current gameplay affordances. It consumes one environment action and may perform a full reset; the returned frame is authoritative.',
+        parameters: {
+          type: 'object',
+          required: ['rationale'],
+          properties: { rationale: { type: 'string', minLength: 1 } },
+          additionalProperties: false,
+        },
+        execute: async (params) => this.reset(params),
       },
       {
         name: 'knowledge_read',
@@ -236,7 +254,7 @@ export class AvoArcAgent {
               items: {
                 type: 'object', required: ['action', 'expected'], additionalProperties: false,
                 properties: {
-                  action: { type: 'string', enum: ACTIONS },
+                  action: { type: 'string', enum: GAMEPLAY_ACTIONS },
                   data: OBJECT_SCHEMA,
                   expected: {
                     type: 'object', additionalProperties: false,
@@ -291,31 +309,69 @@ export class AvoArcAgent {
     ];
   }
 
-  async act({ action, x, y, reasoning = '' }) {
+  async act({ action, x, y, reasoning = '' } = {}) {
     if (this.isDone()) return this.toolResult('No action taken: run is already complete.', { frame: this.frame }, true);
+    if (!GAMEPLAY_ACTIONS.includes(action)) {
+      return this.rejectCommand('INVALID_GAMEPLAY_ACTION', `${String(action)} is not a gameplay action`, { action, reasoning });
+    }
     const legal = new Set(this.frame.availableActions);
-    if (legal.size && !legal.has(action)) {
-      throw new Error(`Illegal action ${action}; available: ${[...legal].join(', ')}`);
+    if (!legal.has(action)) {
+      return this.rejectCommand(
+        'ACTION_UNAVAILABLE',
+        `${action} is unavailable; available gameplay actions: ${[...legal].filter((item) => item !== 'RESET').join(', ') || '<none>'}`,
+        { action, reasoning },
+      );
     }
     const data = action === 'ACTION6' ? { x, y } : {};
     if (action === 'ACTION6' && (!Number.isInteger(x) || !Number.isInteger(y))) {
-      throw new Error('ACTION6 requires integer x and y coordinates');
+      return this.rejectCommand('ACTION6_COORDINATES_REQUIRED', 'ACTION6 requires integer x and y coordinates', { action, reasoning });
     }
 
-    this.previousFrame = this.frame;
-    const beforeHash = frameHash(this.previousFrame);
-    const raw = action === 'RESET' && typeof this.environment.reset === 'function'
-      ? await this.environment.reset({ text: reasoning })
-      : await this.environment.step(action, data, { text: reasoning });
+    const previousFrame = this.frame;
+    const raw = await this.environment.step(action, data, { text: reasoning });
+    return this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
+  }
+
+  async reset({ rationale = '' } = {}) {
+    if (this.isDone()) return this.toolResult('No reset performed: run is already complete.', { frame: this.frame }, true);
+    if (typeof rationale !== 'string' || !rationale.trim()) {
+      return this.rejectCommand('RESET_RATIONALE_REQUIRED', 'reset requires a non-empty rationale', { action: 'RESET' });
+    }
+    if (typeof this.environment.reset !== 'function') {
+      return this.rejectCommand('RESET_UNAVAILABLE', 'environment controller does not support reset', { action: 'RESET', reasoning: rationale });
+    }
+
+    const previousFrame = this.frame;
+    const raw = await this.environment.reset({ text: rationale });
+    return this.acceptEnvironmentTransition({
+      raw,
+      previousFrame,
+      action: 'RESET',
+      data: {},
+      reasoning: rationale,
+      kind: 'reset',
+    });
+  }
+
+  acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind }) {
+    this.previousFrame = previousFrame;
+    const beforeHash = frameHash(previousFrame);
     this.frame = normalizeFrame(raw);
     if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
+    if (kind === 'reset') {
+      this.resets += 1;
+      this.episodeSequence += 1;
+      if (this.frame.fullReset) this.fullResets += 1;
+    } else {
+      this.gameplayActions += 1;
+    }
     const afterHash = frameHash(this.frame);
     const wasNew = !this.uniqueStates.has(afterHash);
     this.uniqueStates.add(afterHash);
     const progressed = this.frame.levelsCompleted > this.previousFrame.levelsCompleted || isWin(this.frame);
     const evidence = this.recordEvidence({
-      type: 'environment-action',
+      type: kind === 'reset' ? 'environment-reset' : 'environment-action',
       action,
       data,
       reasoning,
@@ -348,15 +404,59 @@ export class AvoArcAgent {
     return this.toolResult(
       `${this.describe()}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
       {
+        ok: true,
         frame: this.frame,
         evidenceRef: evidence.id,
         progressed,
         novelState: wasNew,
         objective: this.objectiveState(),
         stall,
+        fullReset: kind === 'reset' ? this.frame.fullReset : false,
+        episodeId: this.episodeId(),
+        telemetry: this.commandTelemetry(),
       },
       isWin(this.frame),
     );
+  }
+
+  rejectCommand(code, message, { action = null, reasoning = '' } = {}) {
+    this.rejectedCommands += 1;
+    const evidence = this.recordEvidence({
+      type: 'command-rejected',
+      frame: this.frame,
+      action,
+      data: { code },
+      reasoning,
+    });
+    return this.toolResult(
+      `COMMAND_REJECTED ${code}: ${message}`,
+      {
+        ok: false,
+        rejected: true,
+        recoverable: true,
+        code,
+        message,
+        frame: this.frame,
+        evidenceRef: evidence.id,
+        episodeId: this.episodeId(),
+        telemetry: this.commandTelemetry(),
+      },
+    );
+  }
+
+  episodeId() {
+    return `episode-${String(this.episodeSequence).padStart(6, '0')}`;
+  }
+
+  commandTelemetry() {
+    return {
+      environmentActions: this.actions,
+      gameplayActions: this.gameplayActions,
+      resets: this.resets,
+      rejectedCommands: this.rejectedCommands,
+      fullResets: this.fullResets,
+      episodeId: this.episodeId(),
+    };
   }
 
   scorecardExecutionGuids() {
@@ -431,6 +531,8 @@ export class AvoArcAgent {
       state: String(frame?.state || 'UNKNOWN'),
       availableActions: Array.isArray(frame?.availableActions) ? frame.availableActions.slice() : [],
       actionIndex: this.actions,
+      fullReset: Boolean(frame?.fullReset),
+      episodeId: this.episodeId(),
       createdAt: new Date().toISOString(),
     });
     this.evidenceLedger.push(event);
@@ -451,8 +553,8 @@ export class AvoArcAgent {
 
 AVO contract:
 1. You control the whole long-horizon loop. Decide what prior memory, proposals, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
-2. Use direct interaction with the exact text grid and currently legal actions as the primary ARC policy. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
-3. Environment actions are scarce. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
+2. Use direct interaction with the exact text grid and currently legal gameplay actions as the primary ARC policy. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
+3. Gameplay actions and the separate reset controller both consume environment actions. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
 5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Revisit earlier evidence and alter the order of operations as the environment demands.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
@@ -477,6 +579,11 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       levelsCompleted: this.frame.levelsCompleted,
       winLevels: this.frame.winLevels,
       actions: this.actions,
+      gameplayActions: this.gameplayActions,
+      resets: this.resets,
+      rejectedCommands: this.rejectedCommands,
+      fullResets: this.fullResets,
+      episodeId: this.episodeId(),
       objective: this.objectiveState(),
       won: isWin(this.frame),
       loop: this.loop.kind,
