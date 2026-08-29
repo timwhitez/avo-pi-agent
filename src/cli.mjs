@@ -20,6 +20,7 @@ import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
+import { aggregateAttemptTelemetry } from './benchmark/report.mjs';
 import { evaluateScorecardCoverage, hashExecutionId, normalizeScorecardSnapshot } from './benchmark/scorecard-evidence.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
@@ -208,7 +209,7 @@ async function runPublic(args) {
         onEvent(event) {
           if (event.type !== 'tool_execution_end') return;
           process.stdout.write('.');
-          if (event.toolName !== 'act') return;
+          if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
           observedActions += 1;
           const frame = event.result?.details?.frame || {};
           observedLevels = Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels);
@@ -231,6 +232,7 @@ async function runPublic(args) {
         let result = null;
         const executions = [];
         const executionOccurrences = new Map();
+        const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
@@ -241,6 +243,7 @@ async function runPublic(args) {
             captureScorecard: false,
           }), gameConfig);
           const agentResult = await agent.run();
+          attemptResults.push(agentResult);
           const executionGuids = agent.scorecardExecutionGuids();
           if (executionGuids.length === 0) {
             throw new Error(`${versionedGameId} produced no scorecard execution identity`);
@@ -253,6 +256,7 @@ async function runPublic(args) {
           }
           result = {
             ...agentResult,
+            ...aggregateAttemptTelemetry(attemptResults),
             versionedGameId,
             executions: executions.slice(),
             actionBudget,

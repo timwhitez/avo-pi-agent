@@ -17,7 +17,7 @@ function frame({ state, fullReset = false }) {
     win_levels: 1,
     guid: 'sdk-reused-guid',
     full_reset: fullReset,
-    available_actions: ['ACTION1'],
+    available_actions: ['ACTION1', 'ACTION6'],
   };
 }
 
@@ -53,7 +53,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     await agent.initialize();
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
     assert.ok(tools.reset);
-    assert.doesNotMatch(JSON.stringify(tools.act.parameters), /RESET/);
+    assert.equal('enum' in tools.act.parameters.properties.action, false);
 
     const unavailable = await tools.act.execute({ action: 'ACTION2', reasoning: 'probe' });
     assert.deepEqual(
@@ -62,6 +62,10 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     );
     const wrongSurface = await agent.act({ action: 'RESET', reasoning: 'wrong tool' });
     assert.equal(wrongSurface.details.code, 'INVALID_GAMEPLAY_ACTION');
+    const missingAction = await tools.act.execute({ reasoning: 'missing action' });
+    assert.equal(missingAction.details.code, 'INVALID_GAMEPLAY_ACTION');
+    const invalidCoordinates = await tools.act.execute({ action: 'ACTION6', x: -1, y: 64 });
+    assert.equal(invalidCoordinates.details.code, 'ACTION6_COORDINATES_REQUIRED');
     const missingRationale = await agent.reset();
     assert.equal(missingRationale.details.code, 'RESET_RATIONALE_REQUIRED');
     const resetController = environment.reset;
@@ -80,7 +84,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
       environmentActions: 1,
       gameplayActions: 0,
       resets: 1,
-      rejectedCommands: 4,
+      rejectedCommands: 6,
       fullResets: 1,
       episodeId: 'episode-000002',
     });
@@ -103,7 +107,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
         actions: 2,
         gameplayActions: 1,
         resets: 1,
-        rejectedCommands: 4,
+        rejectedCommands: 6,
         fullResets: 1,
         episodeId: 'episode-000002',
       },
@@ -111,7 +115,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     const resetEvidence = agent.evidenceLedger.find((event) => event.type === 'environment-reset');
     assert.equal(resetEvidence.fullReset, true);
     assert.equal(resetEvidence.episodeId, 'episode-000002');
-    assert.equal(agent.evidenceLedger.filter((event) => event.type === 'command-rejected').length, 4);
+    assert.equal(agent.evidenceLedger.filter((event) => event.type === 'command-rejected').length, 6);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

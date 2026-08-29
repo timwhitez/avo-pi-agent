@@ -291,7 +291,9 @@ try {
   }
 
   stage.value = 'production-loop-attestation';
-  const loopAttestation = validateProductionLoops(selected.records, games.length);
+  const loopAttestation = validateProductionLoops(selected.records, games.length, {
+    allowUnavailableControllerTelemetry: resumeDecision.runClass === 'diagnostic-migrated',
+  });
 
   stage.value = 'game-completeness';
   const completeness = validateCompleteGameSet(games, selected.records);

@@ -55,17 +55,22 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   if (winLevels > 0 && levelsCompleted > winLevels) {
     invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds winLevels=${winLevels}`);
   }
-  if ((gameplayActions === null) !== (resets === null)) {
-    invalidRecord(sourcePath, 'gameplayActions and resets must be reported together');
+  const controllerTelemetry = [gameplayActions, resets, rejectedCommands, fullResets, episodeId];
+  const unavailableControllerTelemetry = controllerTelemetry.filter((item) => item === null).length;
+  if (unavailableControllerTelemetry !== 0 && unavailableControllerTelemetry !== controllerTelemetry.length) {
+    invalidRecord(sourcePath, 'controller telemetry must be either complete or entirely unavailable');
   }
-  if (gameplayActions !== null && actions !== gameplayActions + resets) {
-    invalidRecord(sourcePath, 'actions must equal gameplayActions plus resets');
-  }
-  if (fullResets !== null && (resets === null || fullResets > resets)) {
-    invalidRecord(sourcePath, 'fullResets cannot exceed resets');
-  }
-  if (episodeId !== null && !SAFE_EPISODE_ID.test(episodeId)) {
-    invalidRecord(sourcePath, `episodeId has an invalid format: ${JSON.stringify(episodeId)}`);
+  if (unavailableControllerTelemetry === 0) {
+    if (actions !== gameplayActions + resets) {
+      invalidRecord(sourcePath, 'actions must equal gameplayActions plus resets');
+    }
+    if (fullResets > resets) invalidRecord(sourcePath, 'fullResets cannot exceed resets');
+    if (!SAFE_EPISODE_ID.test(episodeId)) {
+      invalidRecord(sourcePath, `episodeId has an invalid format: ${JSON.stringify(episodeId)}`);
+    }
+    if (Number(episodeId.slice('episode-'.length)) !== resets + 1) {
+      invalidRecord(sourcePath, 'episodeId must equal resets plus the initial episode');
+    }
   }
 
   const stateWon = state === 'WIN';
@@ -97,7 +102,9 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   });
 }
 
-export function validateProductionLoops(records, expectedGames) {
+export function validateProductionLoops(records, expectedGames, {
+  allowUnavailableControllerTelemetry = false,
+} = {}) {
   if (!Array.isArray(records) || records.length !== expectedGames) {
     throw new Error(`production loop attestation requires exactly ${expectedGames} game records; found ${records?.length ?? 0}`);
   }
@@ -107,7 +114,16 @@ export function validateProductionLoops(records, expectedGames) {
   if (missing.length || invalid.length) {
     throw new Error(`production loop attestation failed: ${JSON.stringify({ missing, invalid })}`);
   }
-  return { complete: true, attestedCount: records.length, loop: 'pi-sdk' };
+  const unavailable = records.filter((record) => record.gameplayActions === null).map((record) => record.gameId);
+  if (unavailable.length && !allowUnavailableControllerTelemetry) {
+    throw new Error(`production loop attestation requires complete controller telemetry: ${unavailable.join(', ')}`);
+  }
+  return {
+    complete: true,
+    attestedCount: records.length,
+    loop: 'pi-sdk',
+    controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
+  };
 }
 
 export function validateCompleteGameSet(expectedGames, records) {
@@ -167,6 +183,42 @@ export function aggregateGameMetrics(records) {
     rejectedCommands: optionalMetricTotal(records, 'rejectedCommands'),
     fullResets: optionalMetricTotal(records, 'fullResets'),
   };
+}
+
+export function aggregateAttemptTelemetry(attempts) {
+  if (!Array.isArray(attempts) || attempts.length === 0) {
+    throw new Error('attempt telemetry requires at least one agent result');
+  }
+  const totals = {
+    actions: 0,
+    gameplayActions: 0,
+    resets: 0,
+    rejectedCommands: 0,
+    fullResets: 0,
+  };
+  for (const [index, attempt] of attempts.entries()) {
+    for (const field of Object.keys(totals)) {
+      const value = attempt?.[field];
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`attempt ${index + 1} ${field} must be a finite non-negative integer`);
+      }
+      totals[field] += value;
+    }
+    if (attempt.actions !== attempt.gameplayActions + attempt.resets) {
+      throw new Error(`attempt ${index + 1} action telemetry is inconsistent`);
+    }
+    if (attempt.fullResets > attempt.resets) {
+      throw new Error(`attempt ${index + 1} fullResets exceeds resets`);
+    }
+    if (!SAFE_EPISODE_ID.test(attempt.episodeId)
+        || Number(attempt.episodeId.slice('episode-'.length)) !== attempt.resets + 1) {
+      throw new Error(`attempt ${index + 1} episodeId is inconsistent with resets`);
+    }
+  }
+  return Object.freeze({
+    ...totals,
+    episodeId: `episode-${String(totals.resets + 1).padStart(6, '0')}`,
+  });
 }
 
 function optionalMetricTotal(records, field) {

@@ -184,7 +184,7 @@ export function effectivePiSystemPrompt(systemPrompt, workspaceMode = 'files-onl
   );
 }
 
-function toTypeBox(schema, Type) {
+export function toTypeBox(schema, Type) {
   if (!schema || typeof schema !== 'object') return Type.Any();
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     if (schema.enum.length === 1) return Type.Literal(schema.enum[0], metadata(schema));

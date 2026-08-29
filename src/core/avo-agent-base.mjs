@@ -103,14 +103,13 @@ export class AvoArcAgent {
       {
         name: 'act',
         label: 'Take one ARC environment action',
-        description: 'Execute one gameplay action currently exposed by the frame. ACTION6 may take x/y coordinates. Use the separate reset controller when abandoning an episode.',
+        description: 'Execute one currently exposed gameplay action (ACTION1 through ACTION7). ACTION6 may take x/y coordinates. Use the separate reset controller when abandoning an episode.',
         parameters: {
           type: 'object',
-          required: ['action'],
           properties: {
-            action: { type: 'string', enum: GAMEPLAY_ACTIONS },
-            x: { type: 'integer', minimum: 0, maximum: 63 },
-            y: { type: 'integer', minimum: 0, maximum: 63 },
+            action: { type: 'string' },
+            x: { type: 'integer' },
+            y: { type: 'integer' },
             reasoning: { type: 'string' },
           },
           additionalProperties: false,
@@ -123,8 +122,7 @@ export class AvoArcAgent {
         description: 'Invoke the controller RESET operation even when RESET is absent from current gameplay affordances. It consumes one environment action and may perform a full reset; the returned frame is authoritative.',
         parameters: {
           type: 'object',
-          required: ['rationale'],
-          properties: { rationale: { type: 'string', minLength: 1 } },
+          properties: { rationale: { type: 'string' } },
           additionalProperties: false,
         },
         execute: async (params) => this.reset(params),
@@ -323,8 +321,9 @@ export class AvoArcAgent {
       );
     }
     const data = action === 'ACTION6' ? { x, y } : {};
-    if (action === 'ACTION6' && (!Number.isInteger(x) || !Number.isInteger(y))) {
-      return this.rejectCommand('ACTION6_COORDINATES_REQUIRED', 'ACTION6 requires integer x and y coordinates', { action, reasoning });
+    if (action === 'ACTION6'
+        && (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x > 63 || y < 0 || y > 63)) {
+      return this.rejectCommand('ACTION6_COORDINATES_REQUIRED', 'ACTION6 requires integer x and y coordinates from 0 through 63', { action, reasoning });
     }
 
     const previousFrame = this.frame;

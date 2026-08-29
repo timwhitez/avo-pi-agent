@@ -5,7 +5,7 @@ import path from 'node:path';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { canonicalJson, validateRunState } from './run-capsule.mjs';
-import { normalizeGameRecord } from './report-records.mjs';
+import { normalizeGameRecord, validateProductionLoops } from './report-records.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { evaluateScorecardCoverage, validateScorecardEvidence } from './scorecard-evidence.mjs';
 
@@ -77,6 +77,7 @@ export function saveResumedRecord(resumeDir, gameId, result, {
   if (normalized.gameId !== safeId || normalized.loop !== 'pi-sdk') {
     throw new Error('resume checkpoint result identity or production loop is invalid');
   }
+  validateProductionLoops([normalized], 1);
   const file = path.join(resumeDir, `${safeId}.json`);
   writeJsonAtomic(file, {
     schema: RESUME_RECORD_SCHEMA,
@@ -294,6 +295,11 @@ function recordBinding(record) {
     levelsCompleted: record.levelsCompleted,
     winLevels: record.winLevels,
     actions: record.actions,
+    gameplayActions: record.gameplayActions,
+    resets: record.resets,
+    rejectedCommands: record.rejectedCommands,
+    fullResets: record.fullResets,
+    episodeId: record.episodeId,
     won: record.won,
     error: record.error,
     loop: record.loop,

@@ -28,6 +28,11 @@ const record = (gameId, overrides = {}) => ({
   levelsCompleted: 2,
   winLevels: 6,
   actions: 41,
+  gameplayActions: 41,
+  resets: 0,
+  rejectedCommands: 0,
+  fullResets: 0,
+  episodeId: 'episode-000001',
   won: false,
   error: null,
   loop: 'pi-sdk',
@@ -129,6 +134,16 @@ test('the scorecard sidecar is not treated as a game record', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-d/resume', { root });
   saveResumedRecord(dir, 'ls20', record('ls20'), options);
+  assert.throws(() => saveSessionScorecard(dir, {
+    evidence: scorecardEvidence(['ls20']),
+    records: [record('ls20', {
+      gameplayActions: 40,
+      resets: 1,
+      fullResets: 1,
+      episodeId: 'episode-000002',
+    })],
+    ...options,
+  }), /differs from checkpoint/);
   saveSessionScorecard(dir, {
     evidence: scorecardEvidence(['ls20']), records: [record('ls20')], ...options,
   });

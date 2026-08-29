@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 import {
   buildRunCapsule,
@@ -83,6 +84,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'index.js'), String.raw`
     import fs from 'node:fs';
     let completedGamePrompts = 0;
+    const promptAttempts = new Map();
     export class Agent {
       constructor(options) {
         this.options = options;
@@ -99,6 +101,8 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         }
         await call('memory_read');
         let frame = (await call('observe')).details.frame;
+        const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
+        promptAttempts.set(frame.gameId, attempt);
         if (frame.gameId === 'g01-v1') {
           if (frame.state !== 'GAME_OVER' || frame.availableActions.includes('RESET')) {
             throw new Error('reset contract fixture must begin GAME_OVER without RESET gameplay affordance');
@@ -109,6 +113,12 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           }
           frame = reset.details.frame;
           if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
+        }
+        if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 1) {
+          const reset = await call('reset', { rationale: 'first attempt reset before injected failure' });
+          if (!reset.details.fullReset) throw new Error('first retry fixture reset was not full');
+          this.state.errorMessage = 'contract injected first-attempt failure';
+          return;
         }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
@@ -303,25 +313,36 @@ class Arcade:
         return env
 
     def get_scorecard(self):
-        completed = sum(env.level for env in self.environments)
+        grouped = {}
+        for env in self.environments:
+            grouped.setdefault(env.game_id, []).append(env)
+        completed = sum(attempts[-1].level for attempts in grouped.values())
+        environments = []
+        for game_id, attempts in grouped.items():
+            runs = []
+            for attempt_index, env in enumerate(attempts):
+                for run_index, actions in enumerate(env.run_steps):
+                    is_last = (
+                        attempt_index == len(attempts) - 1
+                        and run_index == len(env.run_steps) - 1
+                    )
+                    runs.append({
+                        "id": game_id,
+                        "guid": env.guid,
+                        "score": 100.0 if is_last and env.state == "WIN" else 0.0,
+                        "levels_completed": env.level if is_last else 0,
+                        "actions": actions,
+                        "resets": env.run_resets[run_index],
+                        "state": env.state if is_last else "PLAYING",
+                        "completed": is_last and env.state == "WIN",
+                    })
+            environments.append({"id": game_id, "runs": runs})
         return Scorecard({
             "card_id": "contract-scorecard",
-            "score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
-            "total_environments": len(self.environments),
+            "score": 100.0 if len(grouped) == 25 and completed == 50 else 0.0,
+            "total_environments": len(grouped),
             "total_actions": sum(sum(env.run_steps) for env in self.environments),
-            "environments": [{
-                "id": env.game_id,
-                "runs": [{
-                    "id": env.game_id,
-                    "guid": env.guid,
-                    "score": 100.0 if index == len(env.run_steps) - 1 and env.state == "WIN" else 0.0,
-                    "levels_completed": env.level if index == len(env.run_steps) - 1 else 0,
-                    "actions": actions,
-                    "resets": env.run_resets[index],
-                    "state": env.state if index == len(env.run_steps) - 1 else "PLAYING",
-                    "completed": index == len(env.run_steps) - 1 and env.state == "WIN",
-                } for index, actions in enumerate(env.run_steps)],
-            } for env in self.environments],
+            "environments": environments,
         })
   `);
 
@@ -466,11 +487,18 @@ process.exit(result.status ?? 1);
   assert.match(subset.stderr, /effective public game set differs from the sealed run capsule/);
   assert.doesNotMatch(subset.stdout, /\[1\/1\]/);
 
-  const result = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const cliFile = path.join(root, 'src', 'cli.mjs');
+  const fastRetryBootstrap = `
+const nativeSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 30000 ? 1 : delay, ...args);
+process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
+await import(${JSON.stringify(pathToFileURL(cliFile).href)});
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
-    env: childEnv,
+    env: { ...childEnv, AVO_TEST_MULTI_ATTEMPT: '1' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
@@ -486,12 +514,18 @@ process.exit(result.status ?? 1);
   assert.equal(report.scorecardCoverage.exact, true);
   assert.equal(report.scorecardEvidence.length, 1);
   assert.equal(report.scorecardEvidence[0].gameCount, 25);
-  assert.equal(report.scorecardEvidence[0].executionCount, 26);
+  assert.equal(report.scorecardEvidence[0].executionCount, 28);
   assert.equal(report.results[0].resets, 1);
   assert.equal(report.results[0].fullResets, 1);
   assert.equal(report.results[0].episodeId, 'episode-000002');
   assert.equal(report.results[0].actions, report.results[0].gameplayActions + report.results[0].resets);
   assert.equal(report.results[0].rejectedCommands, 0);
+  assert.equal(report.results[1].resets, 1);
+  assert.equal(report.results[1].fullResets, 1);
+  assert.equal(report.results[1].episodeId, 'episode-000002');
+  assert.equal(report.results[1].actions, report.results[1].gameplayActions + 1);
+  assert.equal(report.results[1].executions.length, 3);
+  assert.equal(report.summary.totalResets, 2);
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
   assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
   assert.equal(report.aggregateScorecard.score, 100);
@@ -506,6 +540,13 @@ process.exit(result.status ?? 1);
   ), 'utf8'));
   assert.equal(checkpoint.schema, 'avo.resume-record.v3');
   assert.equal(checkpoint.capsuleHash, capsule.capsuleHash);
+  const retryCheckpoint = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'g02.json',
+  ), 'utf8'));
+  assert.equal(retryCheckpoint.record.resets, 1);
+  assert.equal(retryCheckpoint.record.fullResets, 1);
+  assert.equal(retryCheckpoint.record.episodeId, 'episode-000002');
+  assert.equal(retryCheckpoint.record.executions.length, 3);
   const stateAuthority = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
   ), 'utf8'));

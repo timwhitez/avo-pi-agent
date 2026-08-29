@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  aggregateAttemptTelemetry,
   aggregateGameMetrics,
   extractGameRecords,
   normalizeGameRecord,
@@ -71,20 +72,64 @@ test('preserves controller telemetry and validates total environment-action acco
     fullResets: 1,
   });
   assert.throws(
-    () => normalizeGameRecord(valid({ actions: 3, gameplayActions: 3, resets: 1 })),
+    () => normalizeGameRecord(valid({
+      actions: 3, gameplayActions: 3, resets: 1, rejectedCommands: 0,
+      fullResets: 1, episodeId: 'episode-000002',
+    })),
     /actions must equal/,
   );
   assert.throws(
     () => normalizeGameRecord(valid({ actions: 1, gameplayActions: 1 })),
-    /reported together/,
+    /controller telemetry must be either complete or entirely unavailable/,
   );
   assert.throws(
-    () => normalizeGameRecord(valid({ actions: 1, gameplayActions: 0, resets: 1, fullResets: 2 })),
+    () => normalizeGameRecord(valid({
+      actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 0,
+      fullResets: 2, episodeId: 'episode-000002',
+    })),
     /cannot exceed/,
   );
   assert.throws(
-    () => normalizeGameRecord(valid({ episodeId: 'raw-guid-private' })),
+    () => normalizeGameRecord(valid({
+      actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 0,
+      fullResets: 1, episodeId: 'raw-guid-private',
+    })),
     /episodeId has an invalid format/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 0,
+      fullResets: 1, episodeId: 'episode-999999',
+    })),
+    /episodeId must equal resets/,
+  );
+});
+
+test('aggregates controller telemetry across attempts without dropping prior resets', () => {
+  const aggregate = aggregateAttemptTelemetry([
+    {
+      actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 2,
+      fullResets: 1, episodeId: 'episode-000002',
+    },
+    {
+      actions: 3, gameplayActions: 3, resets: 0, rejectedCommands: 1,
+      fullResets: 0, episodeId: 'episode-000001',
+    },
+  ]);
+  assert.deepEqual(aggregate, {
+    actions: 4,
+    gameplayActions: 3,
+    resets: 1,
+    rejectedCommands: 3,
+    fullResets: 1,
+    episodeId: 'episode-000002',
+  });
+  assert.throws(
+    () => aggregateAttemptTelemetry([{
+      actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
+      fullResets: 0, episodeId: 'episode-000002',
+    }]),
+    /episodeId is inconsistent/,
   );
 });
 
