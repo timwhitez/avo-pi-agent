@@ -26,7 +26,7 @@ exact review commit.
 | Official ARC-AGI-3 public-set run | No accepted result recorded | The complete local runner remains fail-closed. |
 | Concrete official score | Unavailable | Must come from an accepted official runtime/scorecard origin. |
 | Real trajectory diagnosis and repair | Pending accepted real run | Detector/replay workstream is tracked separately. |
-| CopilotKit frontend deterministic install/build gate | Locally verified | Exact manifest and lock; `npm ci`, 81 tests, and standalone build on Node 22.23.1/npm 12.0.1. |
+| CopilotKit frontend deterministic install/build gate | Locally verified | Exact audited manifest and lock; `npm ci`, 81 tests, and standalone build on Node 22.23.1/npm 12.0.1. |
 
 ## Historical combined-worktree observations — 2026-08-24
 

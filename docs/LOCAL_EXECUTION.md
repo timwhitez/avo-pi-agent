@@ -125,8 +125,10 @@ specific CopilotKit combination has already passed this repository's build.
 They must be re-audited when the dependency set changes.
 
 The validated local package contract uses npm 12.0.1, CopilotKit 1.69.3,
-Next.js 15.5.24, OpenAI SDK 6.49.0, and React/React DOM 19.2.8. The matching
-lockfile is committed and `npm ci`, all Mission Control tests, and the
+Next.js 16.3.3, OpenAI SDK 6.49.0, and React/React DOM 19.2.8. CopilotKit's
+transitive Google Vertex adapter is overridden to 4.0.193 so its AI SDK and
+Undici closure remains on patched lines. The matching lockfile is committed;
+`npm ci`, the production-dependency audit, all Mission Control tests, and the
 standalone production build must pass without changing either package file.
 Any missing or stale lock remains a contract-preflight failure.
 
