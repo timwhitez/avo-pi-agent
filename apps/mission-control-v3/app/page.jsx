@@ -258,7 +258,7 @@ export default function Page() {
                   <button className="button" disabled={busy || selected?.state !== 'paused'} onClick={() => control('resume')}>Resume</button>
                   <button className="button danger" disabled={busy || !['running', 'paused'].includes(selected?.state)} onClick={async () => {
                     const confirmation = window.prompt(`Type the full run ID to abort:\n${selectedId}`) || '';
-                    if (confirmation) await control('abort', selectedId, confirmation);
+                    if (confirmation) await control('abort', selectedId, confirmation).catch(() => {});
                   }}>Abort</button>
                 </div>
                 {selectedId && ['running', 'paused'].includes(selected?.state)
