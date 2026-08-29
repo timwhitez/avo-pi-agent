@@ -46,6 +46,16 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     'rejectedCommands',
     sourcePath,
   );
+  const terminalRejectedCommands = reportedCount(
+    ownValues(value, ['terminalRejectedCommands', 'terminal_rejected_commands']),
+    'terminalRejectedCommands',
+    sourcePath,
+  );
+  const postTerminalGameplayActions = reportedCount(
+    ownValues(value, ['postTerminalGameplayActions', 'post_terminal_gameplay_actions']),
+    'postTerminalGameplayActions',
+    sourcePath,
+  );
   const fullResets = reportedCount(
     ownValues(value, ['fullResets', 'full_resets']),
     'fullResets',
@@ -60,6 +70,11 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   if (unavailableControllerTelemetry !== 0 && unavailableControllerTelemetry !== controllerTelemetry.length) {
     invalidRecord(sourcePath, 'controller telemetry must be either complete or entirely unavailable');
   }
+  const lifecycleTelemetry = [terminalRejectedCommands, postTerminalGameplayActions];
+  const unavailableLifecycleTelemetry = lifecycleTelemetry.filter((item) => item === null).length;
+  if (unavailableLifecycleTelemetry !== 0 && unavailableLifecycleTelemetry !== lifecycleTelemetry.length) {
+    invalidRecord(sourcePath, 'terminal lifecycle telemetry must be either complete or entirely unavailable');
+  }
   if (unavailableControllerTelemetry === 0) {
     if (actions !== gameplayActions + resets) {
       invalidRecord(sourcePath, 'actions must equal gameplayActions plus resets');
@@ -70,6 +85,14 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     }
     if (Number(episodeId.slice('episode-'.length)) !== resets + 1) {
       invalidRecord(sourcePath, 'episodeId must equal resets plus the initial episode');
+    }
+    if (unavailableLifecycleTelemetry === 0) {
+      if (terminalRejectedCommands > rejectedCommands) {
+        invalidRecord(sourcePath, 'terminalRejectedCommands cannot exceed rejectedCommands');
+      }
+      if (postTerminalGameplayActions > gameplayActions) {
+        invalidRecord(sourcePath, 'postTerminalGameplayActions cannot exceed gameplayActions');
+      }
     }
   }
 
@@ -92,6 +115,8 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     gameplayActions,
     resets,
     rejectedCommands,
+    terminalRejectedCommands,
+    postTerminalGameplayActions,
     fullResets,
     episodeId,
     won,
@@ -118,11 +143,24 @@ export function validateProductionLoops(records, expectedGames, {
   if (unavailable.length && !allowUnavailableControllerTelemetry) {
     throw new Error(`production loop attestation requires complete controller telemetry: ${unavailable.join(', ')}`);
   }
+  const unavailableLifecycle = records
+    .filter((record) => record.terminalRejectedCommands === null)
+    .map((record) => record.gameId);
+  if (unavailableLifecycle.length && !allowUnavailableControllerTelemetry) {
+    throw new Error(`production loop attestation requires complete terminal lifecycle telemetry: ${unavailableLifecycle.join(', ')}`);
+  }
+  const forwardedAfterTerminal = records
+    .filter((record) => record.postTerminalGameplayActions > 0)
+    .map((record) => ({ gameId: record.gameId, actions: record.postTerminalGameplayActions }));
+  if (forwardedAfterTerminal.length) {
+    throw new Error(`production loop attestation rejects post-terminal gameplay actions: ${JSON.stringify(forwardedAfterTerminal)}`);
+  }
   return {
     complete: true,
     attestedCount: records.length,
     loop: 'pi-sdk',
     controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
+    terminalLifecycleTelemetry: unavailableLifecycle.length ? 'unavailable-diagnostic' : 'complete',
   };
 }
 
@@ -181,6 +219,8 @@ export function aggregateGameMetrics(records) {
     gameplayActions: optionalMetricTotal(records, 'gameplayActions'),
     resets: optionalMetricTotal(records, 'resets'),
     rejectedCommands: optionalMetricTotal(records, 'rejectedCommands'),
+    terminalRejectedCommands: optionalMetricTotal(records, 'terminalRejectedCommands'),
+    postTerminalGameplayActions: optionalMetricTotal(records, 'postTerminalGameplayActions'),
     fullResets: optionalMetricTotal(records, 'fullResets'),
   };
 }
@@ -194,6 +234,8 @@ export function aggregateAttemptTelemetry(attempts) {
     gameplayActions: 0,
     resets: 0,
     rejectedCommands: 0,
+    terminalRejectedCommands: 0,
+    postTerminalGameplayActions: 0,
     fullResets: 0,
   };
   for (const [index, attempt] of attempts.entries()) {
@@ -209,6 +251,12 @@ export function aggregateAttemptTelemetry(attempts) {
     }
     if (attempt.fullResets > attempt.resets) {
       throw new Error(`attempt ${index + 1} fullResets exceeds resets`);
+    }
+    if (attempt.terminalRejectedCommands > attempt.rejectedCommands) {
+      throw new Error(`attempt ${index + 1} terminalRejectedCommands exceeds rejectedCommands`);
+    }
+    if (attempt.postTerminalGameplayActions > attempt.gameplayActions) {
+      throw new Error(`attempt ${index + 1} postTerminalGameplayActions exceeds gameplayActions`);
     }
     if (!SAFE_EPISODE_ID.test(attempt.episodeId)
         || Number(attempt.episodeId.slice('episode-'.length)) !== attempt.resets + 1) {

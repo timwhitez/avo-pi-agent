@@ -56,6 +56,8 @@ export class AvoArcAgent {
     this.gameplayActions = 0;
     this.resets = 0;
     this.rejectedCommands = 0;
+    this.terminalRejectedCommands = 0;
+    this.postTerminalGameplayActions = 0;
     this.fullResets = 0;
     this.episodeSequence = 1;
     this.uniqueStates = new Set();
@@ -289,15 +291,15 @@ export class AvoArcAgent {
       },
       {
         name: 'finish',
-        label: 'Finish solved game',
-        description: 'Finish only after the environment state is WIN or the action budget is exhausted.',
+        label: 'Finish the current run',
+        description: 'Finish after WIN, GAME_OVER, ERROR, or action-budget exhaustion. On GAME_OVER, choose either finish or the separate reset controller.',
         parameters: {
           type: 'object', required: ['summary'],
           properties: { summary: { type: 'string' } }, additionalProperties: false,
         },
         execute: async ({ summary }) => {
-          if (!isWin(this.frame) && this.actions < this.config.maxActions) {
-            return this.toolResult('Rejected: game is not won and action budget remains. Continue investigating.', { rejected: true });
+          if (episodeState(this.frame) === 'ACTIVE' && this.actions < this.config.maxActions) {
+            return this.toolResult('Rejected: the current episode is active and the action budget remains.', { rejected: true });
           }
           this.finished = true;
           this.memory.merge({ notes: [`Final summary: ${summary}`] });
@@ -308,7 +310,17 @@ export class AvoArcAgent {
   }
 
   async act({ action, x, y, reasoning = '' } = {}) {
-    if (this.isDone()) return this.toolResult('No action taken: run is already complete.', { frame: this.frame }, true);
+    if (this.finished || this.actions >= this.config.maxActions) {
+      return this.toolResult('No action taken: run is already complete.', { frame: this.frame }, true);
+    }
+    const lifecycle = episodeState(this.frame);
+    if (lifecycle !== 'ACTIVE') {
+      return this.rejectCommand(
+        'EPISODE_TERMINAL',
+        `${lifecycle} ends the current episode; use reset to recover or finish to stop`,
+        { action, reasoning },
+      );
+    }
     if (!GAMEPLAY_ACTIONS.includes(action)) {
       return this.rejectCommand('INVALID_GAMEPLAY_ACTION', `${String(action)} is not a gameplay action`, { action, reasoning });
     }
@@ -420,6 +432,7 @@ export class AvoArcAgent {
 
   rejectCommand(code, message, { action = null, reasoning = '' } = {}) {
     this.rejectedCommands += 1;
+    if (code === 'EPISODE_TERMINAL') this.terminalRejectedCommands += 1;
     const evidence = this.recordEvidence({
       type: 'command-rejected',
       frame: this.frame,
@@ -453,6 +466,8 @@ export class AvoArcAgent {
       gameplayActions: this.gameplayActions,
       resets: this.resets,
       rejectedCommands: this.rejectedCommands,
+      terminalRejectedCommands: this.terminalRejectedCommands,
+      postTerminalGameplayActions: this.postTerminalGameplayActions,
       fullResets: this.fullResets,
       episodeId: this.episodeId(),
     };
@@ -557,7 +572,7 @@ AVO contract:
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
 5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Revisit earlier evidence and alter the order of operations as the environment demands.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
-7. Continue through every level. A level transition is progress, while state=WIN is completion. Do not call finish before WIN unless the action budget is exhausted.
+7. Continue through every level while the episode is active. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
 You have ARC interaction, domain knowledge, structured memory, an optional hypothesis lineage, objective evaluation, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
   }
@@ -565,7 +580,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
   async run() {
     if (!this.frame) await this.initialize();
     const initialEvidence = this.evidenceLedger.at(-1)?.id;
-    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. Continue autonomously until WIN or action-budget exhaustion. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe()}`;
+    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While the episode is active, pursue WIN without spending actions merely because budget remains. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe()}`;
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
       tools: this.tools(),
@@ -581,6 +596,8 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       gameplayActions: this.gameplayActions,
       resets: this.resets,
       rejectedCommands: this.rejectedCommands,
+      terminalRejectedCommands: this.terminalRejectedCommands,
+      postTerminalGameplayActions: this.postTerminalGameplayActions,
       fullResets: this.fullResets,
       episodeId: this.episodeId(),
       objective: this.objectiveState(),
@@ -600,6 +617,12 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
   }
 }
 
+export function episodeState(frame) {
+  const state = String(frame?.state || '').trim().toUpperCase();
+  if (state === 'WIN' || state === 'GAME_OVER' || state === 'ERROR') return state;
+  return 'ACTIVE';
+}
+
 function isWin(frame) {
-  return Boolean(frame && String(frame.state).toUpperCase().includes('WIN'));
+  return episodeState(frame) === 'WIN';
 }

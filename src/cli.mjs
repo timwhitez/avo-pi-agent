@@ -425,6 +425,8 @@ function makeReport(kind, results, config, { scorecards = [], expectedGames = re
       totalGameplayActions: sumReportedCount(safeResults, 'gameplayActions'),
       totalResets: sumReportedCount(safeResults, 'resets'),
       totalRejectedCommands: sumReportedCount(safeResults, 'rejectedCommands'),
+      totalTerminalRejectedCommands: sumReportedCount(safeResults, 'terminalRejectedCommands'),
+      totalPostTerminalGameplayActions: sumReportedCount(safeResults, 'postTerminalGameplayActions'),
       totalFullResets: sumReportedCount(safeResults, 'fullResets'),
       allWon: !runError && expectedGames > 0 && safeResults.length === expectedGames && wins === expectedGames,
       officialScore: scoreAuthority.officialScore.value,

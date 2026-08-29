@@ -31,6 +31,8 @@ const record = (gameId, overrides = {}) => ({
   gameplayActions: 41,
   resets: 0,
   rejectedCommands: 0,
+  terminalRejectedCommands: 0,
+  postTerminalGameplayActions: 0,
   fullResets: 0,
   episodeId: 'episode-000001',
   won: false,

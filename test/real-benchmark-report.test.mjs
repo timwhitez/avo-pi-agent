@@ -25,11 +25,13 @@ const report = {
     {
       gameId: 'aa01-v1', state: 'WIN', levelsCompleted: 3, winLevels: 3,
       actions: 10, gameplayActions: 10, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
     },
     {
       gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, winLevels: 3,
       actions: 20, gameplayActions: 20, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
     },
   ],
@@ -52,6 +54,8 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     gameplayActions: 30,
     resets: 0,
     rejectedCommands: 0,
+    terminalRejectedCommands: 0,
+    postTerminalGameplayActions: 0,
     fullResets: 0,
   });
 });
@@ -94,6 +98,7 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     attestedCount: 2,
     loop: 'pi-sdk',
     controllerTelemetry: 'complete',
+    terminalLifecycleTelemetry: 'complete',
   });
   assert.throws(() => validateProductionLoops(records.map((record) => ({ ...record, loop: null })), 2), /missing/);
   assert.throws(() => validateProductionLoops([{ ...records[0], loop: 'portable' }, records[1]], 2), /portable/);
@@ -103,6 +108,8 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     gameplayActions: null,
     resets: null,
     rejectedCommands: null,
+    terminalRejectedCommands: null,
+    postTerminalGameplayActions: null,
     fullResets: null,
     episodeId: null,
   }));
@@ -110,6 +117,24 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
   assert.equal(validateProductionLoops(legacy, 2, {
     allowUnavailableControllerTelemetry: true,
   }).controllerTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).terminalLifecycleTelemetry, 'unavailable-diagnostic');
+  const missingLifecycle = records.map((record) => ({
+    ...record,
+    terminalRejectedCommands: null,
+    postTerminalGameplayActions: null,
+  }));
+  assert.throws(
+    () => validateProductionLoops(missingLifecycle, 2),
+    /requires complete terminal lifecycle telemetry/,
+  );
+  assert.throws(
+    () => validateProductionLoops([
+      { ...records[0], postTerminalGameplayActions: 1 }, records[1],
+    ], 2),
+    /rejects post-terminal gameplay actions/,
+  );
 });
 
 test('report selection requires exactly one matching run ID and kind', () => {

@@ -298,6 +298,8 @@ function recordBinding(record) {
     gameplayActions: record.gameplayActions,
     resets: record.resets,
     rejectedCommands: record.rejectedCommands,
+    terminalRejectedCommands: record.terminalRejectedCommands,
+    postTerminalGameplayActions: record.postTerminalGameplayActions,
     fullResets: record.fullResets,
     episodeId: record.episodeId,
     won: record.won,

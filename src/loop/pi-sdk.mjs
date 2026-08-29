@@ -1,5 +1,5 @@
 /** Production loop backed by the official Pi Agent Harness packages. */
-export const CONTINUATION_PROMPT = 'The environment is not complete. Re-ground in exact evidence and durable memory, then continue with a materially useful direct-interaction experiment. Do not stop until WIN or the action budget is exhausted.';
+export const CONTINUATION_PROMPT = 'Re-ground in the latest exact evidence and durable memory. If the current episode is active, choose one materially useful direct-interaction experiment. If state is GAME_OVER or ERROR, issue no gameplay action: choose reset with a new plan or finish. Action and turn budgets are ceilings, not targets.';
 export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
   api: 'openai-responses',
   reasoning: true,

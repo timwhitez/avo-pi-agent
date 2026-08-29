@@ -190,17 +190,23 @@ def environment_list(arcade: Any) -> list[dict[str, Any]]:
     return [serialize_environment_info(item) for item in arcade.get_environments()]
 
 
-def resolve_environment(request: dict, open_environments: dict):
+def resolve_environment_key(request: dict, open_environments: dict) -> str:
     handle = str(request.get("handle") or "").strip()
     if handle:
-        entry = open_environments.get(handle)
-        if entry is None:
+        if handle not in open_environments:
             raise ValueError(f"No environment is open for handle: {handle}")
-        return entry[0]
-    entry = open_environments.get("default")
-    if entry is None:
+        return handle
+    if "default" not in open_environments:
         raise ValueError("No game is open")
-    return entry[0]
+    return "default"
+
+
+def resolve_environment(request: dict, open_environments: dict):
+    return open_environments[resolve_environment_key(request, open_environments)][0]
+
+
+def is_episode_terminal(state: Any) -> bool:
+    return str(state or "").strip().upper() in {"WIN", "GAME_OVER", "ERROR"}
 
 
 def resolve_action(GameAction: Any, name: str) -> Any:
@@ -269,6 +275,7 @@ def main() -> int:
             )
             return 0
         open_environments: dict[str, tuple[Any, str]] = {}
+        environment_states: dict[str, str] = {}
         current_game_id = None
         if args.game:
             initial_env = arcade.make(args.game)
@@ -276,6 +283,9 @@ def main() -> int:
                 fail(f"Could not create ARC environment: {args.game}")
                 return 3
             open_environments["default"] = (initial_env, args.game)
+            environment_states["default"] = str(
+                serialize_frame(initial_env.observation_space)["state"]
+            )
             current_game_id = args.game
     except Exception as exc:
         fail(f"ARC initialization failed: {type(exc).__name__}: {exc}")
@@ -306,18 +316,28 @@ def main() -> int:
                 # host runs games concurrently through handles. Handle-less
                 # opens keep the single-environment contract via "default".
                 open_environments[handle or "default"] = (env, requested_game)
+                frame = serialize_frame(env.observation_space)
+                environment_states[handle or "default"] = str(frame["state"])
                 current_game_id = requested_game
                 response = {
                     "ok": True,
                     "game_id": requested_game,
                     "handle": handle or None,
-                    "frame": serialize_frame(env.observation_space),
+                    "frame": frame,
                 }
             elif command == "observe":
+                key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
-                response = {"ok": True, "frame": serialize_frame(target.observation_space)}
+                frame = serialize_frame(target.observation_space)
+                environment_states[key] = str(frame["state"])
+                response = {"ok": True, "frame": frame}
             elif command in ("step", "reset"):
+                key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
+                if command == "step" and is_episode_terminal(environment_states.get(key)):
+                    raise ValueError(
+                        "EPISODE_TERMINAL: gameplay step rejected; use reset or finish"
+                    )
                 action_name = "RESET" if command == "reset" else request.get("action")
                 action = resolve_action(GameAction, action_name)
                 data = request.get("data") or {}
@@ -327,7 +347,9 @@ def main() -> int:
                 if reasoning is not None and not isinstance(reasoning, dict):
                     reasoning = {"text": str(reasoning)}
                 raw = target.step(action, data=data, reasoning=reasoning)
-                response = {"ok": True, "frame": serialize_frame(raw)}
+                frame = serialize_frame(raw)
+                environment_states[key] = str(frame["state"])
+                response = {"ok": True, "frame": frame}
             elif command == "scorecard":
                 scorecard = arcade.get_scorecard()
                 response = {

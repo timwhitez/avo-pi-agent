@@ -29,7 +29,8 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
   );
   assert.deepEqual(aggregateGameMetrics([record]), {
     games: 1, wins: 0, levelsCompleted: 0, winLevels: 3, actions: 0,
-    gameplayActions: null, resets: null, rejectedCommands: null, fullResets: null,
+    gameplayActions: null, resets: null, rejectedCommands: null,
+    terminalRejectedCommands: null, postTerminalGameplayActions: null, fullResets: null,
   });
 });
 
@@ -39,6 +40,8 @@ test('preserves controller telemetry and validates total environment-action acco
     gameplayActions: 2,
     resets: 1,
     rejectedCommands: 4,
+    terminalRejectedCommands: 2,
+    postTerminalGameplayActions: 0,
     fullResets: 1,
     episodeId: 'episode-000002',
   }));
@@ -48,6 +51,8 @@ test('preserves controller telemetry and validates total environment-action acco
       gameplayActions: record.gameplayActions,
       resets: record.resets,
       rejectedCommands: record.rejectedCommands,
+      terminalRejectedCommands: record.terminalRejectedCommands,
+      postTerminalGameplayActions: record.postTerminalGameplayActions,
       fullResets: record.fullResets,
       episodeId: record.episodeId,
     },
@@ -56,6 +61,8 @@ test('preserves controller telemetry and validates total environment-action acco
       gameplayActions: 2,
       resets: 1,
       rejectedCommands: 4,
+      terminalRejectedCommands: 2,
+      postTerminalGameplayActions: 0,
       fullResets: 1,
       episodeId: 'episode-000002',
     },
@@ -69,6 +76,8 @@ test('preserves controller telemetry and validates total environment-action acco
     gameplayActions: 2,
     resets: 1,
     rejectedCommands: 4,
+    terminalRejectedCommands: 2,
+    postTerminalGameplayActions: 0,
     fullResets: 1,
   });
   assert.throws(
@@ -81,6 +90,26 @@ test('preserves controller telemetry and validates total environment-action acco
   assert.throws(
     () => normalizeGameRecord(valid({ actions: 1, gameplayActions: 1 })),
     /controller telemetry must be either complete or entirely unavailable/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ terminalRejectedCommands: 0 })),
+    /terminal lifecycle telemetry must be either complete or entirely unavailable/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 1, postTerminalGameplayActions: 0,
+      fullResets: 0, episodeId: 'episode-000001',
+    })),
+    /terminalRejectedCommands cannot exceed/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 2,
+      fullResets: 0, episodeId: 'episode-000001',
+    })),
+    /postTerminalGameplayActions cannot exceed/,
   );
   assert.throws(
     () => normalizeGameRecord(valid({
@@ -109,10 +138,12 @@ test('aggregates controller telemetry across attempts without dropping prior res
   const aggregate = aggregateAttemptTelemetry([
     {
       actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 2,
+      terminalRejectedCommands: 2, postTerminalGameplayActions: 0,
       fullResets: 1, episodeId: 'episode-000002',
     },
     {
       actions: 3, gameplayActions: 3, resets: 0, rejectedCommands: 1,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001',
     },
   ]);
@@ -121,12 +152,15 @@ test('aggregates controller telemetry across attempts without dropping prior res
     gameplayActions: 3,
     resets: 1,
     rejectedCommands: 3,
+    terminalRejectedCommands: 2,
+    postTerminalGameplayActions: 0,
     fullResets: 1,
     episodeId: 'episode-000002',
   });
   assert.throws(
     () => aggregateAttemptTelemetry([{
       actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000002',
     }]),
     /episodeId is inconsistent/,

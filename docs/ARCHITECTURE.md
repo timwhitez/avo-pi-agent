@@ -86,10 +86,12 @@ healthy turns.
 
 The production path uses `@earendil-works/pi-agent-core`; the portable loop is
 restricted to offline deterministic tests. After a Pi prompt settles, the
-wrapper queues a follow-up and calls `continue()` while the ARC environment is
-non-terminal. It stops only on:
+wrapper queues a neutral follow-up while the run remains open. An active
+episode may take gameplay actions. `GAME_OVER` or `ERROR` ends that episode,
+so only controller reset or explicit finish remains legal. The run stops on:
 
 - environment WIN;
+- explicit finish after `GAME_OVER` or `ERROR`;
 - ARC action-budget exhaustion;
 - provider/runtime error;
 - explicit outer-turn exhaustion, reported as an error rather than success.

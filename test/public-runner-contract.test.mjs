@@ -107,6 +107,12 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           if (frame.state !== 'GAME_OVER' || frame.availableActions.includes('RESET')) {
             throw new Error('reset contract fixture must begin GAME_OVER without RESET gameplay affordance');
           }
+          const terminalAction = await call('act', { action: 'ACTION1', reasoning: 'must be rejected before bridge' });
+          if (terminalAction.details.code !== 'EPISODE_TERMINAL'
+              || terminalAction.details.telemetry?.terminalRejectedCommands !== 1
+              || terminalAction.details.telemetry?.postTerminalGameplayActions !== 0) {
+            throw new Error('GAME_OVER gameplay was not rejected with terminal telemetry');
+          }
           const reset = await call('reset', { rationale: 'exercise full-reset identity' });
           if (!reset.details.fullReset || reset.details.episodeId !== 'episode-000002') {
             throw new Error('controller reset did not return full-reset episode evidence');
@@ -451,6 +457,37 @@ process.exit(result.status ?? 1);
     AVO_RUN_CLASS: 'cold-start',
   };
 
+  const bridgeClientFile = pathToFileURL(path.join(root, 'src', 'arc', 'bridge-client.mjs')).href;
+  const bridgeGuardScript = `
+const { ArcBridgeClient } = await import(${JSON.stringify(bridgeClientFile)});
+const client = new ArcBridgeClient({ python: ${JSON.stringify(fakePython)}, cwd: ${JSON.stringify(root)} });
+try {
+  await client.start();
+  const terminal = await client.open('g01-v1');
+  if (terminal.state !== 'GAME_OVER') throw new Error('bridge fixture did not begin terminal');
+  let rejected = false;
+  try {
+    await client.step('ACTION1', {}, 'stale direct client action');
+  } catch (error) {
+    rejected = /EPISODE_TERMINAL/.test(String(error?.message));
+  }
+  if (!rejected) throw new Error('production Python bridge forwarded post-terminal gameplay');
+  const reset = await client.reset('recover after guarded stale action');
+  if (reset.state !== 'PLAYING' || reset.full_reset !== true) {
+    throw new Error('bridge reset did not prove zero forwarded terminal steps');
+  }
+} finally {
+  await client.close();
+}
+`;
+  const bridgeGuard = spawnSync(process.execPath, ['--input-type=module', '--eval', bridgeGuardScript], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: childEnv,
+  });
+  assert.equal(bridgeGuard.status, 0, bridgeGuard.stderr || bridgeGuard.stdout);
+
   const withoutCapsule = { ...childEnv, AVO_REQUIRE_REAL_PROVIDER: '1' };
   delete withoutCapsule.AVO_RESUME_DIR;
   const missingCapsule = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
@@ -519,13 +556,17 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.results[0].fullResets, 1);
   assert.equal(report.results[0].episodeId, 'episode-000002');
   assert.equal(report.results[0].actions, report.results[0].gameplayActions + report.results[0].resets);
-  assert.equal(report.results[0].rejectedCommands, 0);
+  assert.equal(report.results[0].rejectedCommands, 1);
+  assert.equal(report.results[0].terminalRejectedCommands, 1);
+  assert.equal(report.results[0].postTerminalGameplayActions, 0);
   assert.equal(report.results[1].resets, 1);
   assert.equal(report.results[1].fullResets, 1);
   assert.equal(report.results[1].episodeId, 'episode-000002');
   assert.equal(report.results[1].actions, report.results[1].gameplayActions + 1);
   assert.equal(report.results[1].executions.length, 3);
   assert.equal(report.summary.totalResets, 2);
+  assert.equal(report.summary.totalTerminalRejectedCommands, 1);
+  assert.equal(report.summary.totalPostTerminalGameplayActions, 0);
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
   assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
   assert.equal(report.aggregateScorecard.score, 100);
@@ -540,12 +581,16 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   ), 'utf8'));
   assert.equal(checkpoint.schema, 'avo.resume-record.v3');
   assert.equal(checkpoint.capsuleHash, capsule.capsuleHash);
+  assert.equal(checkpoint.record.terminalRejectedCommands, 1);
+  assert.equal(checkpoint.record.postTerminalGameplayActions, 0);
   const retryCheckpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g02.json',
   ), 'utf8'));
   assert.equal(retryCheckpoint.record.resets, 1);
   assert.equal(retryCheckpoint.record.fullResets, 1);
   assert.equal(retryCheckpoint.record.episodeId, 'episode-000002');
+  assert.equal(retryCheckpoint.record.terminalRejectedCommands, 0);
+  assert.equal(retryCheckpoint.record.postTerminalGameplayActions, 0);
   assert.equal(retryCheckpoint.record.executions.length, 3);
   const stateAuthority = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
@@ -652,6 +697,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(publishedReport.games[0].resets, 1);
   assert.equal(publishedReport.games[0].fullResets, 1);
   assert.equal(publishedReport.games[0].episodeId, 'episode-000002');
+  assert.equal(publishedReport.games[0].terminalRejectedCommands, 1);
+  assert.equal(publishedReport.games[0].postTerminalGameplayActions, 0);
   assert.equal(
     publishedReport.games[0].actions,
     publishedReport.games[0].gameplayActions + publishedReport.games[0].resets,

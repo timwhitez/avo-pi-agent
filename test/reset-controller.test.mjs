@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
+import { episodeState } from '../src/core/avo-agent-base.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
@@ -25,7 +26,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-reset-controller-'));
   const calls = { reset: 0, step: 0 };
   const environment = {
-    async start() { return frame({ state: 'GAME_OVER' }); },
+    async start() { return frame({ state: 'PLAYING' }); },
     async reset() {
       calls.reset += 1;
       return frame({ state: 'PLAYING', fullReset: true });
@@ -33,7 +34,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     async step(action) {
       calls.step += 1;
       assert.equal(action, 'ACTION1');
-      return frame({ state: 'WIN' });
+      return frame({ state: calls.step === 1 ? 'GAME_OVER' : 'WIN' });
     },
     async scorecard() { return null; },
   };
@@ -75,16 +76,25 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     environment.reset = resetController;
     assert.deepEqual(calls, { reset: 0, step: 0 });
 
+    const death = await tools.act.execute({ action: 'ACTION1', reasoning: 'test terminal transition' });
+    assert.equal(death.details.frame.state, 'GAME_OVER');
+    const terminal = await tools.act.execute({ action: 'ACTION1', reasoning: 'must not forward' });
+    assert.equal(terminal.details.code, 'EPISODE_TERMINAL');
+    assert.equal(terminal.details.recoverable, true);
+    assert.deepEqual(calls, { reset: 0, step: 1 });
+
     const reset = await tools.reset.execute({ rationale: 'abandon the terminal branch' });
     assert.equal(reset.details.ok, true);
     assert.equal(reset.details.frame.state, 'PLAYING');
     assert.equal(reset.details.fullReset, true);
     assert.equal(reset.details.episodeId, 'episode-000002');
     assert.deepEqual(reset.details.telemetry, {
-      environmentActions: 1,
-      gameplayActions: 0,
+      environmentActions: 2,
+      gameplayActions: 1,
       resets: 1,
-      rejectedCommands: 6,
+      rejectedCommands: 7,
+      terminalRejectedCommands: 1,
+      postTerminalGameplayActions: 0,
       fullResets: 1,
       episodeId: 'episode-000002',
     });
@@ -92,7 +102,7 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
 
     const action = await tools.act.execute({ action: 'ACTION1', reasoning: 'new episode probe' });
     assert.equal(action.details.frame.state, 'WIN');
-    assert.deepEqual(calls, { reset: 1, step: 1 });
+    assert.deepEqual(calls, { reset: 1, step: 2 });
     const result = await agent.run();
     assert.deepEqual(
       {
@@ -100,14 +110,18 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
         gameplayActions: result.gameplayActions,
         resets: result.resets,
         rejectedCommands: result.rejectedCommands,
+        terminalRejectedCommands: result.terminalRejectedCommands,
+        postTerminalGameplayActions: result.postTerminalGameplayActions,
         fullResets: result.fullResets,
         episodeId: result.episodeId,
       },
       {
-        actions: 2,
-        gameplayActions: 1,
+        actions: 3,
+        gameplayActions: 2,
         resets: 1,
-        rejectedCommands: 6,
+        rejectedCommands: 7,
+        terminalRejectedCommands: 1,
+        postTerminalGameplayActions: 0,
         fullResets: 1,
         episodeId: 'episode-000002',
       },
@@ -115,7 +129,39 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
     const resetEvidence = agent.evidenceLedger.find((event) => event.type === 'environment-reset');
     assert.equal(resetEvidence.fullReset, true);
     assert.equal(resetEvidence.episodeId, 'episode-000002');
-    assert.equal(agent.evidenceLedger.filter((event) => event.type === 'command-rejected').length, 6);
+    assert.equal(agent.evidenceLedger.filter((event) => event.type === 'command-rejected').length, 7);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('GAME_OVER is episode-terminal but still permits finish without spending the budget', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-terminal-finish-'));
+  let environmentCalls = 0;
+  const agent = new AvoArcAgent({
+    gameId: 'terminal-finish',
+    environment: {
+      async start() { return frame({ state: 'GAME_OVER' }); },
+      async step() { environmentCalls += 1; throw new Error('must not step'); },
+      async scorecard() { return null; },
+    },
+    loop: inertLoop,
+    config: {
+      maxActions: 10,
+      stallWindow: 8,
+      memoryDir: path.join(root, 'memory'),
+      workspaceDir: path.join(root, 'workspace'),
+    },
+  });
+  try {
+    await agent.initialize();
+    assert.equal(episodeState(agent.frame), 'GAME_OVER');
+    assert.equal(agent.isDone(), false, 'run stays open so reset or finish remains reachable');
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const finished = await tools.finish.execute({ summary: 'terminal episode; stop this run' });
+    assert.equal(finished.terminate, true);
+    assert.equal(agent.isDone(), true);
+    assert.equal(environmentCalls, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -93,6 +93,12 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     assert.equal(globalThis.__avoFakePi.options.initialState.tools[0].parameters.kind, 'Object');
     assert.equal(globalThis.__avoFakePi.options.followUpMode, 'one-at-a-time');
     assert.equal(globalThis.__avoFakePi.followUps.length, 2);
+    assert.ok(globalThis.__avoFakePi.followUps.every(
+      (message) => message.content === module.CONTINUATION_PROMPT,
+    ));
+    assert.match(module.CONTINUATION_PROMPT, /GAME_OVER.*reset.*finish/i);
+    assert.match(module.CONTINUATION_PROMPT, /budgets are ceilings/i);
+    assert.doesNotMatch(module.CONTINUATION_PROMPT, /until WIN or the action budget is exhausted/i);
     assert.equal(globalThis.__avoFakePi.continues, 2);
     assert.equal(globalThis.__avoFakePi.prompt, 'start');
     assert.equal(result.exhaustedOuterTurns, true);
