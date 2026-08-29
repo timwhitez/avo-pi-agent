@@ -94,12 +94,6 @@ async function offlineDemo(args) {
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
   }
   const report = makeReport('offline-contract-demo', results, config);
-  if (resumeDir) {
-    report.scorecardCoverage = {
-      replayedGames,
-      checkpointedGames: Math.max(0, completed.length - replayedGames),
-    };
-  }
   const reportFile = writeReport(report);
   console.log(JSON.stringify({ ...report.summary, reportFile }, null, 2));
   if (!results.every((r) => r.won)) process.exitCode = 2;
@@ -121,6 +115,7 @@ async function runPublic(args) {
   let aggregateScorecard = null;
   let selected = [];
   let runError = null;
+  let resumeDir = null;
 
   try {
     await environment.start();
@@ -134,7 +129,7 @@ async function runPublic(args) {
     // Interrupted runs checkpoint every finished game under AVO_RESUME_DIR;
     // a restarted run with the same context skips those games instead of
     // replaying hours of provider work.
-    const resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
+    resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
     const resumedRecords = loadResumedRecords(resumeDir);
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
