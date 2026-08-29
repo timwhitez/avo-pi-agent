@@ -21,10 +21,10 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   const versionedAliases = ownValues(value, ['versionedGameId', 'versioned_game_id']);
   const explicitAliases = ownValues(value, ['gameId', 'game_id']);
   const rawGameId = versionedAliases[0] ?? explicitAliases[0];
-  const versionedGameId = requireSafeVersionedGameId(rawGameId, sourcePath);
+  const versionedGameId = normalizeVersionedGameId(rawGameId, sourcePath);
   const gameId = normalizeGameId(versionedGameId);
-  if (versionedAliases.some((candidate) => requireSafeVersionedGameId(candidate, sourcePath) !== versionedGameId)
-      || explicitAliases.some((candidate) => normalizeGameId(requireSafeVersionedGameId(candidate, sourcePath)) !== gameId)) {
+  if (versionedAliases.some((candidate) => normalizeVersionedGameId(candidate, sourcePath) !== versionedGameId)
+      || explicitAliases.some((candidate) => normalizeGameId(normalizeVersionedGameId(candidate, sourcePath)) !== gameId)) {
     invalidRecord(sourcePath, 'explicit game identity contradicts its versioned game identity');
   }
   const state = requireState(firstOwn(value, ['state', 'gameState', 'game_state']), sourcePath);
@@ -45,6 +45,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     won = value.won;
     if (won !== stateWon) invalidRecord(sourcePath, `won=${won} contradicts terminal state=${state}`);
   }
+  const executions = normalizeExecutions(value.executions, versionedGameId, sourcePath);
 
   return Object.freeze({
     gameId,
@@ -56,6 +57,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     won,
     error: optionalString(value.error, 'error', sourcePath),
     loop: optionalString(value.loop, 'loop', sourcePath),
+    executions,
     sourcePath,
   });
 }
@@ -75,7 +77,7 @@ export function validateProductionLoops(records, expectedGames) {
 
 export function validateCompleteGameSet(expectedGames, records) {
   const expected = expectedGames.map((game) => normalizeGameId(game.gameId ?? game));
-  const expectedVersioned = expectedGames.map((game) => requireSafeVersionedGameId(
+  const expectedVersioned = expectedGames.map((game) => normalizeVersionedGameId(
     game?.versionedGameId ?? game?.gameId ?? game,
     'expected public game set',
   ));
@@ -88,7 +90,7 @@ export function validateCompleteGameSet(expectedGames, records) {
     if (!record || typeof record !== 'object') throw new Error(`public game record at index ${index} is malformed`);
     return normalizeGameId(record.gameId);
   });
-  const actualVersioned = records.map((record, index) => requireSafeVersionedGameId(
+  const actualVersioned = records.map((record, index) => normalizeVersionedGameId(
     record?.versionedGameId,
     `public game record at index ${index}`,
   ));
@@ -161,7 +163,7 @@ function ownValues(value, keys) {
   return keys.filter((key) => Object.hasOwn(value, key)).map((key) => value[key]);
 }
 
-function requireSafeVersionedGameId(value, sourcePath) {
+export function normalizeVersionedGameId(value, sourcePath = 'game identity') {
   if (typeof value !== 'string') invalidRecord(sourcePath, 'gameId must be a string');
   const result = value.trim();
   if (!result || result !== value || !SAFE_VERSIONED_GAME_ID.test(result)) {
@@ -170,7 +172,7 @@ function requireSafeVersionedGameId(value, sourcePath) {
   return result;
 }
 
-function normalizeGameId(value) {
+export function normalizeGameId(value) {
   if (typeof value !== 'string') throw new Error('gameId must be a string');
   const versioned = value.trim();
   if (!versioned || versioned !== value || !SAFE_VERSIONED_GAME_ID.test(versioned)) {
@@ -179,6 +181,34 @@ function normalizeGameId(value) {
   const short = versioned.split('-')[0];
   if (!SAFE_SHORT_GAME_ID.test(short)) throw new Error(`normalized gameId has an invalid format: ${JSON.stringify(short)}`);
   return short;
+}
+
+function normalizeExecutions(value, versionedGameId, sourcePath) {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length === 0) {
+    invalidRecord(sourcePath, 'executions must be a non-empty array when present');
+  }
+  const executions = value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      invalidRecord(sourcePath, `execution ${index} must be an object`);
+    }
+    const executionGameId = normalizeVersionedGameId(
+      item.versionedGameId,
+      `${sourcePath}.executions[${index}]`,
+    );
+    if (executionGameId !== versionedGameId) {
+      invalidRecord(sourcePath, `execution ${index} belongs to ${executionGameId}, not ${versionedGameId}`);
+    }
+    const executionIdSha256 = String(item.executionIdSha256 ?? '');
+    if (!/^[a-f0-9]{64}$/.test(executionIdSha256)) {
+      invalidRecord(sourcePath, `execution ${index} hash is malformed`);
+    }
+    return Object.freeze({ versionedGameId, executionIdSha256 });
+  });
+  if (new Set(executions.map((item) => item.executionIdSha256)).size !== executions.length) {
+    invalidRecord(sourcePath, 'execution hashes contain duplicates');
+  }
+  return Object.freeze(executions);
 }
 
 function requireState(value, sourcePath) {

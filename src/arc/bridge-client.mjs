@@ -253,7 +253,11 @@ export class ArcBridgeClient {
   }
 
   async scorecard() {
-    return (await this.request({ command: 'scorecard' })).scorecard;
+    return (await this.scorecardEvidence()).scorecard;
+  }
+
+  async scorecardEvidence() {
+    return this.request({ command: 'scorecard' });
   }
 
   /**

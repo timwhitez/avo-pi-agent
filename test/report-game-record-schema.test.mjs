@@ -54,6 +54,26 @@ test('parses won only as a real boolean and rejects state contradictions', () =>
   assert.equal(normalizeGameRecord(withoutWon).won, true);
 });
 
+test('preserves exact execution references and rejects cross-game or duplicate hashes', () => {
+  const hash = 'a'.repeat(64);
+  const record = normalizeGameRecord({
+    gameId: 'g1-v1', state: 'WIN', won: true, levelsCompleted: 1, winLevels: 1, actions: 2,
+    executions: [{ versionedGameId: 'g1-v1', executionIdSha256: hash }],
+  });
+  assert.deepEqual(record.executions, [{ versionedGameId: 'g1-v1', executionIdSha256: hash }]);
+  assert.throws(() => normalizeGameRecord({
+    gameId: 'g1-v1', state: 'WIN', actions: 2,
+    executions: [{ versionedGameId: 'g2-v1', executionIdSha256: hash }],
+  }), /belongs to/);
+  assert.throws(() => normalizeGameRecord({
+    gameId: 'g1-v1', state: 'WIN', actions: 2,
+    executions: [
+      { versionedGameId: 'g1-v1', executionIdSha256: hash },
+      { versionedGameId: 'g1-v1', executionIdSha256: hash },
+    ],
+  }), /duplicates/);
+});
+
 test('rejects impossible level totals and malformed identity/state fields', () => {
   assert.throws(() => normalizeGameRecord(valid({ levelsCompleted: 4, winLevels: 3 })), /exceeds winLevels/);
   for (const gameId of [null, '', ' ls20', '../ls20', 'ls20/x', '💥']) {

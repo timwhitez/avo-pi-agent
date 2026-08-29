@@ -19,6 +19,7 @@ import os
 import re
 import sys
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -223,6 +224,7 @@ def main() -> int:
             logger=build_arc_logger(),
         )
         auth = arc_auth_metadata(arcade, auth_mode)
+        session_started_at = datetime.now(timezone.utc).isoformat()
         if not auth["keyAcquired"]:
             raise RuntimeError(
                 "official ARC toolkit did not acquire an API key for the selected auth mode"
@@ -300,10 +302,15 @@ def main() -> int:
                 raw = target.step(action, data=data, reasoning=reasoning)
                 response = {"ok": True, "frame": serialize_frame(raw)}
             elif command == "scorecard":
+                scorecard = arcade.get_scorecard()
                 response = {
                     "ok": True,
                     "arc_auth": auth,
-                    "scorecard": jsonable(arcade.get_scorecard()),
+                    "scorecard": jsonable(scorecard),
+                    "scorecard_session": {
+                        "started_at": session_started_at,
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                    },
                 }
             elif command == "close":
                 print(json.dumps({"ok": True}), flush=True)
