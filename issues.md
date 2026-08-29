@@ -358,16 +358,17 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 **Last synchronized:** 2026-08-30
 
 - Open Issues audited: **18/18**. The original 17 remain valid after correction; [#71](https://github.com/timwhitez/avo-pi-agent/issues/71) was re-opened after a supported-runtime clean-checkout failure proved its remaining package-contract defect.
-- Open implementation PRs: **1** — Draft [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) remains the tracking/audit document only.
+- Open implementation PRs: **2** — Draft [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170 and Draft [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) for #71. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) remains the tracking/audit document only.
 - Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
 - PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
 - PR #184 local gates: `npm ci` passed; **340/340 Node tests**; secret scan; **25/25** offline games; Python bridge compilation; Mission Control **81/81** plus Next standalone production build; `git diff --check`. No public benchmark.
+- PR #185 local gates: clean Mission Control `npm ci`; **81/81** app tests; Next standalone production build; **326/326** root Node tests; secret scan; **25/25** offline games; Python bridge compilation; JSON parse; `git diff --check`. No public benchmark.
 - Public benchmark: **not run**. It remains blocked until the P0 validity repairs are integrated into one exact test state.
 
 | Issue | Audit state | Fix PR | Independent review | Dependency / next state |
 |---|---|---|---|---|
 | #170 | Valid P0; implementation complete locally | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | In progress on exact head `1dd1e5d` | Await independent verdict; PR remains unmerged |
-| #71 | Valid P0 local-gate defect; stale body corrected and issue re-opened | — | — | Clean checkout lacks the manifest/lock required by its first acceptance stage; independent PR after #170 review |
+| #71 | Valid P0 local-gate defect; implementation complete locally | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | In progress on exact head `7e4e385` | Await independent verdict; PR remains unmerged |
 | #169 | Valid P0; evidence wording corrected | — | — | After #170 |
 | #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
 | #167 | Valid P0; cross-run chronology corrected | — | — | After #166 |
