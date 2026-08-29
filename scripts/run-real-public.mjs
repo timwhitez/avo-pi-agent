@@ -50,12 +50,13 @@ fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
 // finished games are skipped via the per-game checkpoint cache and the
 // original provenance stays authoritative. The context must match exactly.
 const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
+let resumeContext = null;
 if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
   if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
-  assertResumableContext({ privateDir, publicFile, runId });
+  resumeContext = assertResumableContext({ privateDir, publicFile, runId });
   console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
 }
-fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
+if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
 
 let provider;
 const stage = { value: 'configuration' };
@@ -91,6 +92,15 @@ try {
     runId,
     gitSha,
   });
+  if (resumeContext) {
+    provenance.resume = Object.freeze({
+      resumed: true,
+      resumedAt: new Date().toISOString(),
+      originalGitSha: resumeContext.originalGitSha,
+      resumedAtGitSha: resumeContext.resumedAtGitSha || gitSha,
+      originalCreatedAt: resumeContext.originalCreatedAt,
+    });
+  }
   if (resuming && fs.existsSync(path.join(privateDir, 'provenance.json'))) {
     console.log('[real-run] keeping the original provenance of the resumed run');
   } else {
@@ -249,11 +259,18 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
   } catch (error) {
     throw new Error(`cannot resume ${runId}: provenance.json is unreadable`, { cause: error });
   }
+  let currentSha = null;
   if (original.gitSha) {
     const probe = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' });
-    const sha = probe.status === 0 ? String(probe.stdout).trim() : null;
-    if (sha && original.gitSha !== sha) {
-      throw new Error(`cannot resume ${runId}: repository moved from ${original.gitSha.slice(0, 12)} to ${sha.slice(0, 12)}; start a fresh run instead`);
+    currentSha = probe.status === 0 ? String(probe.stdout).trim() : null;
+    if (currentSha && original.gitSha !== currentSha) {
+      // Resuming across commits is only honest when the published provenance
+      // discloses both SHAs; AVO_RESUME_ALLOW_SHA_DRIFT is the operator's
+      // explicit acknowledgment of that mixed execution.
+      if (process.env.AVO_RESUME_ALLOW_SHA_DRIFT !== '1') {
+        throw new Error(`cannot resume ${runId}: repository moved from ${original.gitSha.slice(0, 12)} to ${currentSha.slice(0, 12)}; start a fresh run or set AVO_RESUME_ALLOW_SHA_DRIFT=1 to disclose the drift`);
+      }
+      console.warn(`[real-run] resume crosses commits ${original.gitSha.slice(0, 12)} -> ${currentSha.slice(0, 12)}; the public report will disclose both`);
     }
   }
   const manifestFile = path.join(privateDir, 'manifest.private.json');
@@ -269,4 +286,9 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
       throw new Error(`cannot resume ${runId}: a complete public report already exists`);
     }
   }
+  return {
+    originalGitSha: original.gitSha || null,
+    resumedAtGitSha: currentSha,
+    originalCreatedAt: original.createdAt || null,
+  };
 }
