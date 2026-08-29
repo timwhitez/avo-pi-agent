@@ -4,7 +4,13 @@ import {
 } from '../local/numeric.mjs';
 import { evaluatePublicRunCapsule } from '../benchmark/run-capsule-authority.mjs';
 
-export function evaluateRoundAuthority({ roundId, processResult, benchmark, analysis } = {}) {
+export function evaluateRoundAuthority({
+  roundId,
+  processResult,
+  benchmark,
+  analysis,
+  privateCapsuleEvidence = null,
+} = {}) {
   const reasons = [];
   const expectedSet = normalizeGames(
     benchmark?.completeness?.gameIds ?? benchmark?.provenance?.publicGameIds,
@@ -18,10 +24,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   const provenance = recordOrEmpty(benchmark?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
   const runCapsule = recordOrEmpty(provenance.runCapsule);
-  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, {
-    capsuleFileSha256: benchmark?.privateArtifactHashes?.runCapsule?.sha256,
-    requireFileBinding: true,
-  });
+  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, { privateCapsuleEvidence });
 
   const expectedCount = nonNegativeIntegerOrNull(benchmark?.completeness?.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(benchmark?.completeness?.actualCount);

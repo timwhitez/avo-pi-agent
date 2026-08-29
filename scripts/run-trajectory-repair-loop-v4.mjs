@@ -27,6 +27,7 @@ import {
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { resolveRunOutputState } from '../src/trajectory/repair-state.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
@@ -125,7 +126,14 @@ try {
       authoritative: true,
     };
 
-    const authority = evaluateRoundAuthority({ roundId, processResult: run, benchmark, analysis });
+    const privateCapsuleEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot, report: benchmark });
+    const authority = evaluateRoundAuthority({
+      roundId,
+      processResult: run,
+      benchmark,
+      analysis,
+      privateCapsuleEvidence,
+    });
     const plan = buildRepairPlan(analysis, round);
     const outcomes = authority.authoritative && !authority.clean && plan.infrastructureFindingCount === 0
       ? applyRepairPlan(roundMemoryDir, plan)

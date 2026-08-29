@@ -6,7 +6,10 @@ import path from 'node:path';
 import { preflightResponsesProvider } from '../src/benchmark/provider-attestation.mjs';
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
-import { publicRunCapsuleFixture } from './support/run-capsule.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+} from './support/run-capsule.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
 const provider = {
@@ -21,6 +24,7 @@ function response(payload) {
 }
 
 test('canonical review tip contains replay-resistant provider proof and null-safe metrics together', async () => {
+  const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
   await assert.rejects(
     () => preflightResponsesProvider(provider, {
       nonce: challenge,
@@ -35,6 +39,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
 
   const result = evaluateRoundAuthority({
     roundId: 'round-1',
+    privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
       runId: 'round-1',
@@ -42,7 +47,9 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
       completeness: { complete: true, expectedCount: 1, actualCount: 1, gameIds: ['g1'] },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
-      privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+      },
       provenance: {
         runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,

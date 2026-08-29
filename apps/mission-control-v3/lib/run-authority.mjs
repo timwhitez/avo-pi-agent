@@ -30,7 +30,7 @@ export function initialAuthority(mode) {
   });
 }
 
-export function summarizeMissionControlReport(report, mode) {
+export function summarizeMissionControlReport(report, mode, { privateCapsuleEvidence = null } = {}) {
   const executionMode = requireRunMode(mode);
   if (executionMode === 'diagnostic') {
     const summary = recordOrEmpty(report?.summary);
@@ -52,7 +52,7 @@ export function summarizeMissionControlReport(report, mode) {
     });
   }
 
-  const authority = evaluateCompetitionReportAuthority(report);
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
   const aggregates = recordOrEmpty(report?.aggregates);
   return Object.freeze({
     kind: 'real-public-benchmark',
@@ -75,7 +75,7 @@ export function summarizeMissionControlReport(report, mode) {
   });
 }
 
-export function evaluateCompetitionReportAuthority(report) {
+export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence = null } = {}) {
   const reasons = [];
   const completeness = recordOrEmpty(report?.completeness);
   const provenance = recordOrEmpty(report?.provenance);
@@ -86,10 +86,7 @@ export function evaluateCompetitionReportAuthority(report) {
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
-  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, {
-    capsuleFileSha256: report?.privateArtifactHashes?.runCapsule?.sha256,
-    requireFileBinding: true,
-  });
+  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, { privateCapsuleEvidence });
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);

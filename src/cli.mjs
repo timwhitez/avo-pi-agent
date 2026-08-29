@@ -13,6 +13,7 @@ import {
   inspectRunState,
   readRunCapsule,
   verifyRunCapsuleExecution,
+  verifyRunCapsuleGameSet,
 } from './benchmark/run-capsule.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
@@ -124,6 +125,7 @@ async function runPublic(args) {
   let resumeDir = null;
   let runCapsuleHash = null;
   let runClass = null;
+  let runCapsule = null;
   let sourceCapsuleHashes = [];
   let resumedRecords = new Map();
 
@@ -143,12 +145,12 @@ async function runPublic(args) {
       throw new Error('cross-capsule checkpoint loading is allowed only for diagnostic-migrated runs');
     }
     const capsuleFile = requiredCapsuleFile(process.env.AVO_RUN_CAPSULE_FILE);
-    const capsule = readRunCapsule(capsuleFile, { root: path.resolve('runs/private') });
-    if (capsule.capsuleHash !== runCapsuleHash) throw new Error('active run capsule hash differs from the child contract');
+    runCapsule = readRunCapsule(capsuleFile, { root: path.resolve('runs/private') });
+    if (runCapsule.capsuleHash !== runCapsuleHash) throw new Error('active run capsule hash differs from the child contract');
     const stateBinding = currentStateBinding(config);
     verifyRunCapsuleExecution({
       root: process.cwd(),
-      capsule,
+      capsule: runCapsule,
       python: config.python,
       config,
       stateBinding,
@@ -161,13 +163,14 @@ async function runPublic(args) {
       requireStateMatch: runClass !== 'diagnostic-migrated',
     });
     if (runClass === 'recovered' && resumedRecords.size === 0) {
-      assertRunStateMatchesInitial(stateBinding, capsule.definition.initialState);
+      assertRunStateMatchesInitial(stateBinding, runCapsule.definition.initialState);
     }
   }
 
   try {
     await environment.start();
     const available = await environment.list();
+    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, available);
     selected = available.filter((env) => {
       const short = String(env.game_id).split('-')[0];
       return selection.all || selection.games.includes(short) || selection.games.includes(env.game_id);

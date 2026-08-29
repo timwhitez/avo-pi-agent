@@ -1,25 +1,53 @@
 import crypto from 'node:crypto';
 
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
 
-export function evaluatePublicRunCapsule(value, {
-  capsuleFileSha256 = null,
-  requireFileBinding = false,
-} = {}) {
+export function evaluatePublicRunCapsule(value, { privateCapsuleEvidence = null } = {}) {
   const capsule = recordOrEmpty(value);
   const reasons = [];
   requireCondition(capsule.schemaVersion === 1, 'run capsule attestation is absent or malformed', reasons);
   requireCondition(isSha256(capsule.capsuleHash), 'run capsule hash is absent or malformed', reasons);
   requireCondition(isSha256(capsule.capsuleEvidenceSha256), 'run capsule file commitment is absent or malformed', reasons);
-  if (requireFileBinding) {
-    requireCondition(
-      isSha256(capsuleFileSha256) && capsuleFileSha256 === capsule.capsuleEvidenceSha256,
-      'run capsule public commitment is not bound to the private capsule artifact',
-      reasons,
-    );
+  const privateCapsule = recordOrEmpty(privateCapsuleEvidence?.value);
+  const privateDefinition = recordOrEmpty(privateCapsule.definition);
+  const privateHashValid = privateCapsule.schemaVersion === 1
+    && privateDefinition.schema === 'avo.run-capsule.v1'
+    && isSha256(privateCapsule.capsuleHash)
+    && privateCapsule.capsuleHash === sha256(canonicalJson(privateDefinition));
+  requireCondition(privateHashValid, 'private run capsule artifact is absent or internally invalid', reasons);
+  requireCondition(
+    isSha256(privateCapsuleEvidence?.sha256)
+      && privateCapsuleEvidence.sha256 === capsule.capsuleEvidenceSha256,
+    'run capsule public commitment is not bound to the actual private capsule artifact',
+    reasons,
+  );
+  if (privateHashValid && isSha256(privateCapsuleEvidence?.sha256)) {
+    try {
+      const expected = projectPublicRunCapsule(privateCapsule, {
+        runClass: capsule.runClass,
+        comparable: capsule.comparable,
+        capsuleEvidenceSha256: privateCapsuleEvidence.sha256,
+      });
+      requireCondition(
+        canonicalJson(expected) === canonicalJson(capsule),
+        'public run capsule fields differ from the actual private capsule artifact',
+        reasons,
+      );
+      const migrated = isSha256(privateDefinition.initialState?.migrationSourceCapsuleHash);
+      requireCondition(
+        migrated
+          ? capsule.runClass === 'diagnostic-migrated' && capsule.comparable === false
+          : capsule.runClass !== 'diagnostic-migrated',
+        'run capsule lineage class differs from its private initial-state lineage',
+        reasons,
+      );
+    } catch {
+      reasons.push('private run capsule cannot produce the published public projection');
+    }
   }
   const committed = { ...capsule };
   delete committed.commitmentSha256;
@@ -93,7 +121,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(/^\d+\.\d+\.\d+/.test(String(runtime.npm || '')), 'run capsule npm runtime version is absent', reasons);
   requireCondition(/^Python \d+\.\d+\.\d+/.test(String(runtime.python || '')), 'run capsule Python runtime version is absent', reasons);
   requireCondition(runtime.arcOfficialPackageAttested === true && isSha256(runtime.arcMetadataSha256), 'run capsule ARC runtime attestation is malformed', reasons);
-  requireCondition(isPositiveInteger(runtime.gameConcurrency) && isPositiveInteger(runtime.gameAttempts), 'run capsule session topology counts are malformed', reasons);
+  requireCondition(isPositiveInteger(runtime.gameConcurrency) && isPositiveInteger(runtime.gameAttempts) && isPositiveInteger(runtime.transientTurnRecoveries), 'run capsule session topology counts are malformed', reasons);
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
   requireCondition(runtime.scorecardBinding === 'capsule-bound-state-checkpoint-v3', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);

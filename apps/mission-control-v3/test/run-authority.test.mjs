@@ -7,7 +7,12 @@ import {
   requireRunMode,
   summarizeMissionControlReport,
 } from '../lib/run-authority.mjs';
-import { publicRunCapsuleFixture } from '../../../test/support/run-capsule.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+} from '../../../test/support/run-capsule.mjs';
+
+const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
 
 function authoritative(overrides = {}) {
   return {
@@ -15,7 +20,9 @@ function authoritative(overrides = {}) {
     completeness: { complete: true, expectedCount: 25, actualCount: 25 },
     loopAttestation: { complete: true, loop: 'pi-sdk' },
     officialScore: { value: 0, origin: 'aggregateScorecard.score' },
-    privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
+    privateArtifactHashes: {
+      runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+    },
     aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
     provenance: {
       runCapsule: publicRunCapsuleFixture(),
@@ -67,18 +74,31 @@ test('complete but non-authoritative competition report is rejected', () => {
   const report = authoritative({
     officialScore: { value: 0.7, origin: 'local.heuristic' },
   });
-  const authority = evaluateCompetitionReportAuthority(report);
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
   assert.equal(authority.accepted, false);
   assert.match(authority.reasons.join(' '), /score origin/);
-  const summary = summarizeMissionControlReport(report, 'competition');
+  const summary = summarizeMissionControlReport(report, 'competition', { privateCapsuleEvidence });
   assert.equal(summary.official, false);
   assert.equal(summary.authorityState, 'rejected');
   assert.equal(summary.officialScore, null);
   assert.equal(summary.reportedScore, 0.7);
 });
 
+test('public report hashes cannot replace actual private capsule evidence', () => {
+  const report = authoritative();
+  report.privateArtifactHashes.runCapsule.sha256 =
+    report.provenance.runCapsule.capsuleEvidenceSha256;
+  const authority = evaluateCompetitionReportAuthority(report);
+  assert.equal(authority.accepted, false);
+  assert.ok(authority.reasons.some((reason) => /private run capsule artifact/.test(reason)));
+});
+
 test('official state requires all benchmark provenance gates and preserves score zero', () => {
-  const summary = summarizeMissionControlReport(authoritative(), 'competition');
+  const summary = summarizeMissionControlReport(
+    authoritative(),
+    'competition',
+    { privateCapsuleEvidence },
+  );
   assert.equal(summary.official, true);
   assert.equal(summary.authorityState, 'official');
   assert.equal(summary.officialScore, 0);
@@ -96,6 +116,10 @@ test('official state requires all benchmark provenance gates and preserves score
       },
     }),
   ]) {
-    assert.equal(summarizeMissionControlReport(report, 'competition').official, false);
+    assert.equal(summarizeMissionControlReport(
+      report,
+      'competition',
+      { privateCapsuleEvidence },
+    ).official, false);
   }
 });

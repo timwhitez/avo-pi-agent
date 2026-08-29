@@ -19,6 +19,8 @@ import {
   effectivePiSystemPrompt,
 } from '../loop/pi-sdk.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
+import { fingerprint } from './redaction.mjs';
+import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 
 export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
 export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
@@ -35,6 +37,8 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
   'src/benchmark/run-capsule-authority.mjs',
+  'src/benchmark/run-capsule-evidence.mjs',
+  'src/benchmark/run-capsule-public.mjs',
   'src/benchmark/run-capsule.mjs',
   'src/cli.mjs',
   'src/config.mjs',
@@ -215,6 +219,12 @@ export function buildRunCapsule({
   }
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
+  const providerIdentity = inspectProviderIdentity(runId, config?.provider);
+  if (providerIdentity.providerFingerprint !== provenance?.providerFingerprint
+      || providerIdentity.endpointFingerprint !== provenance?.providerEndpointFingerprint
+      || providerIdentity.modelFingerprint !== provenance?.providerModelFingerprint) {
+    throw new Error('run provenance provider identity differs from the effective provider config');
+  }
   const toolSchemas = canonicalToolSchemas(workspaceMode);
   const systemPrompt = effectivePiSystemPrompt(
     AvoArcAgent.prototype.systemPrompt.call({}),
@@ -250,9 +260,9 @@ export function buildRunCapsule({
       implementationSha256: sha256(createPiSdkLoop.toString()),
       capabilityStatus: 'declared-unverified',
       wireApi: String(provenance?.wireApi || 'responses'),
-      providerFingerprint: requiredSha(provenance?.providerFingerprint, 'provider fingerprint'),
-      endpointFingerprint: requiredSha(provenance?.providerEndpointFingerprint, 'provider endpoint fingerprint'),
-      modelFingerprint: requiredSha(provenance?.providerModelFingerprint, 'provider model fingerprint'),
+      providerFingerprint: providerIdentity.providerFingerprint,
+      endpointFingerprint: providerIdentity.endpointFingerprint,
+      modelFingerprint: providerIdentity.modelFingerprint,
       reasoningEffort,
       requestedCapabilities: {
         streaming: true,
@@ -271,6 +281,7 @@ export function buildRunCapsule({
       arcOfficialPackageAttested: arcRuntime?.officialPackageAttested === true,
       gameConcurrency: boundedInteger(env.AVO_GAME_CONCURRENCY, 1, 1, 8, 'AVO_GAME_CONCURRENCY'),
       gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
+      transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
       sessionTopology: 'one-arcade-session-per-process-pass',
       scorecardBinding: 'capsule-bound-state-checkpoint-v3',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
@@ -352,61 +363,10 @@ export function classifyResume(original, current, requestedMode = 'recovered') {
 
 export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
   validateRunCapsule(capsule);
-  const definition = capsule.definition;
-  const actualClass = String(runClass || definition.initialState.mode);
-  const isComparable = comparable ?? actualClass !== 'diagnostic-migrated';
-  const published = {
-    schemaVersion: 1,
-    capsuleHash: capsule.capsuleHash,
+  return projectPublicRunCapsule(capsule, {
+    runClass,
+    comparable,
     capsuleEvidenceSha256: sha256(`${JSON.stringify(capsule, null, 2)}\n`),
-    runClass: actualClass,
-    comparable: isComparable === true,
-    gitCommit: definition.git.commit,
-    gitTree: definition.git.tree,
-    gitClean: definition.git.clean === true,
-    components: definition.components.files,
-    componentSetSha256: definition.components.setSha256,
-    prompts: definition.prompts,
-    toolSchemaSha256: definition.tools.schemaSha256,
-    nodeDependencySha256: definition.runtime.dependencies.nodeSha256,
-    nodeDependencies: definition.runtime.dependencies.nodeTree || null,
-    pythonDependencySha256: definition.runtime.dependencies.pythonSha256,
-    pythonDependencies: definition.runtime.dependencies.pythonPackages || null,
-    initialStateMode: definition.initialState.mode,
-    initialStateSnapshot: definition.initialState.snapshotName,
-    initialStateSha256: sha256(canonicalJson(definition.initialState)),
-    initialState: definition.initialState,
-    enabledTools: definition.tools.enabled,
-    transcript: definition.transcript,
-    runtime: {
-      node: definition.runtime.node,
-      npm: definition.runtime.dependencies.npmVersion,
-      python: definition.runtime.dependencies.pythonVersion,
-      arcMetadataSha256: definition.runtime.arcMetadataSha256,
-      arcOfficialPackageAttested: definition.runtime.arcOfficialPackageAttested,
-      gameConcurrency: definition.runtime.gameConcurrency,
-      gameAttempts: definition.runtime.gameAttempts,
-      sessionTopology: definition.runtime.sessionTopology,
-      scorecardBinding: definition.runtime.scorecardBinding,
-      providerStreamTimeoutMs: definition.runtime.providerStreamTimeoutMs,
-      providerStreamMaxRetries: definition.runtime.providerStreamMaxRetries,
-      config: definition.runtime.config,
-    },
-    task: definition.task,
-    modelCapabilityStatus: definition.modelInterface.capabilityStatus,
-    modelInterface: {
-      implementationSha256: definition.modelInterface.implementationSha256,
-      capabilityStatus: definition.modelInterface.capabilityStatus,
-      wireApi: definition.modelInterface.wireApi,
-      reasoningEffort: definition.modelInterface.reasoningEffort,
-      requestedCapabilities: definition.modelInterface.requestedCapabilities,
-      declaredCapabilityManifest: definition.modelInterface.declaredCapabilityManifest,
-      samplingParameters: definition.modelInterface.samplingParameters,
-    },
-  };
-  return deepFreeze({
-    ...published,
-    commitmentSha256: sha256(canonicalJson(published)),
   });
 }
 
@@ -480,6 +440,7 @@ export function verifyRunCapsuleExecution({
   config = null,
   stateBinding = null,
   requireInitialState = false,
+  env = process.env,
   git = inspectGitCheckout(root),
   dependencies = inspectDependencyClosure({ root, python }),
 } = {}) {
@@ -504,6 +465,71 @@ export function verifyRunCapsuleExecution({
     throw new Error('official execution refuses unattested isolated-python runtime identity');
   }
   if (config) verifyEffectiveConfig(config, definition.runtime.config);
+  const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
+  const prompt = effectivePiSystemPrompt(
+    AvoArcAgent.prototype.systemPrompt.call({}),
+    definition.runtime.config.workspaceMode,
+  );
+  const observedHarness = {
+    prompts: {
+      systemSha256: sha256(prompt),
+      developerPresent: false,
+      developerSha256: null,
+      initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
+      continuationSha256: sha256(CONTINUATION_PROMPT),
+    },
+    tools: {
+      schemaSha256: sha256(canonicalJson(toolSchemas)),
+      enabled: toolSchemas.map((tool) => tool.name),
+      executionMode: 'sequential',
+    },
+    transcript: {
+      policySha256: sha256(boundTranscript.toString()),
+      recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
+      maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
+      maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
+    },
+  };
+  if (canonicalJson(observedHarness.prompts) !== canonicalJson(definition.prompts)
+      || canonicalJson(observedHarness.tools) !== canonicalJson(definition.tools)
+      || canonicalJson(observedHarness.transcript) !== canonicalJson(definition.transcript)) {
+    throw new Error('effective prompt, tool, or transcript contract differs from the sealed run capsule');
+  }
+  const providerIdentity = inspectProviderIdentity(definition.runId, config?.provider);
+  const observedModelInterface = {
+    implementationSha256: sha256(createPiSdkLoop.toString()),
+    capabilityStatus: 'declared-unverified',
+    wireApi: 'responses',
+    providerFingerprint: providerIdentity.providerFingerprint,
+    endpointFingerprint: providerIdentity.endpointFingerprint,
+    modelFingerprint: providerIdentity.modelFingerprint,
+    reasoningEffort: String(config?.provider?.reasoningEffort || ''),
+    requestedCapabilities: { streaming: true, toolCalling: true },
+    declaredCapabilityManifest: structuredClone(PI_MODEL_CAPABILITY_MANIFEST),
+    samplingParameters: {
+      temperature: 'omitted-provider-default',
+      topP: 'omitted-provider-default',
+    },
+  };
+  if (canonicalJson(observedModelInterface) !== canonicalJson(definition.modelInterface)) {
+    throw new Error('effective provider or model interface differs from the sealed run capsule');
+  }
+  const observedRuntime = {
+    gameConcurrency: boundedInteger(env.AVO_GAME_CONCURRENCY, 1, 1, 8, 'AVO_GAME_CONCURRENCY'),
+    gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
+    transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
+    providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
+    providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
+    arcAuthMode: String(env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase(),
+  };
+  if (observedRuntime.gameConcurrency !== definition.runtime.gameConcurrency
+      || observedRuntime.gameAttempts !== definition.runtime.gameAttempts
+      || observedRuntime.transientTurnRecoveries !== definition.runtime.transientTurnRecoveries
+      || observedRuntime.providerStreamTimeoutMs !== definition.runtime.providerStreamTimeoutMs
+      || observedRuntime.providerStreamMaxRetries !== definition.runtime.providerStreamMaxRetries
+      || observedRuntime.arcAuthMode !== definition.task.arcAuthMode) {
+    throw new Error('effective execution topology or retry policy differs from the sealed run capsule');
+  }
   if (stateBinding) {
     validateRunState(stateBinding);
     if (requireInitialState) assertRunStateMatchesInitial(stateBinding, definition.initialState);
@@ -515,6 +541,15 @@ export function verifyRunCapsuleExecution({
     nodeDependencySha256: closure.nodeSha256,
     pythonDependencySha256: closure.pythonSha256,
   });
+}
+
+export function verifyRunCapsuleGameSet(capsule, games) {
+  validateRunCapsule(capsule);
+  const observed = normalizeVersionedGames(games);
+  if (canonicalJson(observed) !== canonicalJson(capsule.definition.task.versionedGameIds)) {
+    throw new Error('effective public game set differs from the sealed run capsule');
+  }
+  return true;
 }
 
 export function hashDirectoryTree(directory) {
@@ -615,12 +650,24 @@ export function validateRunState(value) {
 
 function normalizeVersionedGames(games) {
   if (!Array.isArray(games) || games.length === 0) throw new Error('run capsule requires a non-empty game set');
-  const values = games.map((game) => String(game?.versionedGameId || '')).sort();
+  const values = games.map((game) => String(game?.versionedGameId ?? game?.game_id ?? '')).sort();
   if (values.some((value) => !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value))) {
     throw new Error('run capsule game set contains an invalid versioned ID');
   }
   if (new Set(values).size !== values.length) throw new Error('run capsule game set contains duplicate versioned IDs');
   return values;
+}
+
+function inspectProviderIdentity(runId, provider) {
+  const baseUrl = String(provider?.baseUrl || '').replace(/\/$/, '');
+  const model = String(provider?.model || '');
+  if (!baseUrl || !model) throw new Error('effective provider endpoint and model are required by the run capsule');
+  const salt = sha256(String(runId));
+  return {
+    providerFingerprint: fingerprint(`${baseUrl}\0${model}`, salt),
+    endpointFingerprint: fingerprint(baseUrl, salt),
+    modelFingerprint: fingerprint(model, salt),
+  };
 }
 
 function normalizeNpmTree(node) {

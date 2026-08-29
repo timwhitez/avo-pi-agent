@@ -2,12 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
-import { publicRunCapsuleFixture } from './support/run-capsule.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+} from './support/run-capsule.mjs';
 
 function fixture() {
   const roundId = 'strict-round-0';
+  const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
   return {
     roundId,
+    privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
       runId: roundId,
@@ -15,7 +20,9 @@ function fixture() {
       completeness: { complete: true, expectedCount: 2, actualCount: 2, gameIds: ['g1', 'g2'] },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
-      privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+      },
       provenance: {
         runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,

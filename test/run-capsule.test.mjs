@@ -18,10 +18,13 @@ import {
   publicRunCapsule,
   readRunCapsule,
   RUN_CAPSULE_COMPONENT_FILES,
+  verifyRunCapsuleGameSet,
   verifyRunCapsuleExecution,
   writeRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
+import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
+import { fingerprint } from '../src/benchmark/redaction.mjs';
 
 function temporaryRoot(prefix = 'avo-capsule-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -56,31 +59,48 @@ function dependencyClosure() {
   };
 }
 
+function runtimeConfig(overrides = {}) {
+  return {
+    provider: {
+      baseUrl: 'https://provider.invalid/v1',
+      model: 'model-a',
+      reasoningEffort: 'high',
+    },
+    maxActions: 1000,
+    maxOuterTurns: 1000,
+    stallWindow: 8,
+    workspaceMode: 'files-only',
+    workspacePythonTimeoutMs: 10_000,
+    workspaceContainerRuntime: 'docker',
+    workspaceContainerImage: 'python:3.12-slim',
+    ...overrides,
+  };
+}
+
+function providerProvenance(runId, config) {
+  const salt = crypto.createHash('sha256').update(runId).digest('hex');
+  return {
+    providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
+    providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
+    providerModelFingerprint: fingerprint(config.provider.model, salt),
+  };
+}
+
 function capsule(overrides = {}) {
+  const config = runtimeConfig();
   return buildRunCapsule({
     root: process.cwd(),
     runId: 'run-x',
     provenance: {
       wireApi: 'responses',
-      providerFingerprint: '4'.repeat(64),
-      providerEndpointFingerprint: '5'.repeat(64),
-      providerModelFingerprint: '6'.repeat(64),
+      ...providerProvenance('run-x', config),
       reasoningEffort: 'high',
       gitSha: '7'.repeat(40),
       arcAuth: { mode: 'anonymous-auto' },
     },
     arcRuntime: { officialPackageAttested: true, arcAgiVersion: '0.9.9' },
     games: [{ gameId: 'ls20', versionedGameId: 'ls20-00000000' }],
-    config: {
-      provider: { reasoningEffort: 'high' },
-      maxActions: 1000,
-      maxOuterTurns: 1000,
-      stallWindow: 8,
-      workspaceMode: 'files-only',
-      workspacePythonTimeoutMs: 10_000,
-      workspaceContainerRuntime: 'docker',
-      workspaceContainerImage: 'python:3.12-slim',
-    },
+    config,
     initialState: initialState(),
     env: {},
     git: {
@@ -220,7 +240,7 @@ test('dependency inspection records the exact installed Node and Python versions
   assert.equal(dependencies.pythonPackageCount > 1, true);
 });
 
-test('execution verification rejects code changed after the capsule was sealed', () => {
+test('execution verification rejects code and effective runtime drift after sealing', () => {
   const root = temporaryRoot('avo-capsule-execution-');
   for (const relative of RUN_CAPSULE_COMPONENT_FILES) {
     const target = path.join(root, relative);
@@ -232,46 +252,159 @@ test('execution verification rejects code changed after the capsule was sealed',
     root,
     capsule: value,
     python: 'python',
-    config: value.definition.runtime.config,
+    config: runtimeConfig(),
+    env: {},
     git: value.definition.git,
     dependencies: value.definition.runtime.dependencies,
   };
   assert.equal(verifyRunCapsuleExecution(options).capsuleHash, value.capsuleHash);
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      config: runtimeConfig({
+        provider: { ...runtimeConfig().provider, model: 'model-b' },
+      }),
+    }),
+    /provider or model interface differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      config: runtimeConfig({
+        provider: { ...runtimeConfig().provider, reasoningEffort: 'minimal' },
+      }),
+    }),
+    /provider or model interface differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      env: { AVO_TRANSCRIPT_MAX_MESSAGES: '1' },
+    }),
+    /prompt, tool, or transcript contract differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      env: { AVO_GAME_ATTEMPTS: '20', AVO_GAME_CONCURRENCY: '8' },
+    }),
+    /topology or retry policy differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      env: { AVO_PROVIDER_STREAM_MAX_RETRIES: '9' },
+    }),
+    /topology or retry policy differs/,
+  );
+  assert.equal(
+    verifyRunCapsuleGameSet(value, [{ game_id: 'ls20-00000000' }]),
+    true,
+  );
+  assert.throws(
+    () => verifyRunCapsuleGameSet(value, [{ game_id: 'ls20-different' }]),
+    /game set differs/,
+  );
   fs.appendFileSync(path.join(root, 'src/cli.mjs'), '\n// changed after seal\n');
   assert.throws(() => verifyRunCapsuleExecution(options), /execution components differ/);
 });
 
 test('capsules round-trip, reject tampering, and publish only non-secret authority fields', () => {
   const root = temporaryRoot();
-  const file = path.join(root, 'run-capsule.json');
+  const privateDir = path.join(root, 'runs', 'private', 'run-x');
+  fs.mkdirSync(privateDir, { recursive: true });
+  const file = path.join(privateDir, 'run-capsule.json');
   const value = capsule();
-  writeRunCapsule(file, value, { root });
-  assert.equal(readRunCapsule(file, { root }).capsuleHash, value.capsuleHash);
+  writeRunCapsule(file, value, { root: privateDir });
+  assert.equal(readRunCapsule(file, { root: privateDir }).capsuleHash, value.capsuleHash);
+  const report = {
+    runId: 'run-x',
+    privateArtifactHashes: {
+      runCapsule: {
+        file: 'run-capsule.json',
+        sha256: publicRunCapsule(value).capsuleEvidenceSha256,
+      },
+    },
+  };
+  const privateCapsuleEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report });
   const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
   assert.equal(published.capsuleHash, value.capsuleHash);
   assert.equal(published.comparable, true);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
-  assert.equal(evaluatePublicRunCapsule(published).accepted, true);
+  assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
   const changedComponent = structuredClone(published);
   changedComponent.components['src/cli.mjs'] = 'f'.repeat(64);
-  assert.equal(evaluatePublicRunCapsule(changedComponent).accepted, false);
-  const migrated = publicRunCapsule(value, { runClass: 'diagnostic-migrated', comparable: false });
-  assert.equal(evaluatePublicRunCapsule(migrated).accepted, false);
+  assert.equal(evaluatePublicRunCapsule(changedComponent, { privateCapsuleEvidence }).accepted, false);
+  const migratedValue = capsule({
+    initialState: initialState({ migrationSourceCapsuleHash: 'a'.repeat(64) }),
+  });
+  const migratedName = `run-capsule.${migratedValue.capsuleHash}.json`;
+  writeRunCapsule(path.join(privateDir, migratedName), migratedValue, { root: privateDir });
+  const migrated = publicRunCapsule(
+    migratedValue,
+    { runClass: 'diagnostic-migrated', comparable: false },
+  );
+  const migratedEvidence = readPrivateRunCapsuleEvidence({
+    repositoryRoot: root,
+    report: {
+      runId: 'run-x',
+      privateArtifactHashes: {
+        runCapsule: { file: migratedName, sha256: migrated.capsuleEvidenceSha256 },
+      },
+    },
+  });
+  assert.equal(evaluatePublicRunCapsule(migrated, {
+    privateCapsuleEvidence: migratedEvidence,
+  }).accepted, false);
   const relabeled = structuredClone(migrated);
-  relabeled.runClass = 'cold-start';
+  relabeled.runClass = 'recovered';
   relabeled.comparable = true;
-  assert.equal(evaluatePublicRunCapsule(relabeled).accepted, false);
+  delete relabeled.commitmentSha256;
+  relabeled.commitmentSha256 = crypto.createHash('sha256')
+    .update(canonicalJson(relabeled))
+    .digest('hex');
+  const relabeledAuthority = evaluatePublicRunCapsule(relabeled, {
+    privateCapsuleEvidence: migratedEvidence,
+  });
+  assert.equal(relabeledAuthority.accepted, false);
+  assert.ok(relabeledAuthority.reasons.some((reason) => /lineage class/.test(reason)));
+
+  assert.equal(evaluatePublicRunCapsule(published).accepted, false);
+  assert.throws(
+    () => readPrivateRunCapsuleEvidence({
+      repositoryRoot: root,
+      report: {
+        ...report,
+        privateArtifactHashes: {
+          runCapsule: { file: 'run-capsule.json', sha256: 'f'.repeat(64) },
+        },
+      },
+    }),
+    /digest differs/,
+  );
+  assert.throws(
+    () => readPrivateRunCapsuleEvidence({
+      repositoryRoot: root,
+      report: {
+        ...report,
+        privateArtifactHashes: {
+          runCapsule: { file: '../run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+        },
+      },
+    }),
+    /name is missing or malformed/,
+  );
 
   const tampered = JSON.parse(fs.readFileSync(file, 'utf8'));
   tampered.definition.runtime.config.maxActions = 999;
   fs.writeFileSync(file, `${JSON.stringify(tampered)}\n`);
-  assert.throws(() => readRunCapsule(file, { root }), /hash does not match/);
+  assert.throws(() => readRunCapsule(file, { root: privateDir }), /hash does not match/);
 });
 
 test('official capsules reject isolated Python until runtime and image identity are attested', () => {
   const baseline = capsule();
   assert.throws(() => capsule({
-    config: { ...baseline.definition.runtime.config, workspaceMode: 'isolated-python' },
+    config: runtimeConfig({ workspaceMode: 'isolated-python' }),
   }), /refuses isolated-python/);
 });
 
