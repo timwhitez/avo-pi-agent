@@ -33,7 +33,7 @@ export function resolveResumeDirectory(candidate, { root = process.cwd() } = {})
 export function loadResumedRecords(resumeDir) {
   if (!resumeDir) return new Map();
   const entries = fs.readdirSync(resumeDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && entry.name !== 'scorecard.json')
     .slice(0, MAX_RECORDS);
   const records = new Map();
   for (const entry of entries) {
