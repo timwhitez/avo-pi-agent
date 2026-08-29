@@ -120,30 +120,6 @@ export function validateCompleteGameSet(expectedGames, records) {
   };
 }
 
-export function extractOfficialScore(report) {
-  const candidates = [
-    ['officialScore', report?.officialScore],
-    ['aggregateScorecard.score', report?.aggregateScorecard?.score],
-    ['scorecard.score', report?.scorecard?.score],
-    ['summary.scorecard.score', report?.summary?.scorecard?.score],
-  ];
-  for (const [origin, value] of candidates) {
-    if (typeof value === 'number' && Number.isFinite(value)) return { value, origin };
-  }
-  const discovered = [];
-  visitWithPath(report, '$', (value, currentPath) => {
-    if (!/scorecard/i.test(currentPath) || !/\.score$/i.test(currentPath)) return;
-    if (typeof value === 'number' && Number.isFinite(value)) discovered.push({ value, origin: currentPath });
-  });
-  if (discovered.length === 1) return discovered[0];
-  if (discovered.length > 1) {
-    const unique = new Set(discovered.map((item) => item.value));
-    if (unique.size === 1) return discovered[0];
-    throw new Error(`ambiguous scorecard values: ${JSON.stringify(discovered)}`);
-  }
-  throw new Error('official scorecard value is absent; refusing to invent or relabel a local metric');
-}
-
 export function aggregateGameMetrics(records) {
   return {
     games: records.length,
@@ -203,10 +179,27 @@ function normalizeExecutions(value, versionedGameId, sourcePath) {
     if (!/^[a-f0-9]{64}$/.test(executionIdSha256)) {
       invalidRecord(sourcePath, `execution ${index} hash is malformed`);
     }
-    return Object.freeze({ versionedGameId, executionIdSha256 });
+    const executionOccurrence = optionalCount(
+      item.executionOccurrence,
+      `execution ${index} occurrence`,
+      sourcePath,
+    );
+    return Object.freeze({ versionedGameId, executionIdSha256, executionOccurrence });
   });
-  if (new Set(executions.map((item) => item.executionIdSha256)).size !== executions.length) {
-    invalidRecord(sourcePath, 'execution hashes contain duplicates');
+  const refs = executions.map((item) => `${item.executionIdSha256}\0${item.executionOccurrence}`);
+  if (new Set(refs).size !== executions.length) {
+    invalidRecord(sourcePath, 'execution references contain duplicates');
+  }
+  const next = new Map();
+  for (const execution of executions.toSorted((left, right) => (
+    left.executionIdSha256.localeCompare(right.executionIdSha256)
+      || left.executionOccurrence - right.executionOccurrence
+  ))) {
+    const expected = next.get(execution.executionIdSha256) ?? 0;
+    if (execution.executionOccurrence !== expected) {
+      invalidRecord(sourcePath, 'execution occurrences are not contiguous');
+    }
+    next.set(execution.executionIdSha256, expected + 1);
   }
   return Object.freeze(executions);
 }

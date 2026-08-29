@@ -14,6 +14,7 @@ import {
   buildRepairPlan,
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
+import { extractPublishedOfficialScore } from '../src/benchmark/scorecard-evidence.mjs';
 
 const options = parseOptions(process.argv.slice(2));
 const chainId = safeId(options.chainId || process.env.AVO_REPAIR_CHAIN_ID || `chain-${Date.now().toString(36)}`);
@@ -226,16 +227,7 @@ function extractExpectedGames(report) {
 }
 
 function extractOfficialScore(report) {
-  if (!report) return { value: null, origin: 'unavailable' };
-  const candidates = [
-    ['officialScore.value', report.officialScore?.value],
-    ['officialScore', typeof report.officialScore === 'number' ? report.officialScore : null],
-    ['scorecard.score', report.scorecard?.score],
-    ['summary.officialScore', report.summary?.officialScore],
-    ['score.value', report.score?.value],
-  ];
-  for (const [origin, value] of candidates) if (Number.isFinite(Number(value))) return { value: Number(value), origin };
-  return { value: null, origin: report.scoreOrigin || 'unavailable' };
+  return extractPublishedOfficialScore(report);
 }
 
 function extractMetrics(report, analysis) {

@@ -24,16 +24,23 @@ from enum import Enum
 from typing import Any
 
 _ANONYMOUS_KEY_LOG = re.compile(r"(Got anonymous API key:\s*).+", re.IGNORECASE)
+_ARC_IDENTIFIER_LOG = re.compile(
+    r"(\b(?:guid|scorecard(?:_id)?|card_id)\b[\"']?\s*[:=]\s*[\"']?)([^\"',\s}]+)",
+    re.IGNORECASE,
+)
 _SUPPORTED_AUTH_MODES = {"anonymous-auto", "registered"}
 
 
 class _RedactArcSecrets(logging.Filter):
-    """Remove server-issued ARC credentials from official SDK log records."""
+    """Remove server-issued ARC credentials and run IDs from SDK log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         if _ANONYMOUS_KEY_LOG.search(message):
-            record.msg = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", message)
+            message = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", message)
+        message = _ARC_IDENTIFIER_LOG.sub(r"\1<redacted>", message)
+        if message != record.getMessage():
+            record.msg = message
             record.args = ()
         return True
 

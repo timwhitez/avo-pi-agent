@@ -11,6 +11,28 @@ test('python ARC bridge is syntactically valid', () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('bridge diagnostics redact raw scorecard and execution identities', () => {
+  const source = String.raw`
+import importlib.util, logging
+spec = importlib.util.spec_from_file_location("avo_arc_bridge", "bridge/arc_bridge.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+redactor = module._RedactArcSecrets()
+for message in [
+    "Created new scorecard: card-private-123",
+    "Successfully reset game g1, guid=run-private-456, scorecard_id=card-private-123",
+    'response {"card_id":"card-private-123","guid":"run-private-456"}',
+]:
+    record = logging.LogRecord("arc_agi", logging.INFO, "", 0, message, (), None)
+    redactor.filter(record)
+    print(record.getMessage())
+`;
+  const result = spawnSync('python', ['-c', source], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /card-private|run-private/);
+  assert.equal((result.stdout.match(/<redacted>/g) || []).length, 5);
+});
+
 test('bridge client reuses one process and ignores bounded SDK stdout diagnostics', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-bridge-'));
   const bridgeDir = path.join(root, 'bridge');

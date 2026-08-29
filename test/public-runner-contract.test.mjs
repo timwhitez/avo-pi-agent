@@ -99,6 +99,9 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         }
         await call('memory_read');
         let frame = (await call('observe')).details.frame;
+        if (frame.gameId === 'g01-v1') {
+          frame = (await call('act', { action: 'RESET', reasoning: 'exercise full-reset identity' })).details.frame;
+        }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
           const player = find(frame.frame, 1);
@@ -201,7 +204,7 @@ class Frame:
         self.levels_completed = env.level
         self.win_levels = env.win_levels
         self.guid = env.guid
-        self.full_reset = False
+        self.full_reset = env.full_reset
         self.available_actions = [
             GameAction.RESET, GameAction.ACTION1, GameAction.ACTION2,
             GameAction.ACTION3, GameAction.ACTION4,
@@ -219,6 +222,8 @@ class Env:
         self.win_levels = 2
         self.level = 0
         self.steps = 0
+        self.run_steps = [0]
+        self.full_reset = False
         self.reset_level()
 
     def reset_level(self):
@@ -237,10 +242,15 @@ class Env:
         return Frame(self)
 
     def step(self, action, data=None, reasoning=None):
-        self.steps += 1
         if action is GameAction.RESET:
+            self.full_reset = self.steps == 0
+            if self.full_reset:
+                self.run_steps.append(0)
             self.reset_level()
             return Frame(self)
+        self.full_reset = False
+        self.steps += 1
+        self.run_steps[-1] += 1
         directions = {
             GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
             GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0),
@@ -261,6 +271,8 @@ class Arcade:
         self.environments = []
         self.make_calls = 0
         self.arc_api_key = "mock-test-key"
+        if logger:
+            logger.info("Created new scorecard: raw-card-private-123")
 
     def get_environments(self):
         return [Info(f"g{i:02d}-v1") for i in range(1, 26)]
@@ -279,19 +291,19 @@ class Arcade:
             "card_id": "contract-scorecard",
             "score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
             "total_environments": len(self.environments),
-            "total_actions": sum(env.steps for env in self.environments),
+            "total_actions": sum(sum(env.run_steps) for env in self.environments),
             "environments": [{
                 "id": env.game_id,
                 "runs": [{
                     "id": env.game_id,
                     "guid": env.guid,
-                    "score": 100.0 if env.state == "WIN" else 0.0,
-                    "levels_completed": env.level,
-                    "actions": env.steps,
+                    "score": 100.0 if index == len(env.run_steps) - 1 and env.state == "WIN" else 0.0,
+                    "levels_completed": env.level if index == len(env.run_steps) - 1 else 0,
+                    "actions": actions,
                     "resets": 0,
-                    "state": env.state,
-                    "completed": env.state == "WIN",
-                }],
+                    "state": env.state if index == len(env.run_steps) - 1 else "PLAYING",
+                    "completed": index == len(env.run_steps) - 1 and env.state == "WIN",
+                } for index, actions in enumerate(env.run_steps)],
             } for env in self.environments],
         })
   `);
@@ -444,6 +456,7 @@ process.exit(result.status ?? 1);
     env: childEnv,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stderr, /raw-card-private-123/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
   assert.match(result.stdout, /"wins": 25/);
@@ -456,12 +469,13 @@ process.exit(result.status ?? 1);
   assert.equal(report.scorecardCoverage.exact, true);
   assert.equal(report.scorecardEvidence.length, 1);
   assert.equal(report.scorecardEvidence[0].gameCount, 25);
-  assert.equal(report.scorecardEvidence[0].executionCount, 25);
+  assert.equal(report.scorecardEvidence[0].executionCount, 26);
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
   assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
   assert.equal(report.aggregateScorecard.score, 100);
   assert.equal(report.summary.allWon, true);
   assert.equal(report.results[0].versionedGameId, 'g01-v1');
+  assert.deepEqual(report.results[0].executions.map((item) => item.executionOccurrence), [0, 1]);
   assert.match(report.results[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
   assert.equal(report.runCapsuleHash, capsule.capsuleHash);
   assert.equal(report.runClass, 'cold-start');
@@ -567,6 +581,7 @@ process.exit(result.status ?? 1);
     report: publishedReport,
   });
   assert.equal(publishedReport.status, 'complete');
+  assert.doesNotMatch(JSON.stringify(publishedReport), /raw-card-private-123/);
   assert.equal(publishedReport.completeness.actualCount, 25);
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
   assert.deepEqual(
@@ -608,5 +623,6 @@ process.exit(result.status ?? 1);
   ));
   assert.equal(rejectedReport.status, 'failed');
   assert.equal(rejectedReport.failedStage, 'artifact-discovery');
+  assert.doesNotMatch(JSON.stringify(rejectedReport), /raw-card-private-123/);
   fs.writeFileSync(configFileAfterSuccess, cleanConfig);
 });

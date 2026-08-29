@@ -210,9 +210,7 @@ function recordOrEmpty(value) {
 }
 
 function isOfficialScoreOrigin(value) {
-  const origin = String(value || '');
-  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin)
-    || ['aggregateScorecard.score', 'scorecardEvidence.score'].includes(origin);
+  return value === 'scorecardEvidence.score';
 }
 
 function isSha256(value) {

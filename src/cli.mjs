@@ -230,6 +230,7 @@ async function runPublic(args) {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
         const executions = [];
+        const executionOccurrences = new Map();
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
@@ -240,11 +241,16 @@ async function runPublic(args) {
             captureScorecard: false,
           }), gameConfig);
           const agentResult = await agent.run();
-          const executionIdSha256 = hashExecutionId(agent.frame?.guid, `${versionedGameId} execution GUID`);
-          if (executions.some((execution) => execution.executionIdSha256 === executionIdSha256)) {
-            throw new Error(`${versionedGameId} reused an execution GUID across attempts`);
+          const executionGuids = agent.scorecardExecutionGuids();
+          if (executionGuids.length === 0) {
+            throw new Error(`${versionedGameId} produced no scorecard execution identity`);
           }
-          executions.push({ versionedGameId, executionIdSha256 });
+          for (const guid of executionGuids) {
+            const executionIdSha256 = hashExecutionId(guid, `${versionedGameId} execution GUID`);
+            const executionOccurrence = executionOccurrences.get(executionIdSha256) ?? 0;
+            executionOccurrences.set(executionIdSha256, executionOccurrence + 1);
+            executions.push({ versionedGameId, executionIdSha256, executionOccurrence });
+          }
           result = {
             ...agentResult,
             versionedGameId,

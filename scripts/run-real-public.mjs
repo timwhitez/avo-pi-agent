@@ -19,6 +19,7 @@ import {
   copyRegularFileExclusive,
   findNewJsonReports,
   hashFile,
+  normalizeGameRecord,
   selectRunReport,
   snapshotJsonFiles,
   validateCompleteGameSet,
@@ -396,26 +397,7 @@ function benchmarkTimeout() {
 }
 
 function normalizeCheckpointRecord(value) {
-  const versionedGameId = String(
-    value?.versionedGameId || value?.versioned_game_id || value?.gameId || value?.game_id || '',
-  );
-  return {
-    gameId: versionedGameId.split('-')[0],
-    versionedGameId,
-    state: String(value?.state || '').toUpperCase(),
-    levelsCompleted: Number(value?.levelsCompleted ?? value?.levels_completed ?? 0),
-    winLevels: Number(value?.winLevels ?? value?.win_levels ?? 0),
-    actions: Number(value?.actions ?? value?.actionCount ?? value?.action_count ?? 0),
-    won: value?.won === true,
-    error: value?.error || null,
-    loop: value?.loop || null,
-    executions: Array.isArray(value?.executions)
-      ? value.executions.map((execution) => ({
-        versionedGameId: execution?.versionedGameId || null,
-        executionIdSha256: execution?.executionIdSha256 || null,
-      }))
-      : [],
-  };
+  return normalizeGameRecord(value, 'checkpoint comparison');
 }
 
 function safeRunId(value) {

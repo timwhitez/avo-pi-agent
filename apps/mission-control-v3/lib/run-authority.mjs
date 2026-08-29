@@ -147,9 +147,7 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
 }
 
 export function isOfficialScoreOrigin(value) {
-  const origin = String(value || '');
-  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin)
-    || ['aggregateScorecard.score', 'scorecardEvidence.score'].includes(origin);
+  return value === 'scorecardEvidence.score';
 }
 
 function requireCondition(condition, reason, reasons) {

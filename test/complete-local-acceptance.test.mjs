@@ -19,7 +19,7 @@ function validRepair() {
       openFindingCount: 0,
       officialScore: {
         value: 0.75,
-        origin: 'aggregateScorecard.score',
+        origin: 'scorecardEvidence.score',
       },
     },
   };
@@ -72,6 +72,9 @@ test('non-official score origin and non-authoritative/dirty reports fail closed'
   const local = validRepair();
   local.final.officialScore.origin = 'localHeuristic.score';
   assert.equal(evaluateCompleteLocalAcceptance(local).accepted, false);
+  const legacy = validRepair();
+  legacy.final.officialScore.origin = 'aggregateScorecard.score';
+  assert.equal(evaluateCompleteLocalAcceptance(legacy).accepted, false);
 
   const nonAuthoritative = validRepair();
   nonAuthoritative.final.authoritative = false;

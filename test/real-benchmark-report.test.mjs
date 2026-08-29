@@ -7,7 +7,6 @@ import path from 'node:path';
 import {
   aggregateGameMetrics,
   extractGameRecords,
-  extractOfficialScore,
   selectRunReport,
   validateCompleteGameSet,
   validateProductionLoops,
@@ -106,22 +105,4 @@ test('report selection requires exactly one matching run ID and kind', () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test('score extraction accepts explicit scorecard origin and rejects local lookalikes', () => {
-  assert.deepEqual(extractOfficialScore(report), {
-    value: 0.625,
-    origin: 'aggregateScorecard.score',
-  });
-  assert.throws(
-    () => extractOfficialScore({ objective: { score: 99 }, localScore: 1 }),
-    /official scorecard value is absent/,
-  );
-  assert.throws(
-    () => extractOfficialScore({
-      first: { scorecard: { score: 0.1 } },
-      second: { scorecard: { score: 0.2 } },
-    }),
-    /ambiguous scorecard values/,
-  );
 });

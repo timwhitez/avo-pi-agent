@@ -57,6 +57,7 @@ export class AvoArcAgent {
     this.lastResult = null;
     this.evidenceLedger = [];
     this.evidenceSequence = 0;
+    this.executionGuids = [];
   }
 
   async initialize() {
@@ -64,6 +65,7 @@ export class AvoArcAgent {
       ? await this.environment.start()
       : await this.environment.observe();
     this.frame = normalizeFrame(raw);
+    this.executionGuids.push(this.frame.guid);
     this.uniqueStates.add(frameHash(this.frame));
     this.recordEvidence({ type: 'initial-observation', frame: this.frame });
   }
@@ -306,6 +308,7 @@ export class AvoArcAgent {
       ? await this.environment.reset({ text: reasoning })
       : await this.environment.step(action, data, { text: reasoning });
     this.frame = normalizeFrame(raw);
+    if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
     const afterHash = frameHash(this.frame);
     const wasNew = !this.uniqueStates.has(afterHash);
@@ -354,6 +357,10 @@ export class AvoArcAgent {
       },
       isWin(this.frame),
     );
+  }
+
+  scorecardExecutionGuids() {
+    return this.executionGuids.slice();
   }
 
   proposeCandidate(input) {

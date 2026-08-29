@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { normalizeGameId, normalizeVersionedGameId } from './report-records.mjs';
 
-export const SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v1';
+export const SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v2';
 
 export function hashExecutionId(value, name = 'execution ID') {
   if (typeof value !== 'string') throw new Error(`${name} is absent or malformed`);
@@ -23,13 +23,20 @@ export function normalizeScorecardSnapshot(snapshot) {
     const versionedGameId = normalizeVersionedGameId(value.id, `scorecard environment ${gameIndex}`);
     const runs = requireArray(value.runs, `scorecard environment ${versionedGameId} runs`);
     if (runs.length === 0) throw new Error(`scorecard environment ${versionedGameId} has no executions`);
+    const occurrences = new Map();
     return {
       versionedGameId,
-      executions: runs.map((run, runIndex) => normalizeRawExecution(
-        run,
-        versionedGameId,
-        `scorecard environment ${versionedGameId} run ${runIndex}`,
-      )),
+      executions: runs.map((run, runIndex) => {
+        const name = `scorecard environment ${versionedGameId} run ${runIndex}`;
+        const value = requireRecord(run, name);
+        const executionIdSha256 = hashExecutionId(value.guid, `${name} guid`);
+        const executionOccurrence = occurrences.get(executionIdSha256) ?? 0;
+        occurrences.set(executionIdSha256, executionOccurrence + 1);
+        return normalizeRawExecution(value, versionedGameId, name, {
+          executionIdSha256,
+          executionOccurrence,
+        });
+      }),
     };
   });
   const totalActions = games.reduce(
@@ -72,16 +79,18 @@ export function validateScorecardEvidence(value) {
         execution,
         `scorecard evidence ${versionedGameId} execution ${runIndex}`,
       ))
-      .sort((left, right) => left.executionIdSha256.localeCompare(right.executionIdSha256));
+      .sort((left, right) => left.executionIdSha256.localeCompare(right.executionIdSha256)
+        || left.executionOccurrence - right.executionOccurrence);
     if (executions.length === 0) throw new Error(`scorecard evidence ${versionedGameId} has no executions`);
+    validateExecutionOccurrences(executions, `scorecard evidence ${versionedGameId}`);
     return { versionedGameId, executions };
   }).sort((left, right) => left.versionedGameId.localeCompare(right.versionedGameId));
   if (new Set(games.map((game) => game.versionedGameId)).size !== games.length) {
     throw new Error('scorecard evidence contains duplicate versioned game IDs');
   }
   const refs = flattenEvidenceRefs(games);
-  if (new Set(refs.map((ref) => ref.executionIdSha256)).size !== refs.length) {
-    throw new Error('scorecard evidence contains duplicate execution IDs');
+  if (new Set(refs.map(refKey)).size !== refs.length) {
+    throw new Error('scorecard evidence contains duplicate execution references');
   }
   const totalActions = games.reduce(
     (sum, game) => sum + game.executions.reduce((gameSum, run) => gameSum + run.actions, 0),
@@ -93,6 +102,7 @@ export function validateScorecardEvidence(value) {
   const coverageSetSha256 = sha256(canonicalJson(refs.map((ref) => ({
     versionedGameId: ref.versionedGameId,
     executionIdSha256: ref.executionIdSha256,
+    executionOccurrence: ref.executionOccurrence,
   }))));
   if (evidence.coverageSetSha256 !== undefined
       && evidence.coverageSetSha256 !== coverageSetSha256) {
@@ -177,13 +187,34 @@ export function evaluateScorecardCoverage(values, records) {
   }
 }
 
-function normalizeRawExecution(value, versionedGameId, name) {
-  const run = requireRecord(value, name);
+export function extractPublishedOfficialScore(report, records = report?.games) {
+  const authority = evaluateScorecardCoverage(report?.scorecardEvidence, records);
+  const published = report?.officialScore;
+  if (report?.scoreStatus === 'official'
+      && authority.scoreStatus === 'official'
+      && typeof published?.value === 'number'
+      && Number.isFinite(published.value)
+      && published.value === authority.officialScore.value
+      && published.origin === authority.officialScore.origin) {
+    return authority.officialScore;
+  }
+  return Object.freeze({
+    value: null,
+    origin: 'unavailable',
+    reason: authority.rejectionReason || 'published official score differs from exact scorecard evidence',
+  });
+}
+
+function normalizeRawExecution(run, versionedGameId, name, {
+  executionIdSha256,
+  executionOccurrence,
+}) {
   if (run.id !== undefined && normalizeVersionedGameId(run.id, `${name} id`) !== versionedGameId) {
     throw new Error(`${name} id differs from its environment`);
   }
   return {
-    executionIdSha256: hashExecutionId(run.guid, `${name} guid`),
+    executionIdSha256,
+    executionOccurrence,
     score: strictFinite(run.score, `${name} score`),
     levelsCompleted: strictCount(run.levels_completed, `${name} levels_completed`),
     actions: strictCount(run.actions, `${name} actions`),
@@ -197,6 +228,7 @@ function normalizePublishedExecution(value, name) {
   const run = requireRecord(value, name);
   return {
     executionIdSha256: requireSha256(run.executionIdSha256, `${name} hash`),
+    executionOccurrence: strictCount(run.executionOccurrence ?? 0, `${name} occurrence`),
     score: strictFinite(run.score, `${name} score`),
     levelsCompleted: strictCount(run.levelsCompleted, `${name} levelsCompleted`),
     actions: strictCount(run.actions, `${name} actions`),
@@ -223,6 +255,10 @@ function normalizeRecordRefs(records) {
       return {
         versionedGameId,
         executionIdSha256: requireSha256(item.executionIdSha256, 'published execution hash'),
+        executionOccurrence: strictCount(
+          item.executionOccurrence ?? 0,
+          'published execution occurrence',
+        ),
       };
     });
   });
@@ -232,11 +268,23 @@ function flattenEvidenceRefs(games) {
   return games.flatMap((game) => game.executions.map((execution) => ({
     versionedGameId: game.versionedGameId,
     executionIdSha256: execution.executionIdSha256,
+    executionOccurrence: execution.executionOccurrence,
   }))).sort((left, right) => refKey(left).localeCompare(refKey(right)));
 }
 
 function refKey(value) {
-  return `${value.versionedGameId}\0${value.executionIdSha256}`;
+  return `${value.versionedGameId}\0${value.executionIdSha256}\0${value.executionOccurrence}`;
+}
+
+function validateExecutionOccurrences(executions, name) {
+  const next = new Map();
+  for (const execution of executions) {
+    const expected = next.get(execution.executionIdSha256) ?? 0;
+    if (execution.executionOccurrence !== expected) {
+      throw new Error(`${name} execution occurrences are not contiguous`);
+    }
+    next.set(execution.executionIdSha256, expected + 1);
+  }
 }
 
 function strictCount(value, name) {

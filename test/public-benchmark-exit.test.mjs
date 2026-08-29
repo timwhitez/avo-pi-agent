@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-import { extractOfficialScore, validateCompleteGameSet } from '../src/benchmark/report.mjs';
+import { validateCompleteGameSet } from '../src/benchmark/report.mjs';
 
 test('complete public coverage remains valid when some games are not won', () => {
   const expected = Array.from({ length: 25 }, (_, index) => ({
@@ -22,9 +22,6 @@ test('complete public coverage remains valid when some games are not won', () =>
   assert.equal(completeness.complete, true);
   assert.equal(completeness.expectedCount, 25);
   assert.equal(completeness.actualCount, 25);
-
-  const officialScore = extractOfficialScore({ aggregateScorecard: { score: 42.125 } });
-  assert.equal(officialScore.value, 42.125);
 });
 
 test('public CLI does not convert a legitimate non-perfect score into process failure', () => {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   evaluateScorecardCoverage,
+  extractPublishedOfficialScore,
   hashExecutionId,
   normalizeScorecardSnapshot,
 } from '../src/benchmark/scorecard-evidence.mjs';
@@ -42,6 +43,7 @@ function records(ids = ['g1-v1', 'g2-v1'], cardId = 'card-a') {
     executions: [{
       versionedGameId,
       executionIdSha256: hashExecutionId(`${cardId}-run-${index}`),
+      executionOccurrence: 0,
     }],
   }));
 }
@@ -57,6 +59,52 @@ test('normalizes native scorecard identity without retaining raw card or run IDs
   assert.equal(result.scoreStatus, 'official');
   assert.deepEqual(result.officialScore, { value: 0.5, origin: 'scorecardEvidence.score' });
   assert.equal(result.coverage.exact, true);
+});
+
+test('binds SDK-reused GUIDs by their per-game occurrence', () => {
+  const repeated = snapshot(['g1-v1']);
+  repeated.scorecard.environments[0].runs.push(structuredClone(
+    repeated.scorecard.environments[0].runs[0],
+  ));
+  repeated.scorecard.total_actions += 3;
+  const evidence = normalizeScorecardSnapshot(repeated);
+  assert.deepEqual(
+    evidence.games[0].executions.map((run) => run.executionOccurrence),
+    [0, 1],
+  );
+  const expected = records(['g1-v1']);
+  expected[0].executions.push({
+    versionedGameId: 'g1-v1',
+    executionIdSha256: expected[0].executions[0].executionIdSha256,
+    executionOccurrence: 1,
+  });
+  assert.equal(evaluateScorecardCoverage([evidence], expected).scoreStatus, 'official');
+
+  const skipped = structuredClone(evidence);
+  skipped.games[0].executions[1].executionOccurrence = 2;
+  assert.match(
+    evaluateScorecardCoverage([skipped], expected).rejectionReason,
+    /occurrences are not contiguous/,
+  );
+});
+
+test('published score extraction requires exact shared authority without coercion', () => {
+  const scorecardEvidence = [normalizeScorecardSnapshot(snapshot())];
+  const games = records();
+  const report = {
+    scoreStatus: 'official',
+    scorecardEvidence,
+    games,
+    officialScore: { value: 0.5, origin: 'scorecardEvidence.score' },
+  };
+  assert.deepEqual(extractPublishedOfficialScore(report), report.officialScore);
+  for (const value of [null, false, '', '0.5']) {
+    assert.equal(extractPublishedOfficialScore({
+      ...report,
+      officialScore: { ...report.officialScore, value },
+    }).value, null);
+  }
+  assert.equal(extractPublishedOfficialScore({ ...report, scoreStatus: 'rejected' }).value, null);
 });
 
 test('rejects subset, superset, version drift and duplicate scorecard coverage', () => {

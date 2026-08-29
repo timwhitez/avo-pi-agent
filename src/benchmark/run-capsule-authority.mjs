@@ -144,7 +144,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(runtime.arcOfficialPackageAttested === true && isSha256(runtime.arcMetadataSha256), 'run capsule ARC runtime attestation is malformed', reasons);
   requireCondition(isPositiveInteger(runtime.gameConcurrency) && isPositiveInteger(runtime.gameAttempts) && isPositiveInteger(runtime.transientTurnRecoveries), 'run capsule session topology counts are malformed', reasons);
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
-  requireCondition(runtime.scorecardBinding === 'exact-session-execution-v4', 'run capsule scorecard binding is unknown', reasons);
+  requireCondition(runtime.scorecardBinding === 'exact-session-execution-v5', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);
   requireCondition(runtime.config?.workspaceMode !== 'isolated-python', 'run capsule isolated-Python runtime identity is unattested', reasons);
   const task = recordOrEmpty(capsule.task);

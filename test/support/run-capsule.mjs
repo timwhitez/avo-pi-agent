@@ -49,6 +49,7 @@ export function scorecardCoverageFixture({
       executions: [{
         versionedGameId,
         executionIdSha256: gameEvidence.executions[0].executionIdSha256,
+        executionOccurrence: gameEvidence.executions[0].executionOccurrence,
       }],
     };
   });
@@ -187,7 +188,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       gameAttempts: 3,
       transientTurnRecoveries: 5,
       sessionTopology: 'one-arcade-session-per-process-pass',
-      scorecardBinding: 'exact-session-execution-v4',
+      scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: 1_200_000,
       providerStreamMaxRetries: 4,
       config: {
