@@ -33,7 +33,7 @@ export function resolveResumeDirectory(candidate, { root = process.cwd() } = {})
 export function loadResumedRecords(resumeDir) {
   if (!resumeDir) return new Map();
   const entries = fs.readdirSync(resumeDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && entry.name !== 'scorecard.json')
     .slice(0, MAX_RECORDS);
   const records = new Map();
   for (const entry of entries) {
@@ -67,4 +67,35 @@ export function saveResumedRecord(resumeDir, gameId, result) {
   const file = path.join(resumeDir, `${safeId}.json`);
   writeJsonAtomic(file, result, { root: resumeDir, exclusive: true });
   return file;
+}
+
+/**
+ * Persist the Arcade session scorecard of a resume pass. A later pass that
+ * replays zero games must not publish an empty fresh-session scorecard as
+ * the run's official score; the latest saved one is the real evidence.
+ */
+export function saveSessionScorecard(resumeDir, { replayedGames, scorecard }) {
+  if (!resumeDir) return null;
+  const file = path.join(resumeDir, 'scorecard.json');
+  fs.writeFileSync(file, `${JSON.stringify({
+    savedAt: new Date().toISOString(),
+    replayedGames: Number(replayedGames) || 0,
+    scorecard: scorecard ?? null,
+  }, null, 2)}\n`, { mode: 0o600 });
+  return file;
+}
+
+export function loadLatestSessionScorecard(resumeDir) {
+  if (!resumeDir) return null;
+  const file = path.join(resumeDir, 'scorecard.json');
+  if (!fs.existsSync(file)) return null;
+  const stat = fs.lstatSync(file);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_RECORD_BYTES) {
+    throw new Error('resume scorecard checkpoint is not a bounded regular file');
+  }
+  const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (typeof value?.savedAt !== 'string' || !Number.isInteger(value?.replayedGames)) {
+    throw new Error('resume scorecard checkpoint is malformed');
+  }
+  return value;
 }

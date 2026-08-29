@@ -171,9 +171,14 @@ docs/RUNBOOK.md              full public-demo procedure
 
 ## Validation status
 
-See [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md). The committed
-record explicitly separates completed offline checks from the official public
-run, and never treats synthetic results as an ARC score.
+A complete real-provider public-set benchmark is recorded as accepted
+evidence (2026-08-29): **official ARC scorecard score 0.0011**, 25/25
+public games on the production Pi loop, 0 wins, 21,128 actions at
+reasoning effort `high`. See
+[`docs/results/real-public-20260828-high2.json`](docs/results/real-public-20260828-high2.json)
+and [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md). The
+committed record explicitly separates completed offline checks from the
+official public run, and never treats synthetic results as an ARC score.
 
 ## Upstream references
 
