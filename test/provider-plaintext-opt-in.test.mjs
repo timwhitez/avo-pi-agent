@@ -10,7 +10,7 @@ const HTTPS_ENDPOINT = 'https://provider.internal/v1';
 function environment(overrides = {}) {
   return {
     OPENAI_BASE_URL: HTTPS_ENDPOINT,
-    OPENAI_API_KEY: 'sk-live-key-value-0123456789abcdef',
+    OPENAI_API_KEY: 'live-key-value-0123456789abcdef',
     OPENAI_MODEL: 'runtime-model-x7',
     OPENAI_REASONING_EFFORT: 'max',
     ...overrides,
