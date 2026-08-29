@@ -25,21 +25,38 @@ from typing import Any
 
 _ANONYMOUS_KEY_LOG = re.compile(r"(Got anonymous API key:\s*).+", re.IGNORECASE)
 _ARC_IDENTIFIER_LOG = re.compile(
-    r"(\b(?:guid|scorecard(?:_id)?|card_id)\b[\"']?\s*[:=]\s*[\"']?)([^\"',\s}]+)",
+    r"((?<!\.)\b(?:guid|scorecard(?:_id)?|card_id)\b[\"']?"
+    r"\s*[:=]\s*[\"']?)"
+    r"([^\"',;\s}/]+)",
     re.IGNORECASE,
 )
+_ARC_GUID_WORD_LOG = re.compile(
+    r"(\bguid\s+)([^\"',;\s}/]+)", re.IGNORECASE
+)
+_SCORECARD_API_PATH_LOG = re.compile(
+    r"(/api/scorecard/)[^/?#\s;\"']+", re.IGNORECASE
+)
+_RECORDING_PATH_LOG = re.compile(r"(\brecordings?/)[^\s\"']+", re.IGNORECASE)
 _SUPPORTED_AUTH_MODES = {"anonymous-auto", "registered"}
+
+
+def redact_arc_private_material(value: Any) -> str:
+    """Remove ARC credentials and raw scorecard/run identities from text."""
+
+    message = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", str(value))
+    message = _SCORECARD_API_PATH_LOG.sub(r"\1<redacted>", message)
+    message = _RECORDING_PATH_LOG.sub(r"\1<redacted>", message)
+    message = _ARC_IDENTIFIER_LOG.sub(r"\1<redacted>", message)
+    return _ARC_GUID_WORD_LOG.sub(r"\1<redacted>", message)
 
 
 class _RedactArcSecrets(logging.Filter):
     """Remove server-issued ARC credentials and run IDs from SDK log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if _ANONYMOUS_KEY_LOG.search(message):
-            message = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", message)
-        message = _ARC_IDENTIFIER_LOG.sub(r"\1<redacted>", message)
-        if message != record.getMessage():
+        original = record.getMessage()
+        message = redact_arc_private_material(original)
+        if message != original:
             record.msg = message
             record.args = ()
         return True
@@ -120,7 +137,10 @@ def arc_auth_metadata(arcade: Any, mode: str) -> dict[str, Any]:
 
 
 def fail(message: str) -> None:
-    print(json.dumps({"ok": False, "error": message}), flush=True)
+    print(
+        json.dumps({"ok": False, "error": redact_arc_private_material(message)}),
+        flush=True,
+    )
 
 
 def jsonable(value: Any) -> Any:

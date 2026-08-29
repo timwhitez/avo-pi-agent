@@ -19,4 +19,14 @@ test('runtime redaction removes configured provider and ARC values', () => {
 
   const nested = redactRuntimeObject({ error: [env.OPENAI_MODEL, { endpoint: env.OPENAI_BASE_URL }] }, env);
   assert.deepEqual(nested, { error: ['[REDACTED_MODEL]', { endpoint: '[REDACTED_ENDPOINT]' }] });
+
+  const arcFailure = redactRuntimeSecrets(
+    'HTTPError /api/scorecard/card-private-123; guid run-private-456; '
+      + 'Recording to recordings/card-private-123/g1-run-private-456.jsonl',
+    {},
+  );
+  assert.doesNotMatch(arcFailure, /card-private|run-private/);
+  assert.match(arcFailure, /\/api\/scorecard\/\[REDACTED_ARC_ID\]/);
+  assert.match(arcFailure, /recordings\/\[REDACTED_ARC_PATH\]/);
+  assert.equal(redactRuntimeSecrets('scorecard unavailable', {}), 'scorecard unavailable');
 });

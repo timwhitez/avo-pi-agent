@@ -22,15 +22,25 @@ for message in [
     "Created new scorecard: card-private-123",
     "Successfully reset game g1, guid=run-private-456, scorecard_id=card-private-123",
     'response {"card_id":"card-private-123","guid":"run-private-456"}',
+    "Recording to recordings/card-private-123/g1-run-private-456.jsonl",
 ]:
     record = logging.LogRecord("arc_agi", logging.INFO, "", 0, message, (), None)
     redactor.filter(record)
     print(record.getMessage())
+module.fail(
+    "HTTPError: 500 /api/scorecard/card-private-123; guid run-private-456"
+)
 `;
   const result = spawnSync('python', ['-c', source], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /card-private|run-private/);
-  assert.equal((result.stdout.match(/<redacted>/g) || []).length, 5);
+  assert.match(result.stdout, /recordings\/<redacted>/);
+  assert.match(result.stdout, /\/api\/scorecard\/<redacted>/);
+  const failure = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  assert.deepEqual(failure, {
+    ok: false,
+    error: 'HTTPError: 500 /api/scorecard/<redacted>; guid <redacted>',
+  });
 });
 
 test('bridge client reuses one process and ignores bounded SDK stdout diagnostics', async () => {
@@ -115,6 +125,31 @@ for line in sys.stdin:
     assert.match(client.stderr, /bridge-stdout.*diagnostic/);
   } finally {
     await client.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('bridge child-exit diagnostics redact raw ARC identities', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-bridge-exit-'));
+  const bridgeDir = path.join(root, 'bridge');
+  fs.mkdirSync(bridgeDir);
+  fs.writeFileSync(path.join(bridgeDir, 'arc_bridge.py'), String.raw`
+import sys
+sys.stderr.write(
+    "HTTPError /api/scorecard/card-private-123; "
+    "Recording to recordings/card-private-123/g1-run-private-456.jsonl\n"
+)
+raise SystemExit(2)
+`);
+
+  const client = new ArcBridgeClient({ python: 'python', cwd: root });
+  try {
+    await assert.rejects(client.auth(), (error) => {
+      assert.doesNotMatch(error.message, /card-private|run-private/);
+      assert.match(error.message, /REDACTED_ARC/);
+      return true;
+    });
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

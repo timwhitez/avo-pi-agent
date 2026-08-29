@@ -273,6 +273,9 @@ class Arcade:
         self.arc_api_key = "mock-test-key"
         if logger:
             logger.info("Created new scorecard: raw-card-private-123")
+            logger.info(
+                "Recording to recordings/raw-card-private-123/g01-raw-guid-private-456.jsonl"
+            )
 
     def get_environments(self):
         return [Info(f"g{i:02d}-v1") for i in range(1, 26)]
@@ -456,7 +459,7 @@ process.exit(result.status ?? 1);
     env: childEnv,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.doesNotMatch(result.stderr, /raw-card-private-123/);
+  assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
   assert.match(result.stdout, /"wins": 25/);
@@ -581,7 +584,10 @@ process.exit(result.status ?? 1);
     report: publishedReport,
   });
   assert.equal(publishedReport.status, 'complete');
-  assert.doesNotMatch(JSON.stringify(publishedReport), /raw-card-private-123/);
+  assert.doesNotMatch(
+    JSON.stringify(publishedReport),
+    /raw-card-private-123|raw-guid-private-456/,
+  );
   assert.equal(publishedReport.completeness.actualCount, 25);
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
   assert.deepEqual(
@@ -623,6 +629,9 @@ process.exit(result.status ?? 1);
   ));
   assert.equal(rejectedReport.status, 'failed');
   assert.equal(rejectedReport.failedStage, 'artifact-discovery');
-  assert.doesNotMatch(JSON.stringify(rejectedReport), /raw-card-private-123/);
+  assert.doesNotMatch(
+    JSON.stringify(rejectedReport),
+    /raw-card-private-123|raw-guid-private-456/,
+  );
   fs.writeFileSync(configFileAfterSuccess, cleanConfig);
 });

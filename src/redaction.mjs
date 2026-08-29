@@ -2,7 +2,14 @@ export function redactRuntimeSecrets(value, env = process.env) {
   let output = String(value)
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[REDACTED_KEY]')
     .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
-    .replace(/https?:\/\/[^\s/]+:\d+/g, '[REDACTED_ENDPOINT]');
+    .replace(/https?:\/\/[^\s/]+:\d+/g, '[REDACTED_ENDPOINT]')
+    .replace(/(\/api\/scorecard\/)[^/?#\s;"']+/gi, '$1[REDACTED_ARC_ID]')
+    .replace(/(\brecordings?\/)[^\s"']+/gi, '$1[REDACTED_ARC_PATH]')
+    .replace(
+      /((?<!\.)\b(?:guid|scorecard(?:_id)?|card_id)\b["']?\s*[:=]\s*["']?)[^"',;\s}/]+/gi,
+      '$1[REDACTED_ARC_ID]',
+    )
+    .replace(/(\bguid\s+)[^"',;\s}/]+/gi, '$1[REDACTED_ARC_ID]');
 
   const privateValues = [
     ['OPENAI_API_KEY', '[REDACTED_KEY]'],
