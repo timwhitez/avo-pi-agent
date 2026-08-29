@@ -1,7 +1,7 @@
 # Benchmark and Harness Audit: Why 0 Wins Is Not Yet a Model-Capability Verdict
 
-**Audit date:** 2026-08-30  
-**Repository state reviewed:** `main` after PR #165  
+**Audit date:** 2026-08-30
+**Repository state reviewed:** `main` after PR #165
 **Primary evidence:** production code, the published public-set result, validation/provenance code, open and historical Issues/PRs, NVIDIA's public AVO/NOOA material and ARC example, Pi, and the Browser Use “Bitter Lesson” analysis.
 
 ## Executive conclusion
@@ -12,7 +12,7 @@ The retained report records:
 
 - 25 game records;
 - 0 wins;
-- 0 observed completed levels;
+- 0 reported completed levels, contradicted by the retained official scorecard's 1 completed level across 183 total levels;
 - 21,128 reported environment actions;
 - `GAME_OVER` as the final state for every game.
 
@@ -21,9 +21,9 @@ However, the same run also contains confirmed harness and benchmark defects that
 1. `RESET` is advertised but normally unreachable because it is validated as a frame gameplay action instead of a controller operation ([#166](https://github.com/timwhitez/avo-pi-agent/issues/166)).
 2. `GAME_OVER` is not treated as an episode terminal, `finish` is rejected while budget remains, and the loop tells the model to continue until `WIN` or budget exhaustion ([#167](https://github.com/timwhitez/avo-pi-agent/issues/167), [#173](https://github.com/timwhitez/avo-pi-agent/issues/173)).
 3. Exact historical observations are destructively removed from the model transcript without an actual retrieval path ([#171](https://github.com/timwhitez/avo-pi-agent/issues/171)).
-4. The reported aggregate score is taken from a scorecard covering only the final eight replayed games, while seventeen records came from an earlier session ([#169](https://github.com/timwhitez/avo-pi-agent/issues/169)).
+4. The reported aggregate score is taken from a scorecard whose only non-zero action evidence belongs to the eight replayed executions; its other seventeen environments are zero-action placeholders, and its 1,047 actions do not match the published records' 21,128 actions ([#169](https://github.com/timwhitez/avo-pi-agent/issues/169)).
 5. The run crosses Git commits and does not attest the initial persistent memory/workspace state or the complete effective model/harness manifest ([#170](https://github.com/timwhitez/avo-pi-agent/issues/170)).
-6. The configuration claims an isolated-Python capability, but the agent constructor never passes the configured mode/runtime/image to `WorkspaceSandbox`; the effective production mode therefore remains its `files-only` default ([#181](https://github.com/timwhitez/avo-pi-agent/issues/181)).
+6. The published run truthfully used `files-only`, so it did not test isolated Python. Current production wires the requested workspace settings, but constructor/caller drift, missing startup preflight, and absent effective runtime/image attestation still make isolated mode unproven ([#181](https://github.com/timwhitez/avo-pi-agent/issues/181)).
 7. No paired minimal baseline or feature ablation exists, so the result measures one compound system and cannot isolate model, prompt, tool, memory, observation, or orchestration effects ([#180](https://github.com/timwhitez/avo-pi-agent/issues/180)).
 
 The correct current conclusion is:
@@ -46,7 +46,7 @@ The context may contain compressed previews, but any observation or transition t
 
 ### 3. Sufficiently general action and compute space
 
-The harness should expose the environment's real action space and useful general computation. It should not force one primitive action per model turn, silently disable configured code execution, or prevent strategic reset/termination.
+The harness should expose the environment's real action space and useful general computation. It should support bounded temporal action batches with terminal-aware cancellation, prove configured code execution before use, and permit strategic reset/termination.
 
 ### 4. Budgets are ceilings, not goals
 
@@ -116,9 +116,9 @@ The Browser Use analysis argues that abstractions often freeze assumptions about
 | The combined record reports 21,128 actions | Supported as reported | This includes actions whose utility and terminal validity are not separated. |
 | The model received a fair chance to reset/recover | Rejected | Reset was normally unreachable through the production action contract. |
 | All reported actions were meaningful live-episode actions | Rejected | At least one inspected trajectory continued issuing actions after `GAME_OVER`; the loop structurally permits this. |
-| `0.0010988675...` is an official aggregate for the published 25-game set | Rejected | The final scorecard covered eight replayed games, not the mixed 25-record set. |
+| `0.0010988675...` is an official aggregate for the published 25-game set | Rejected | Only eight scorecard executions contain action evidence; seventeen are zero-action placeholders, and scorecard actions do not match the published execution set. |
 | The run measured one immutable harness revision and initial state | Rejected | It crossed Git commits and lacks a complete run capsule and initial-state attestation. |
-| The configured isolated-Python/world-model capability was tested | Rejected | Workspace mode/runtime/image were not wired into `WorkspaceSandbox`; effective mode remained `files-only`. |
+| The isolated-Python/world-model capability was tested | Rejected | The run truthfully declared `files-only`; isolated runtime availability, image identity, and effective isolation were not preflighted or attested. |
 | The result establishes model incapability | Rejected | Required actions/information were inaccessible or lossy, and no paired baseline/ablation exists. |
 | Fixing these defects will produce wins | Undetermined | That requires new controlled runs. |
 
@@ -131,19 +131,19 @@ The detailed acceptance criteria live in the linked Issues. This table is the cr
 | P0 | [#166 — reachable RESET/controller actions](https://github.com/timwhitez/avo-pi-agent/issues/166) | `RESET` is in the tool enum but rejected by frame-affordance validation before the reset branch can run. | Split gameplay actions from typed controller operations; make invalid requests recoverable; test the real bridge contract. |
 | P0 | [#167 — terminal `GAME_OVER`](https://github.com/timwhitez/avo-pi-agent/issues/167) | The agent can neither reset nor finish after death and is told to keep spending budget. | Add an explicit lifecycle; forbid gameplay actions after terminal; expose reset/finish only; guard both loop and bridge. |
 | P0 | [#168 — authoritative level metadata](https://github.com/timwhitez/avo-pi-agent/issues/168) | Static total levels, monotonic completed levels, and terminal frame fields are conflated as `winLevels`. | Introduce `totalLevels`, monotonic `levelsCompleted`, and explicit terminal outcome; use `null` for unknown. |
-| P0 | [#169 — exact scorecard coverage](https://github.com/timwhitez/avo-pi-agent/issues/169) | A scorecard covering eight replayed games is published beside a 25-record mixed-session result. | Bind scores to exact execution/game coverage; publish mixed recovery as diagnostic with `officialScore = null`. |
+| P0 | [#169 — exact scorecard coverage](https://github.com/timwhitez/avo-pi-agent/issues/169) | Eight executions have scorecard actions, seventeen are placeholders, and the scorecard action total does not match the 25 published records. | Bind card/session, versioned game, and run GUIDs to exact execution coverage; publish mismatches as diagnostic with `officialScore = null`. |
 | P0 | [#170 — immutable run capsule](https://github.com/timwhitez/avo-pi-agent/issues/170) | Cross-commit resume and unknown starting memory/workspace are accepted as one run. | Hash the full system and initial state; separate cold, warm, recovered, and migrated modes; fail closed on drift. |
-| P1 | [#171 — lossless trajectory retrieval](https://github.com/timwhitez/avo-pi-agent/issues/171) | Old tool outputs and reasoning are destructively elided, while no API can retrieve the original historical frame. | Append-only content-addressed observations/transitions; bounded previews; model-callable get/range/diff/search APIs. |
+| P1 | [#171 — lossless trajectory retrieval](https://github.com/timwhitez/avo-pi-agent/issues/171) | Model-facing durable evidence drops exact grids and old events; optional operator-only recording is not a retrieval path. | Persist exact versioned observations/transitions and expose one bounded `trajectory_read` API. Strongly coupled with #174. |
 | P1 | [#172 — typed/delta observation interface](https://github.com/timwhitez/avo-pi-agent/issues/172) | Every primitive action repeats the full grid, while changed coordinates and useful views are not directly exposed. | Observation references plus compact deltas, regions, component statistics, and optional additive vision. |
 | P1 | [#173 — terminal-aware loop/context bound](https://github.com/timwhitez/avo-pi-agent/issues/173) | Every settled turn appends another synthetic `user` continuation; these messages can survive trimming and defeat the intended bound. | Stable task/prompt plus replaceable runtime state, explicit completion, lifecycle-aware continuation, hard token/message cap. |
 | P1 | [#174 — decision-state identity](https://github.com/timwhitez/avo-pi-agent/issues/174) | State hashes omit affordances, episode/reset identity, and controller metadata. | Separate grid content, observation content, episode observation, and transition identifiers with versioned semantics. |
 | P1 | [#175 — evidence-linked memory](https://github.com/timwhitez/avo-pi-agent/issues/175) | Flat model-authored JSON notes lack claim status, evidence links, contradictions, relevance scoring, and correction semantics. | Typed claims, provenance/relations, automatic bounded retrieval, explicit contradict/supersede, cold/warm isolation. |
-| P1 | [#176 — temporal action abstraction](https://github.com/timwhitez/avo-pi-agent/issues/176) | The model can execute only one primitive action per LLM round trip. | Add bounded action sequences with every intermediate transition retained and tails cancelled on terminal/divergence. |
-| P1 | [#177 — honest AVO candidate semantics](https://github.com/timwhitez/avo-pi-agent/issues/177) | Candidates are prediction notes; accepting one does not install a behavior-changing artifact. | Evolve replayable policy/world-model/helper artifacts with external evaluation, or rename/remove the false AVO ceremony. |
+| P1 | [#176 — bounded action batches](https://github.com/timwhitez/avo-pi-agent/issues/176) | Pi can run multiple sequential calls per turn, but has no typed maximum or aggregate tail-cancellation contract. | Add one bounded sequence tool with every intermediate transition retained and explicit requested/executed/skipped results. |
+| P1 | [#177 — honest AVO candidate semantics](https://github.com/timwhitez/avo-pi-agent/issues/177) | Candidates are prediction notes; accepting one does not install a behavior-changing artifact. | Prefer the minimum honest fix: rename it to an optional hypothesis/evidence journal and remove false AVO-conformance claims. |
 | P2 | [#178 — ablatable policy/supervisor](https://github.com/timwhitez/avo-pi-agent/issues/178) | A large hand-authored hypothesis/supervisor doctrine may help or may constrain the model; current evidence cannot decide. | Define a minimal semantic core; make strategy profiles optional/progressively disclosed; choose defaults from paired ablations. |
-| P1 | [#179 — effective model manifest](https://github.com/timwhitez/avo-pi-agent/issues/179) | Context/output limits, modalities, reasoning, developer role, and adapter behavior are hard-coded rather than negotiated/attested. | Provider-specific capability manifest, bounded probes, requested-vs-effective settings, fail-closed contradictions. |
-| P0 | [#180 — paired attribution science](https://github.com/timwhitez/avo-pi-agent/issues/180) | One stochastic compound run has no minimal baseline, feature toggles, repeats, or uncertainty. | Paired arms, immutable conditions, repeated samples, mechanism metrics, and predeclared attribution rules. |
-| P1 | [#181 — isolated Python wiring](https://github.com/timwhitez/avo-pi-agent/issues/181) | Configured workspace mode/runtime/image are ignored by the agent constructor, permanently leaving the sandbox in `files-only`. | Wire and preflight effective workspace capability; fail closed; attest tool surface; ablate executable analysis. |
+| P0/P1 | [#179 — effective model manifest](https://github.com/timwhitez/avo-pi-agent/issues/179) | Context/output limits, modalities, reasoning, developer role, and adapter behavior are hard-coded rather than explicitly configured and attested. | Provider capability manifest, bounded probes, requested-vs-effective settings, and fail-closed contradictions. |
+| P0 gate / last | [#180 — paired attribution science](https://github.com/timwhitez/avo-pi-agent/issues/180) | One stochastic compound run has no minimal baseline, feature toggles, repeats, or uncertainty. | Block capability claims now; implement and run paired arms only after every validity dependency. |
+| P1 | [#181 — effective isolated Python](https://github.com/timwhitez/avo-pi-agent/issues/181) | CLI wiring exists, but the constructor contract, startup round trip, effective tools, isolation result, and image digest are not one attested capability. | Wire once in the constructor, preflight fail closed, and attest the effective workspace capability. |
 | P0/P2 | [#182 — documentation and trust-boundary drift](https://github.com/timwhitez/avo-pi-agent/issues/182) | Tool count/lifecycle docs are stale and validation text simultaneously accepts and disclaims the benchmark. | Reclassify the historical run; generate/validate tool and schema docs; separate official, diagnostic, synthetic, and historical evidence. |
 
 ## Recommended repair order
@@ -152,7 +152,7 @@ The order matters because performance experiments are meaningless until the meas
 
 ### Phase 0 — freeze and correct the evidence boundary
 
-Implement [#169](https://github.com/timwhitez/avo-pi-agent/issues/169), [#170](https://github.com/timwhitez/avo-pi-agent/issues/170), [#168](https://github.com/timwhitez/avo-pi-agent/issues/168), and [#182](https://github.com/timwhitez/avo-pi-agent/issues/182).
+Implement [#170](https://github.com/timwhitez/avo-pi-agent/issues/170), then [#169](https://github.com/timwhitez/avo-pi-agent/issues/169), then the P0 historical-correction slice of [#182](https://github.com/timwhitez/avo-pi-agent/issues/182).
 
 Deliverables:
 
@@ -164,7 +164,7 @@ Deliverables:
 
 ### Phase 1 — restore environment semantics and liveness
 
-Implement [#166](https://github.com/timwhitez/avo-pi-agent/issues/166), [#167](https://github.com/timwhitez/avo-pi-agent/issues/167), [#173](https://github.com/timwhitez/avo-pi-agent/issues/173), and [#174](https://github.com/timwhitez/avo-pi-agent/issues/174).
+Implement [#166](https://github.com/timwhitez/avo-pi-agent/issues/166), [#167](https://github.com/timwhitez/avo-pi-agent/issues/167), and [#168](https://github.com/timwhitez/avo-pi-agent/issues/168) as separate P0 PRs.
 
 Deliverables:
 
@@ -173,12 +173,11 @@ Deliverables:
 - reachable reset and explicit finish;
 - zero post-terminal gameplay actions;
 - no budget-exhaustion coercion;
-- correct episode/reset-aware state identity;
-- a truly bounded context/controller state.
+- authoritative total-level/progress reporting across terminal transitions.
 
 ### Phase 2 — remove information and action bottlenecks
 
-Implement [#171](https://github.com/timwhitez/avo-pi-agent/issues/171), [#172](https://github.com/timwhitez/avo-pi-agent/issues/172), [#179](https://github.com/timwhitez/avo-pi-agent/issues/179), [#181](https://github.com/timwhitez/avo-pi-agent/issues/181), and [#176](https://github.com/timwhitez/avo-pi-agent/issues/176).
+Implement strongly coupled [#171](https://github.com/timwhitez/avo-pi-agent/issues/171) + [#174](https://github.com/timwhitez/avo-pi-agent/issues/174) together, then [#173](https://github.com/timwhitez/avo-pi-agent/issues/173), [#172](https://github.com/timwhitez/avo-pi-agent/issues/172), [#179](https://github.com/timwhitez/avo-pi-agent/issues/179), [#181](https://github.com/timwhitez/avo-pi-agent/issues/181), and [#176](https://github.com/timwhitez/avo-pi-agent/issues/176).
 
 Deliverables:
 
@@ -186,7 +185,7 @@ Deliverables:
 - compact current-state preview and on-demand exact views;
 - provider-attested effective model capabilities;
 - working optional isolated analysis;
-- bounded model-authored action sequences;
+- bounded model-authored action sequences with explicit tail cancellation;
 - telemetry for tokens, calls, latency, retrievals, batches, and tool failures.
 
 ### Phase 3 — test learning and architecture choices
@@ -345,25 +344,42 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 
 ### External public material
 
-- NVIDIA, “NVIDIA AVO Reaches 100% on ARC-AGI-3”:  
-  https://developer.nvidia.com/blog/nvidia-avo-reaches-100-on-arc-agi-3-demonstrating-a-frontier-level-general-purpose-architecture-for-long-horizon-autonomous-agents/
-- NVIDIA, “Six Agent Harness Capabilities for Higher Model Performance”:  
-  https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/
-- NVIDIA, “Evaluating AI Agent Skill Performance with NVIDIA SkillEvaluator”:  
-  https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/
-- NVIDIA, Agentic Variation Operators paper:  
-  https://arxiv.org/abs/2603.24517
-- NVIDIA, NOOA technical report:  
-  https://arxiv.org/abs/2607.20275
-- NVIDIA NeMo Open Agent Objects, public ARC example:  
-  https://github.com/NVIDIA-NeMo/labs-OO-Agents/tree/main/examples/arc_agi_3
-- Mario Zechner, “What I learned building an opinionated and minimal coding agent”:  
-  https://mariozechner.at/posts/2025-11-30-pi-coding-agent/
-- Browser Use, “The Bitter Lesson of Agent Frameworks”:  
-  https://browser-use.com/posts/bitter-lesson-agent-frameworks
+- [NVIDIA, “NVIDIA AVO Reaches 100% on ARC-AGI-3”](https://developer.nvidia.com/blog/nvidia-avo-reaches-100-on-arc-agi-3-demonstrating-a-frontier-level-general-purpose-architecture-for-long-horizon-autonomous-agents/)
+- [NVIDIA, “Six Agent Harness Capabilities for Higher Model Performance”](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
+- [NVIDIA, “Evaluating AI Agent Skill Performance with NVIDIA SkillEvaluator”](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
+- [NVIDIA, Agentic Variation Operators paper](https://arxiv.org/abs/2603.24517)
+- [NVIDIA, NOOA technical report](https://arxiv.org/abs/2607.20709)
+- [NVIDIA NeMo Open Agent Objects, public ARC example](https://github.com/NVIDIA-NeMo/labs-OO-Agents/tree/main/examples/arc_agi_3)
+- [Mario Zechner, “What I learned building an opinionated and minimal coding agent”](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/)
+- [Browser Use, “The Bitter Lesson of Agent Frameworks”](https://browser-use.com/posts/bitter-lesson-agent-frameworks)
 
-## Issue status at audit completion
+## Live remediation ledger
 
-- Corrected existing Issues: [#166](https://github.com/timwhitez/avo-pi-agent/issues/166), [#167](https://github.com/timwhitez/avo-pi-agent/issues/167), [#168](https://github.com/timwhitez/avo-pi-agent/issues/168).
-- Added new Issues: [#169](https://github.com/timwhitez/avo-pi-agent/issues/169) through [#182](https://github.com/timwhitez/avo-pi-agent/issues/182).
-- The historical benchmark should be retained as diagnostic evidence and reinterpreted through [#169](https://github.com/timwhitez/avo-pi-agent/issues/169), [#170](https://github.com/timwhitez/avo-pi-agent/issues/170), and [#182](https://github.com/timwhitez/avo-pi-agent/issues/182) before any new model-capability claim is made.
+**Last synchronized:** 2026-08-30
+
+- Open Issues audited: **17/17**; all remain valid after the corrections recorded in their bodies and audit comments.
+- Open implementation PRs: **0**. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) is this tracking/audit document only.
+- Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
+- PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
+- Public benchmark: **not run**. It remains blocked until the P0 validity repairs are integrated into one exact test state.
+
+| Issue | Audit state | Fix PR | Independent review | Dependency / next state |
+|---|---|---|---|---|
+| #170 | Valid P0 | — | — | **NEXT** — capsule identity foundation |
+| #169 | Valid P0; evidence wording corrected | — | — | After #170 |
+| #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
+| #167 | Valid P0; cross-run chronology corrected | — | — | After #166 |
+| #168 | Valid P0; SDK/source wording corrected | — | — | After #167 |
+| #182 | Valid P0/P2 successor regression | — | — | P0 correction after #169/#170; P2 docs later |
+| #171 + #174 | Valid P1; one strongly coupled foundation | — | — | After P0 lifecycle; shared identity/store PR |
+| #173 | Valid P1; consequence wording corrected | — | — | After #167 and #171/#174 |
+| #172 | Valid P1 | — | — | After #171/#174 |
+| #179 | Valid P0/P1; scope/title corrected | — | — | Before any future benchmark |
+| #181 | Valid remaining P1; original root cause corrected | — | — | After trajectory/observation foundation |
+| #176 | Valid remaining P1; batching claim corrected | — | — | After #167 and #171/#172 |
+| #175 | Valid P1 | — | — | After #170 and #171 |
+| #177 | Valid P1; prefer minimal Option B | — | — | After semantic core |
+| #178 | Valid P2 design risk | — | — | Profiles before #180 |
+| #180 | Valid P0 attribution gate | — | — | Implement/run last; all validity work blocks it |
+
+No Issue is closed merely for count reduction. An effective Issue closes only after its unmerged PR passes local gates and an independent subagent review.
