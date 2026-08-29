@@ -8,6 +8,12 @@ import { loadLatestSessionScorecard, loadResumedRecords, resolveResumeDirectory,
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
+import {
+  assertRunStateMatchesInitial,
+  inspectRunState,
+  readRunCapsule,
+  verifyRunCapsuleExecution,
+} from './benchmark/run-capsule.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
@@ -119,6 +125,45 @@ async function runPublic(args) {
   let runCapsuleHash = null;
   let runClass = null;
   let sourceCapsuleHashes = [];
+  let resumedRecords = new Map();
+
+  // The child independently verifies the sealed capsule and durable state
+  // before starting the ARC bridge or making any game action.
+  resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
+  if (process.env.AVO_REQUIRE_REAL_PROVIDER === '1' && !resumeDir) {
+    throw new Error('real-provider public execution requires a capsule-bound resume directory');
+  }
+  if (resumeDir) {
+    runCapsuleHash = requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH);
+    runClass = requiredRunClass(process.env.AVO_RUN_CLASS);
+    sourceCapsuleHashes = process.env.AVO_RESUME_SOURCE_CAPSULE_HASH
+      ? [requiredCapsuleHash(process.env.AVO_RESUME_SOURCE_CAPSULE_HASH)]
+      : [];
+    if (sourceCapsuleHashes.length && runClass !== 'diagnostic-migrated') {
+      throw new Error('cross-capsule checkpoint loading is allowed only for diagnostic-migrated runs');
+    }
+    const capsuleFile = requiredCapsuleFile(process.env.AVO_RUN_CAPSULE_FILE);
+    const capsule = readRunCapsule(capsuleFile, { root: path.resolve('runs/private') });
+    if (capsule.capsuleHash !== runCapsuleHash) throw new Error('active run capsule hash differs from the child contract');
+    const stateBinding = currentStateBinding(config);
+    verifyRunCapsuleExecution({
+      root: process.cwd(),
+      capsule,
+      python: config.python,
+      config,
+      stateBinding,
+      requireInitialState: runClass !== 'recovered',
+    });
+    resumedRecords = loadResumedRecords(resumeDir, {
+      capsuleHash: runCapsuleHash,
+      allowedCapsuleHashes: sourceCapsuleHashes,
+      stateBinding,
+      requireStateMatch: runClass !== 'diagnostic-migrated',
+    });
+    if (runClass === 'recovered' && resumedRecords.size === 0) {
+      assertRunStateMatchesInitial(stateBinding, capsule.definition.initialState);
+    }
+  }
 
   try {
     await environment.start();
@@ -129,22 +174,6 @@ async function runPublic(args) {
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
 
-    // Interrupted runs checkpoint every finished game under AVO_RESUME_DIR;
-    // a restarted run with the same context skips those games instead of
-    // replaying hours of provider work.
-    resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
-    runCapsuleHash = resumeDir ? requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH) : null;
-    runClass = resumeDir ? requiredRunClass(process.env.AVO_RUN_CLASS) : null;
-    sourceCapsuleHashes = process.env.AVO_RESUME_SOURCE_CAPSULE_HASH
-      ? [requiredCapsuleHash(process.env.AVO_RESUME_SOURCE_CAPSULE_HASH)]
-      : [];
-    if (sourceCapsuleHashes.length && runClass !== 'diagnostic-migrated') {
-      throw new Error('cross-capsule checkpoint loading is allowed only for diagnostic-migrated runs');
-    }
-    const resumedRecords = loadResumedRecords(resumeDir, {
-      capsuleHash: runCapsuleHash,
-      allowedCapsuleHashes: sourceCapsuleHashes,
-    });
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
@@ -219,7 +248,11 @@ async function runPublic(args) {
         results[index] = result;
         // Never checkpoint an errored attempt: a resume must replay it, not
         // inherit its failure into the completeness gate.
-        if (!result.error) saveResumedRecord(resumeDir, gameId, result, { capsuleHash: runCapsuleHash });
+        if (!result.error) saveResumedRecord(resumeDir, gameId, result, {
+          capsuleHash: runCapsuleHash,
+          allowedCapsuleHashes: sourceCapsuleHashes,
+          stateBinding: currentStateBinding(config),
+        });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
@@ -270,13 +303,20 @@ async function runPublic(args) {
     if (resumeDir && replayedGames > 0) {
       // The session actually played games: its scorecard is the latest real
       // score evidence for this run.
-      saveSessionScorecard(resumeDir, { replayedGames, scorecard: aggregateScorecard, capsuleHash: runCapsuleHash });
+      saveSessionScorecard(resumeDir, {
+        replayedGames,
+        scorecard: aggregateScorecard,
+        capsuleHash: runCapsuleHash,
+        allowedCapsuleHashes: sourceCapsuleHashes,
+        stateBinding: currentStateBinding(config),
+      });
     } else if (resumeDir && replayedGames === 0) {
       // Every game came from checkpoints; a fresh empty session's scorecard
       // must not masquerade as the run's official score.
       const saved = loadLatestSessionScorecard(resumeDir, {
         capsuleHash: runCapsuleHash,
         allowedCapsuleHashes: sourceCapsuleHashes,
+        stateBinding: currentStateBinding(config),
       });
       if (saved?.scorecard) aggregateScorecard = saved.scorecard;
     }
@@ -315,6 +355,13 @@ function configureWorkspace(agent, config) {
   agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
   agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
   return agent;
+}
+
+function currentStateBinding(config) {
+  return inspectRunState({
+    memoryDir: config.memoryDir,
+    workspaceDir: config.workspaceDir,
+  });
 }
 
 function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
@@ -367,6 +414,16 @@ function requiredRunClass(value) {
     throw new Error('AVO_RUN_CLASS is invalid');
   }
   return text;
+}
+
+function requiredCapsuleFile(value) {
+  const target = path.resolve(String(value || ''));
+  const root = path.resolve('runs/private');
+  const relative = path.relative(root, target);
+  if (!value || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('AVO_RUN_CAPSULE_FILE must stay inside runs/private');
+  }
+  return target;
 }
 
 function writeReport(report) {

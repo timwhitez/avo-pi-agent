@@ -7,7 +7,9 @@ import {
   AvoArcAgent,
   effectiveAvoToolNames,
 } from '../core/avo-agent-base.mjs';
+import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
+import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
   CONTINUATION_PROMPT,
   PI_MODEL_CAPABILITY_MANIFEST,
@@ -15,14 +17,12 @@ import {
   createPiSdkLoop,
   effectivePiSystemPrompt,
 } from '../loop/pi-sdk.mjs';
-import {
-  readBoundedRegularFile,
-  writeJsonAtomic,
-} from './report-safe-files.mjs';
+import { writeJsonAtomic } from './report-safe-files.mjs';
 
 export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
+export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
 
-const COMPONENT_FILES = Object.freeze([
+export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'package.json',
   'package-lock.json',
   'bridge/requirements.txt',
@@ -30,6 +30,8 @@ const COMPONENT_FILES = Object.freeze([
   'scripts/run-real-public.mjs',
   'src/arc/bridge-client.mjs',
   'src/benchmark/resume-cache.mjs',
+  'src/benchmark/report-records.mjs',
+  'src/benchmark/report-safe-files.mjs',
   'src/benchmark/run-capsule-authority.mjs',
   'src/benchmark/run-capsule.mjs',
   'src/cli.mjs',
@@ -37,7 +39,9 @@ const COMPONENT_FILES = Object.freeze([
   'src/core/avo-agent-base.mjs',
   'src/core/observation.mjs',
   'src/core/workspace.mjs',
+  'src/local/authority-directory.mjs',
   'src/local/child-environment.mjs',
+  'src/local/regular-file-evidence.mjs',
   'src/loop/pi-sdk.mjs',
 ]);
 const STATE_MODES = new Set(['cold-start', 'warm-start']);
@@ -57,7 +61,10 @@ export function prepareRunState({
   env = process.env,
   resumeCapsule = null,
 } = {}) {
-  const authority = path.resolve(privateDir || '');
+  const authority = ensureAuthorityDirectory(path.resolve(privateDir || ''), {
+    root,
+    purpose: 'run capsule private directory',
+  });
   const prior = resumeCapsule?.definition?.initialState ?? null;
   const requestedMode = String(env.AVO_BENCHMARK_STATE_MODE || prior?.mode || 'cold-start').trim().toLowerCase();
   if (!STATE_MODES.has(requestedMode)) {
@@ -94,21 +101,37 @@ export function prepareRunState({
       ),
     };
   } else {
-    assertStateDirectory(memoryDir, 'memory state');
-    assertStateDirectory(workspaceDir, 'workspace state');
+    if (!fs.existsSync(memoryDir) || !fs.existsSync(workspaceDir)) {
+      throw new Error('resume state directories are missing');
+    }
+    ensureAuthorityDirectory(memoryDir, { root: authority, purpose: 'resume memory state' });
+    ensureAuthorityDirectory(workspaceDir, { root: authority, purpose: 'resume workspace state' });
   }
+
+  const currentState = inspectRunState({ memoryDir, workspaceDir });
+  const migrating = prior && String(env.AVO_RESUME_MODE || 'recovered').trim().toLowerCase() === 'migrated';
 
   const pathState = {
     memoryPathFingerprint: saltedHash(runId, path.resolve(memoryDir)),
     workspacePathFingerprint: saltedHash(runId, path.resolve(workspaceDir)),
   };
-  const initialState = prior
+  const initialState = prior && !migrating
     ? {
         ...prior,
         mode: requestedMode,
         snapshotName,
         ...pathState,
       }
+    : prior
+      ? {
+          ...prior,
+          mode: requestedMode,
+          snapshotName: `migrated-${safeIdentifier(runId, 'run ID')}-${currentState.sha256.slice(0, 12)}`,
+          ...pathState,
+          memory: currentState.memory,
+          workspace: currentState.workspace,
+          migrationSourceCapsuleHash: requiredSha(resumeCapsule?.capsuleHash, 'migration source capsule'),
+        }
     : {
         mode: requestedMode,
         snapshotName,
@@ -121,7 +144,34 @@ export function prepareRunState({
       && (!initialState.memory.empty || !initialState.workspace.empty)) {
     throw new Error('cold-start state directories must be empty');
   }
-  return Object.freeze({ memoryDir, workspaceDir, initialState: deepFreeze(initialState) });
+  return Object.freeze({
+    memoryDir,
+    workspaceDir,
+    initialState: deepFreeze(initialState),
+    currentState,
+  });
+}
+
+export function inspectRunState({ memoryDir, workspaceDir } = {}) {
+  const state = {
+    schema: RUN_STATE_SCHEMA,
+    memory: hashDirectoryTree(memoryDir),
+    workspace: hashDirectoryTree(workspaceDir),
+  };
+  return deepFreeze({ ...state, sha256: sha256(canonicalJson(state)) });
+}
+
+export function assertRunStateMatchesInitial(state, initialState) {
+  validateRunState(state);
+  const expected = {
+    schema: RUN_STATE_SCHEMA,
+    memory: initialState?.memory,
+    workspace: initialState?.workspace,
+  };
+  if (state.sha256 !== sha256(canonicalJson(expected))) {
+    throw new Error('current resume state is not bound to the original initial state');
+  }
+  return true;
 }
 
 export function buildRunCapsule({
@@ -145,10 +195,7 @@ export function buildRunCapsule({
   if (!['anonymous-auto', 'registered'].includes(String(provenance?.arcAuth?.mode || ''))) {
     throw new Error('run capsule requires a known ARC authentication mode');
   }
-  const componentHashes = Object.fromEntries(COMPONENT_FILES.map((relative) => [
-    relative,
-    hashRegularFile(path.join(root, relative), { root, purpose: `capsule component ${relative}` }),
-  ]));
+  const componentHashes = inspectComponentHashes(root);
   if (!git) {
     const after = inspectGitCheckout(root);
     if (canonicalJson(after) !== canonicalJson(inspectedGit)) {
@@ -160,6 +207,9 @@ export function buildRunCapsule({
   }
   const workspaceMode = String(config?.workspaceMode || 'files-only');
   if (!WORKSPACE_MODES.has(workspaceMode)) throw new Error('run capsule workspace mode is invalid');
+  if (workspaceMode === 'isolated-python') {
+    throw new Error('official run capsule refuses isolated-python until the container runtime and image digest are attested');
+  }
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
   const toolSchemas = canonicalToolSchemas(workspaceMode);
@@ -219,7 +269,7 @@ export function buildRunCapsule({
       gameConcurrency: boundedInteger(env.AVO_GAME_CONCURRENCY, 1, 1, 8, 'AVO_GAME_CONCURRENCY'),
       gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
       sessionTopology: 'one-arcade-session-per-process-pass',
-      scorecardBinding: 'capsule-bound-resume-checkpoint-v2',
+      scorecardBinding: 'capsule-bound-state-checkpoint-v3',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
       providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
       config: {
@@ -271,17 +321,14 @@ export function writeRunCapsule(file, capsule, { root = path.dirname(path.resolv
 }
 
 export function readRunCapsule(file, { root = path.dirname(path.resolve(file)) } = {}) {
-  const bytes = readBoundedRegularFile(file, {
+  const evidence = readJsonFileEvidence(file, {
     root,
     maxBytes: MAX_CAPSULE_BYTES,
     purpose: 'run capsule',
+    maxJsonNodes: 200_000,
+    maxJsonDepth: 128,
   });
-  let capsule;
-  try {
-    capsule = JSON.parse(bytes.toString('utf8'));
-  } catch (error) {
-    throw new Error('run capsule is not valid JSON', { cause: error });
-  }
+  const capsule = evidence.value;
   validateRunCapsule(capsule);
   return deepFreeze(capsule);
 }
@@ -305,9 +352,10 @@ export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
   const definition = capsule.definition;
   const actualClass = String(runClass || definition.initialState.mode);
   const isComparable = comparable ?? actualClass !== 'diagnostic-migrated';
-  return Object.freeze({
+  const published = {
     schemaVersion: 1,
     capsuleHash: capsule.capsuleHash,
+    capsuleEvidenceSha256: sha256(`${JSON.stringify(capsule, null, 2)}\n`),
     runClass: actualClass,
     comparable: isComparable === true,
     gitCommit: definition.git.commit,
@@ -324,6 +372,7 @@ export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
     initialStateMode: definition.initialState.mode,
     initialStateSnapshot: definition.initialState.snapshotName,
     initialStateSha256: sha256(canonicalJson(definition.initialState)),
+    initialState: definition.initialState,
     enabledTools: definition.tools.enabled,
     transcript: definition.transcript,
     runtime: {
@@ -351,6 +400,10 @@ export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
       declaredCapabilityManifest: definition.modelInterface.declaredCapabilityManifest,
       samplingParameters: definition.modelInterface.samplingParameters,
     },
+  };
+  return deepFreeze({
+    ...published,
+    commitmentSha256: sha256(canonicalJson(published)),
   });
 }
 
@@ -414,6 +467,50 @@ export function inspectDependencyClosure({ root = process.cwd(), python = '.venv
     pythonSha256: sha256(canonicalJson(pythonPackages)),
     pythonPackageCount: pythonPackages.length,
     pythonPackages,
+  });
+}
+
+export function verifyRunCapsuleExecution({
+  root = process.cwd(),
+  capsule,
+  python = '.venv/bin/python',
+  config = null,
+  stateBinding = null,
+  requireInitialState = false,
+  git = inspectGitCheckout(root),
+  dependencies = inspectDependencyClosure({ root, python }),
+} = {}) {
+  validateRunCapsule(capsule);
+  const definition = capsule.definition;
+  if (canonicalJson(git) !== canonicalJson(definition.git)) {
+    throw new Error('execution Git checkout differs from the sealed run capsule');
+  }
+  const components = inspectComponentHashes(root);
+  if (canonicalJson(components) !== canonicalJson(definition.components.files)
+      || sha256(canonicalJson(components)) !== definition.components.setSha256) {
+    throw new Error('execution components differ from the sealed run capsule');
+  }
+  const closure = validateDependencyClosure(dependencies);
+  if (canonicalJson(closure) !== canonicalJson(definition.runtime.dependencies)) {
+    throw new Error('execution dependency closure differs from the sealed run capsule');
+  }
+  if (process.version !== definition.runtime.node) {
+    throw new Error('execution Node runtime differs from the sealed run capsule');
+  }
+  if (definition.runtime.config.workspaceMode === 'isolated-python') {
+    throw new Error('official execution refuses unattested isolated-python runtime identity');
+  }
+  if (config) verifyEffectiveConfig(config, definition.runtime.config);
+  if (stateBinding) {
+    validateRunState(stateBinding);
+    if (requireInitialState) assertRunStateMatchesInitial(stateBinding, definition.initialState);
+  }
+  return Object.freeze({
+    capsuleHash: capsule.capsuleHash,
+    gitCommit: git.commit,
+    componentSetSha256: definition.components.setSha256,
+    nodeDependencySha256: closure.nodeSha256,
+    pythonDependencySha256: closure.pythonSha256,
   });
 }
 
@@ -497,6 +594,26 @@ function validateInitialState(value) {
   return structuredClone(value);
 }
 
+export function validateRunState(value) {
+  if (value?.schema !== RUN_STATE_SCHEMA) throw new Error('run state binding schema is invalid');
+  for (const name of ['memory', 'workspace']) {
+    const item = value[name];
+    requiredSha(item?.sha256, `${name} state hash`);
+    if (!Number.isSafeInteger(item?.fileCount) || item.fileCount < 0
+        || !Number.isSafeInteger(item?.bytes) || item.bytes < 0
+        || typeof item?.empty !== 'boolean') {
+      throw new Error(`${name} run state metadata is invalid`);
+    }
+  }
+  const expected = sha256(canonicalJson({
+    schema: RUN_STATE_SCHEMA,
+    memory: value.memory,
+    workspace: value.workspace,
+  }));
+  if (value.sha256 !== expected) throw new Error('run state binding hash is inconsistent');
+  return value;
+}
+
 function normalizeVersionedGames(games) {
   if (!Array.isArray(games) || games.length === 0) throw new Error('run capsule requires a non-empty game set');
   const values = games.map((game) => String(game?.versionedGameId || '')).sort();
@@ -545,14 +662,35 @@ function validateDependencyClosure(value) {
   return structuredClone(value);
 }
 
+function inspectComponentHashes(root) {
+  return Object.fromEntries(RUN_CAPSULE_COMPONENT_FILES.map((relative) => [
+    relative,
+    hashRegularFile(path.join(root, relative), { root, purpose: `capsule component ${relative}` }),
+  ]));
+}
+
+function verifyEffectiveConfig(actual, expected) {
+  const observed = {
+    maxActions: positiveInteger(actual?.maxActions, 1000, 'maxActions'),
+    maxOuterTurns: positiveInteger(actual?.maxOuterTurns, 1000, 'maxOuterTurns'),
+    stallWindow: positiveInteger(actual?.stallWindow, 8, 'stallWindow'),
+    workspaceMode: String(actual?.workspaceMode || 'files-only'),
+    workspacePythonTimeoutMs: positiveInteger(actual?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
+    workspaceContainerRuntime: String(actual?.workspaceContainerRuntime || 'docker'),
+    workspaceContainerImage: String(actual?.workspaceContainerImage || 'python:3.12-slim'),
+  };
+  if (canonicalJson(observed) !== canonicalJson(expected)) {
+    throw new Error('effective execution config differs from the sealed run capsule');
+  }
+}
+
 function createEmptyStateDirectory(directory, authority, purpose) {
   const target = path.resolve(directory);
   const relative = path.relative(path.resolve(authority), target);
   if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
     throw new Error(`${purpose} escapes the private run directory`);
   }
-  fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-  assertStateDirectory(target, purpose);
+  ensureAuthorityDirectory(target, { root: authority, purpose });
   if (fs.readdirSync(target).length !== 0) throw new Error(`${purpose} must be empty`);
 }
 
@@ -575,7 +713,7 @@ function copyStateSnapshot(source, destination, authority, purpose) {
     throw new Error(`${purpose} source cannot contain its run-owned destination`);
   }
   const sourceState = hashDirectoryTree(sourceRoot);
-  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  ensureAuthorityDirectory(path.dirname(target), { root: authorityRoot, purpose: `${purpose} parent` });
   fs.cpSync(sourceRoot, target, {
     recursive: true,
     force: false,

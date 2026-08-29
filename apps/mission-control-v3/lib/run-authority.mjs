@@ -86,7 +86,10 @@ export function evaluateCompetitionReportAuthority(report) {
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
-  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule);
+  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, {
+    capsuleFileSha256: report?.privateArtifactHashes?.runCapsule?.sha256,
+    requireFileBinding: true,
+  });
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);

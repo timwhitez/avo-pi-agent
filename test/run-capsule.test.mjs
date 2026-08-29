@@ -10,12 +10,15 @@ import {
   buildRunCapsule,
   canonicalJson,
   classifyCapsuleResult,
+  assertRunStateMatchesInitial,
   hashDirectoryTree,
   inspectDependencyClosure,
   inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
   readRunCapsule,
+  RUN_CAPSULE_COMPONENT_FILES,
+  verifyRunCapsuleExecution,
   writeRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
@@ -140,6 +143,43 @@ test('cold starts create empty run-owned state while warm starts name and hash i
   assert.equal(fs.readFileSync(path.join(warm.memoryDir, 'state.json'), 'utf8'), '{"level":1}\n');
 });
 
+test('resume rejects symlinked state ancestry and migrated capsules seal the actual start state', () => {
+  const root = temporaryRoot();
+  const privateDir = path.join(root, 'runs', 'private', 'run-z');
+  fs.mkdirSync(privateDir, { recursive: true });
+  const cold = prepareRunState({ root, privateDir, runId: 'run-z', env: {} });
+  const sourceCapsule = {
+    capsuleHash: 'a'.repeat(64),
+    definition: { initialState: cold.initialState },
+  };
+
+  fs.writeFileSync(path.join(cold.memoryDir, 'injected.json'), '{}\n');
+  assert.throws(
+    () => assertRunStateMatchesInitial(
+      prepareRunState({ root, privateDir, runId: 'run-z', env: {}, resumeCapsule: sourceCapsule }).currentState,
+      cold.initialState,
+    ),
+    /not bound to the original initial state/,
+  );
+  const migrated = prepareRunState({
+    root,
+    privateDir,
+    runId: 'run-z',
+    env: { AVO_RESUME_MODE: 'migrated' },
+    resumeCapsule: sourceCapsule,
+  });
+  assert.equal(migrated.initialState.memory.sha256, migrated.currentState.memory.sha256);
+  assert.equal(migrated.initialState.migrationSourceCapsuleHash, sourceCapsule.capsuleHash);
+
+  const realState = path.join(root, 'moved-state');
+  fs.renameSync(path.join(privateDir, 'state'), realState);
+  fs.symlinkSync(realState, path.join(privateDir, 'state'));
+  assert.throws(
+    () => prepareRunState({ root, privateDir, runId: 'run-z', env: {}, resumeCapsule: sourceCapsule }),
+    /rejects non-directory or symlink component/,
+  );
+});
+
 test('state hashing rejects links and Git inspection detects untracked files', () => {
   const root = temporaryRoot();
   const state = path.join(root, 'state');
@@ -180,6 +220,27 @@ test('dependency inspection records the exact installed Node and Python versions
   assert.equal(dependencies.pythonPackageCount > 1, true);
 });
 
+test('execution verification rejects code changed after the capsule was sealed', () => {
+  const root = temporaryRoot('avo-capsule-execution-');
+  for (const relative of RUN_CAPSULE_COMPONENT_FILES) {
+    const target = path.join(root, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(process.cwd(), relative), target);
+  }
+  const value = capsule({ root });
+  const options = {
+    root,
+    capsule: value,
+    python: 'python',
+    config: value.definition.runtime.config,
+    git: value.definition.git,
+    dependencies: value.definition.runtime.dependencies,
+  };
+  assert.equal(verifyRunCapsuleExecution(options).capsuleHash, value.capsuleHash);
+  fs.appendFileSync(path.join(root, 'src/cli.mjs'), '\n// changed after seal\n');
+  assert.throws(() => verifyRunCapsuleExecution(options), /execution components differ/);
+});
+
 test('capsules round-trip, reject tampering, and publish only non-secret authority fields', () => {
   const root = temporaryRoot();
   const file = path.join(root, 'run-capsule.json');
@@ -191,13 +252,27 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.equal(published.comparable, true);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published).accepted, true);
+  const changedComponent = structuredClone(published);
+  changedComponent.components['src/cli.mjs'] = 'f'.repeat(64);
+  assert.equal(evaluatePublicRunCapsule(changedComponent).accepted, false);
   const migrated = publicRunCapsule(value, { runClass: 'diagnostic-migrated', comparable: false });
   assert.equal(evaluatePublicRunCapsule(migrated).accepted, false);
+  const relabeled = structuredClone(migrated);
+  relabeled.runClass = 'cold-start';
+  relabeled.comparable = true;
+  assert.equal(evaluatePublicRunCapsule(relabeled).accepted, false);
 
   const tampered = JSON.parse(fs.readFileSync(file, 'utf8'));
   tampered.definition.runtime.config.maxActions = 999;
   fs.writeFileSync(file, `${JSON.stringify(tampered)}\n`);
   assert.throws(() => readRunCapsule(file, { root }), /hash does not match/);
+});
+
+test('official capsules reject isolated Python until runtime and image identity are attested', () => {
+  const baseline = capsule();
+  assert.throws(() => capsule({
+    config: { ...baseline.definition.runtime.config, workspaceMode: 'isolated-python' },
+  }), /refuses isolated-python/);
 });
 
 test('migrated diagnostics cannot publish an official score', () => {

@@ -14,6 +14,7 @@ function fixture() {
       completeness: { complete: true, expectedCount: 2, actualCount: 2, gameIds: ['g1', 'g2'] },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0.75, origin: 'aggregateScorecard.score' },
+      privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
       provenance: {
         runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,

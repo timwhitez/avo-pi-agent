@@ -15,6 +15,7 @@ function authoritative(overrides = {}) {
     completeness: { complete: true, expectedCount: 25, actualCount: 25 },
     loopAttestation: { complete: true, loop: 'pi-sdk' },
     officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+    privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
     aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
     provenance: {
       runCapsule: publicRunCapsuleFixture(),

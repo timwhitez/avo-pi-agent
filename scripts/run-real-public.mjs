@@ -28,14 +28,19 @@ import {
 } from '../src/benchmark/report.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
 import {
+  assertRunStateMatchesInitial,
   buildRunCapsule,
+  canonicalJson,
   classifyCapsuleResult,
   classifyResume,
+  inspectRunState,
   prepareRunState,
   publicRunCapsule,
   readRunCapsule,
+  verifyRunCapsuleExecution,
   writeRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
+import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 
 loadLocalEnv();
@@ -89,6 +94,20 @@ try {
   });
   process.env.AVO_MEMORY_DIR = runState.memoryDir;
   process.env.AVO_WORKSPACE_DIR = runState.workspaceDir;
+  if (resumeContext && String(process.env.AVO_RESUME_MODE || 'recovered') !== 'migrated') {
+    const checkpointDir = path.join(privateDir, 'resume');
+    if (fs.existsSync(checkpointDir)) {
+      const resumed = loadResumedRecords(checkpointDir, {
+        capsuleHash: resumeContext.originalCapsule.capsuleHash,
+        stateBinding: runState.currentState,
+      });
+      if (resumed.size === 0) {
+        assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
+      }
+    } else {
+      assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
+    }
+  }
   const config = getRuntimeConfig();
 
   stage.value = 'provider-preflight';
@@ -133,7 +152,15 @@ try {
   const resumeDecision = resumeContext
     ? classifyResume(resumeContext.originalCapsule, capsule, process.env.AVO_RESUME_MODE || 'recovered')
     : Object.freeze({ runClass: runState.initialState.mode, comparable: true, sourceCapsuleHash: null });
-  persistRunCapsule({ privateDir, capsule, resumeContext });
+  const activeCapsuleFile = persistRunCapsule({ privateDir, capsule, resumeContext });
+  verifyRunCapsuleExecution({
+    root,
+    capsule,
+    python,
+    config,
+    stateBinding: runState.currentState,
+    requireInitialState: !resumeContext || resumeDecision.runClass === 'diagnostic-migrated',
+  });
   provenance.runCapsule = publicRunCapsule(capsule, resumeDecision);
   if (resumeContext) {
     provenance.resume = Object.freeze({
@@ -172,6 +199,7 @@ try {
         AVO_REQUIRE_REAL_PROVIDER: '1',
         AVO_REAL_RUN_ID: runId,
         AVO_RUN_CAPSULE_HASH: capsule.capsuleHash,
+        AVO_RUN_CAPSULE_FILE: activeCapsuleFile,
         AVO_RESUME_SOURCE_CAPSULE_HASH: resumeDecision.comparable
           ? undefined
           : resumeDecision.sourceCapsuleHash,
@@ -223,6 +251,34 @@ try {
       || selected.report.runClass !== resumeDecision.runClass) {
     throw new Error('production runner report is not bound to the active run capsule');
   }
+  const finalCapsule = readRunCapsule(activeCapsuleFile, { root: privateDir });
+  if (finalCapsule.capsuleHash !== capsule.capsuleHash) {
+    throw new Error('active run capsule changed after execution');
+  }
+  verifyRunCapsuleExecution({ root, capsule: finalCapsule, python, config });
+  const finalState = inspectRunState({
+    memoryDir: runState.memoryDir,
+    workspaceDir: runState.workspaceDir,
+  });
+  const finalCheckpoints = loadResumedRecords(path.join(privateDir, 'resume'), {
+    capsuleHash: capsule.capsuleHash,
+    allowedCapsuleHashes: resumeDecision.comparable ? [] : [resumeDecision.sourceCapsuleHash],
+    stateBinding: finalState,
+    requireStateMatch: resumeDecision.comparable,
+  });
+  if (finalCheckpoints.size !== selected.records.length) {
+    throw new Error('production report game set differs from the final capsule-bound checkpoint set');
+  }
+  for (const record of selected.records) {
+    const checkpoint = finalCheckpoints.get(record.gameId);
+    if (!checkpoint || canonicalJson(normalizeCheckpointRecord(checkpoint)) !== canonicalJson(normalizeCheckpointRecord(record))) {
+      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+    }
+  }
+  const activeCapsuleSha256 = hashFile(activeCapsuleFile, { root: privateDir });
+  if (activeCapsuleSha256 !== provenance.runCapsule.capsuleEvidenceSha256) {
+    throw new Error('public capsule commitment differs from the private capsule artifact');
+  }
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
   const copiedReport = copyRegularFileExclusive(selected.file, rawRunReport, {
     sourceRoot: runsRoot,
@@ -264,6 +320,7 @@ try {
       },
       stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile, { root: privateDir }) },
       stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile, { root: privateDir }) },
+      runCapsule: { file: path.basename(activeCapsuleFile), sha256: activeCapsuleSha256 },
     },
   };
   writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest, {
@@ -327,6 +384,19 @@ function benchmarkTimeout() {
   return Math.trunc(value);
 }
 
+function normalizeCheckpointRecord(value) {
+  return {
+    gameId: String(value?.gameId || value?.game_id || '').split('-')[0],
+    state: String(value?.state || '').toUpperCase(),
+    levelsCompleted: Number(value?.levelsCompleted ?? value?.levels_completed ?? 0),
+    winLevels: Number(value?.winLevels ?? value?.win_levels ?? 0),
+    actions: Number(value?.actions ?? value?.actionCount ?? value?.action_count ?? 0),
+    won: value?.won === true,
+    error: value?.error || null,
+    loop: value?.loop || null,
+  };
+}
+
 function safeRunId(value) {
   const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
   if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
@@ -337,18 +407,19 @@ function persistRunCapsule({ privateDir, capsule, resumeContext }) {
   const originalFile = path.join(privateDir, 'run-capsule.json');
   if (!resumeContext) {
     writeRunCapsule(originalFile, capsule, { root: privateDir });
-    return;
+    return originalFile;
   }
-  if (capsule.capsuleHash === resumeContext.originalCapsule.capsuleHash) return;
+  if (capsule.capsuleHash === resumeContext.originalCapsule.capsuleHash) return originalFile;
   const migratedFile = path.join(privateDir, `run-capsule.${capsule.capsuleHash}.json`);
   if (!fs.existsSync(migratedFile)) {
     writeRunCapsule(migratedFile, capsule, { root: privateDir });
-    return;
+    return migratedFile;
   }
   const existing = readRunCapsule(migratedFile, { root: privateDir });
   if (existing.capsuleHash !== capsule.capsuleHash) {
     throw new Error('existing migrated run capsule differs from the active capsule');
   }
+  return migratedFile;
 }
 
 function assertResumableContext({ privateDir, publicFile, runId }) {

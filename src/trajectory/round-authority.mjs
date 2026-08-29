@@ -18,7 +18,10 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   const provenance = recordOrEmpty(benchmark?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
   const runCapsule = recordOrEmpty(provenance.runCapsule);
-  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule);
+  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, {
+    capsuleFileSha256: benchmark?.privateArtifactHashes?.runCapsule?.sha256,
+    requireFileBinding: true,
+  });
 
   const expectedCount = nonNegativeIntegerOrNull(benchmark?.completeness?.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(benchmark?.completeness?.actualCount);

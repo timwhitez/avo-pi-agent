@@ -5,18 +5,57 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+import {
+  buildRunCapsule,
+  prepareRunState,
+  RUN_CAPSULE_COMPONENT_FILES,
+  writeRunCapsule,
+} from '../src/benchmark/run-capsule.mjs';
+
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
-  const capsuleHash = 'a'.repeat(64);
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
   fs.mkdirSync(path.join(root, 'runs'));
+  for (const relative of RUN_CAPSULE_COMPONENT_FILES) {
+    const target = path.join(root, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.resolve(relative), target);
+  }
+
+  fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify({
+    name: 'avo-public-contract',
+    version: '1.0.0',
+    type: 'module',
+    dependencies: {
+      '@earendil-works/pi-agent-core': '0.84.2',
+      '@earendil-works/pi-ai': '0.84.2',
+    },
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, 'package-lock.json'), `${JSON.stringify({
+    name: 'avo-public-contract',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'avo-public-contract',
+        version: '1.0.0',
+        dependencies: {
+          '@earendil-works/pi-agent-core': '0.84.2',
+          '@earendil-works/pi-ai': '0.84.2',
+        },
+      },
+      'node_modules/@earendil-works/pi-agent-core': { version: '0.84.2' },
+      'node_modules/@earendil-works/pi-ai': { version: '0.84.2' },
+    },
+  }, null, 2)}\n`);
 
   const scoped = path.join(root, 'node_modules', '@earendil-works');
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
-    name: '@earendil-works/pi-agent-core', type: 'module', exports: './index.js',
+    name: '@earendil-works/pi-agent-core', version: '0.84.2', type: 'module', exports: './index.js',
   }));
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'index.js'), String.raw`
     export class Agent {
@@ -55,7 +94,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
   `);
 
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'package.json'), JSON.stringify({
-    name: '@earendil-works/pi-ai', type: 'module',
+    name: '@earendil-works/pi-ai', version: '0.84.2', type: 'module',
     exports: { '.': './index.js', './api/*': './api/*.js' },
   }));
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'index.js'), String.raw`
@@ -204,7 +243,7 @@ class Arcade:
   // instead of weakening that boundary for a test-only fixture.
   const fakePython = path.join(root, 'fake-python');
   fs.writeFileSync(fakePython, `#!/usr/bin/env node
-const { spawnSync } = require('node:child_process');
+import { spawnSync } from 'node:child_process';
 const result = spawnSync('python3', process.argv.slice(2), {
   stdio: 'inherit',
   env: { ...process.env, PYTHONPATH: ${JSON.stringify(fakePy)} },
@@ -213,26 +252,104 @@ process.exit(result.status ?? 1);
 `);
   fs.chmodSync(fakePython, 0o755);
 
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\nruns/\n__pycache__/\n');
+  for (const args of [
+    ['init'],
+    ['config', 'user.email', 'contract@example.invalid'],
+    ['config', 'user.name', 'Contract Test'],
+    ['add', '.'],
+    ['commit', '-m', 'contract fixture'],
+  ]) {
+    const git = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    assert.equal(git.status, 0, git.stderr || git.stdout);
+  }
+  const gitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  const privateDir = path.join(root, 'runs', 'private', 'contract-run');
+  const runState = prepareRunState({ root, privateDir, runId: 'contract-run', env: {} });
+  const config = {
+    provider: { reasoningEffort: 'max' },
+    maxActions: 200,
+    maxOuterTurns: 1000,
+    stallWindow: 8,
+    workspaceMode: 'files-only',
+    workspacePythonTimeoutMs: 10_000,
+    workspaceContainerRuntime: 'docker',
+    workspaceContainerImage: 'python:3.12-slim',
+  };
+  const capsule = buildRunCapsule({
+    root,
+    runId: 'contract-run',
+    python: fakePython,
+    provenance: {
+      wireApi: 'responses',
+      providerFingerprint: '1'.repeat(64),
+      providerEndpointFingerprint: '2'.repeat(64),
+      providerModelFingerprint: '3'.repeat(64),
+      reasoningEffort: 'max',
+      gitSha,
+      arcAuth: { mode: 'registered' },
+    },
+    arcRuntime: { officialPackageAttested: true },
+    games: Array.from({ length: 25 }, (_, index) => ({
+      versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
+    })),
+    config,
+    initialState: runState.initialState,
+  });
+  const capsuleFile = path.join(privateDir, 'run-capsule.json');
+  writeRunCapsule(capsuleFile, capsule, { root: privateDir });
+
+  const childEnv = {
+    ...process.env,
+    AVO_DISABLE_DOTENV: '1',
+    ARC_PYTHON: fakePython,
+    AVO_ARC_AUTH_MODE: 'registered',
+    ARC_API_KEY: 'mock-test-key',
+    OPENAI_BASE_URL: 'http://localhost:1/v1',
+    OPENAI_API_KEY: 'test-key',
+    OPENAI_MODEL: 'test-model',
+    OPENAI_REASONING_EFFORT: 'max',
+    AVO_MAX_ACTIONS: '200',
+    AVO_MEMORY_DIR: runState.memoryDir,
+    AVO_WORKSPACE_DIR: runState.workspaceDir,
+    AVO_REAL_RUN_ID: 'contract-run',
+    AVO_RESUME_DIR: path.join(privateDir, 'resume'),
+    AVO_RUN_CAPSULE_HASH: capsule.capsuleHash,
+    AVO_RUN_CAPSULE_FILE: capsuleFile,
+    AVO_RUN_CLASS: 'cold-start',
+  };
+
+  const withoutCapsule = { ...childEnv, AVO_REQUIRE_REAL_PROVIDER: '1' };
+  delete withoutCapsule.AVO_RESUME_DIR;
+  const missingCapsule = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: withoutCapsule,
+  });
+  assert.equal(missingCapsule.status, 1, missingCapsule.stderr || missingCapsule.stdout);
+  assert.match(missingCapsule.stderr, /requires a capsule-bound resume directory/);
+  assert.doesNotMatch(missingCapsule.stdout, /\[1\/25\]/);
+
+  const configFile = path.join(root, 'src', 'config.mjs');
+  const originalConfig = fs.readFileSync(configFile);
+  fs.appendFileSync(configFile, '\n// post-capsule mutation\n');
+  const rejected = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: childEnv,
+  });
+  assert.equal(rejected.status, 1, rejected.stderr || rejected.stdout);
+  assert.match(rejected.stderr, /execution Git checkout differs from the sealed run capsule/);
+  assert.doesNotMatch(rejected.stdout, /\[1\/25\]/);
+  fs.writeFileSync(configFile, originalConfig);
+
   const result = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
-    env: {
-      ...process.env,
-      ARC_PYTHON: fakePython,
-      AVO_ARC_AUTH_MODE: 'registered',
-      ARC_API_KEY: 'mock-test-key',
-      OPENAI_BASE_URL: 'http://localhost:1/v1',
-      OPENAI_API_KEY: 'test-key',
-      OPENAI_MODEL: 'test-model',
-      OPENAI_REASONING_EFFORT: 'max',
-      AVO_MAX_ACTIONS: '200',
-      AVO_MEMORY_DIR: path.join(root, 'memory'),
-      AVO_REAL_RUN_ID: 'contract-run',
-      AVO_RESUME_DIR: path.join(root, 'runs', 'private', 'contract-run', 'resume'),
-      AVO_RUN_CAPSULE_HASH: capsuleHash,
-      AVO_RUN_CLASS: 'cold-start',
-    },
+    env: childEnv,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /\[25\/25\] g25/);
@@ -246,11 +363,76 @@ process.exit(result.status ?? 1);
   assert.equal(report.aggregateScorecard.games, 25);
   assert.equal(report.aggregateScorecard.levels, 50);
   assert.equal(report.summary.allWon, true);
-  assert.equal(report.runCapsuleHash, capsuleHash);
+  assert.equal(report.runCapsuleHash, capsule.capsuleHash);
   assert.equal(report.runClass, 'cold-start');
   const checkpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g01.json',
   ), 'utf8'));
-  assert.equal(checkpoint.schema, 'avo.resume-record.v2');
-  assert.equal(checkpoint.capsuleHash, capsuleHash);
+  assert.equal(checkpoint.schema, 'avo.resume-record.v3');
+  assert.equal(checkpoint.capsuleHash, capsule.capsuleHash);
+  const stateAuthority = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
+  ), 'utf8'));
+  assert.equal(stateAuthority.schema, 'avo.resume-state.v1');
+  assert.equal(stateAuthority.activeCapsuleHash, capsule.capsuleHash);
+
+  const recovered = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { ...childEnv, AVO_RUN_CLASS: 'recovered' },
+  });
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.match(recovered.stdout, /\[resume\] 25 completed game checkpoint/);
+  assert.match(recovered.stdout, /g25 resumed from checkpoint/);
+
+  fs.writeFileSync(path.join(root, 'migration.txt'), 'changed capsule condition\n');
+  const migrationCommit = spawnSync('git', ['add', 'migration.txt'], { cwd: root, encoding: 'utf8' });
+  assert.equal(migrationCommit.status, 0, migrationCommit.stderr || migrationCommit.stdout);
+  const committedMigration = spawnSync('git', ['commit', '-m', 'migration condition'], { cwd: root, encoding: 'utf8' });
+  assert.equal(committedMigration.status, 0, committedMigration.stderr || committedMigration.stdout);
+  const migratedGitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  const migratedState = prepareRunState({
+    root,
+    privateDir,
+    runId: 'contract-run',
+    env: { AVO_RESUME_MODE: 'migrated' },
+    resumeCapsule: capsule,
+  });
+  const migratedCapsule = buildRunCapsule({
+    root,
+    runId: 'contract-run',
+    python: fakePython,
+    provenance: {
+      wireApi: 'responses',
+      providerFingerprint: '1'.repeat(64),
+      providerEndpointFingerprint: '2'.repeat(64),
+      providerModelFingerprint: '3'.repeat(64),
+      reasoningEffort: 'max',
+      gitSha: migratedGitSha,
+      arcAuth: { mode: 'registered' },
+    },
+    arcRuntime: { officialPackageAttested: true },
+    games: Array.from({ length: 25 }, (_, index) => ({
+      versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
+    })),
+    config,
+    initialState: migratedState.initialState,
+  });
+  const migratedCapsuleFile = path.join(privateDir, `run-capsule.${migratedCapsule.capsuleHash}.json`);
+  writeRunCapsule(migratedCapsuleFile, migratedCapsule, { root: privateDir });
+  const migrated = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: {
+      ...childEnv,
+      AVO_RUN_CAPSULE_HASH: migratedCapsule.capsuleHash,
+      AVO_RUN_CAPSULE_FILE: migratedCapsuleFile,
+      AVO_RESUME_SOURCE_CAPSULE_HASH: capsule.capsuleHash,
+      AVO_RUN_CLASS: 'diagnostic-migrated',
+    },
+  });
+  assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout);
+  assert.match(migrated.stdout, /\[resume\] 25 completed game checkpoint/);
 });

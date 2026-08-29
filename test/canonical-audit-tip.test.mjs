@@ -42,6 +42,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
       completeness: { complete: true, expectedCount: 1, actualCount: 1, gameIds: ['g1'] },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+      privateArtifactHashes: { runCapsule: { sha256: 'a'.repeat(64) } },
       provenance: {
         runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,

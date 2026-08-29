@@ -1,11 +1,34 @@
+import crypto from 'node:crypto';
+
+import { canonicalJson } from './run-capsule.mjs';
+
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
 
-export function evaluatePublicRunCapsule(value) {
+export function evaluatePublicRunCapsule(value, {
+  capsuleFileSha256 = null,
+  requireFileBinding = false,
+} = {}) {
   const capsule = recordOrEmpty(value);
   const reasons = [];
   requireCondition(capsule.schemaVersion === 1, 'run capsule attestation is absent or malformed', reasons);
   requireCondition(isSha256(capsule.capsuleHash), 'run capsule hash is absent or malformed', reasons);
+  requireCondition(isSha256(capsule.capsuleEvidenceSha256), 'run capsule file commitment is absent or malformed', reasons);
+  if (requireFileBinding) {
+    requireCondition(
+      isSha256(capsuleFileSha256) && capsuleFileSha256 === capsule.capsuleEvidenceSha256,
+      'run capsule public commitment is not bound to the private capsule artifact',
+      reasons,
+    );
+  }
+  const committed = { ...capsule };
+  delete committed.commitmentSha256;
+  requireCondition(
+    isSha256(capsule.commitmentSha256)
+      && digestMatches(committed, capsule.commitmentSha256),
+    'run capsule public commitment does not match its fields',
+    reasons,
+  );
   requireCondition(capsule.comparable === true, 'run capsule is not comparable', reasons);
   requireCondition(capsule.gitClean === true, 'run capsule Git worktree was not clean', reasons);
   requireCondition(OFFICIAL_RUN_CLASSES.has(String(capsule.runClass || '')), 'run capsule class is not accepted for official attribution', reasons);
@@ -27,6 +50,11 @@ export function evaluatePublicRunCapsule(value) {
   requireCondition(['declared-unverified', 'attested'].includes(String(capsule.modelCapabilityStatus || '')), 'run capsule model-capability status is unknown', reasons);
   const components = recordOrEmpty(capsule.components);
   requireCondition(Object.keys(components).length > 0 && Object.values(components).every(isSha256), 'run capsule component manifest is absent or malformed', reasons);
+  requireCondition(
+    digestMatches(components, capsule.componentSetSha256),
+    'run capsule component-set digest is inconsistent',
+    reasons,
+  );
   const prompts = recordOrEmpty(capsule.prompts);
   requireCondition(isSha256(prompts.systemSha256), 'run capsule system-prompt digest is absent', reasons);
   requireCondition(isSha256(prompts.initialTemplateSha256), 'run capsule initial-prompt digest is absent', reasons);
@@ -35,6 +63,28 @@ export function evaluatePublicRunCapsule(value) {
   requireCondition(isSha256(capsule.toolSchemaSha256), 'run capsule tool-schema digest is absent', reasons);
   requireCondition(isRecord(capsule.nodeDependencies), 'run capsule Node dependency manifest is absent', reasons);
   requireCondition(Array.isArray(capsule.pythonDependencies) && capsule.pythonDependencies.length > 0, 'run capsule Python dependency manifest is absent', reasons);
+  requireCondition(
+    digestMatches(capsule.nodeDependencies, capsule.nodeDependencySha256),
+    'run capsule Node dependency digest is inconsistent',
+    reasons,
+  );
+  requireCondition(
+    digestMatches(capsule.pythonDependencies, capsule.pythonDependencySha256),
+    'run capsule Python dependency digest is inconsistent',
+    reasons,
+  );
+  requireCondition(isRecord(capsule.initialState), 'run capsule initial-state manifest is absent', reasons);
+  requireCondition(
+    capsule.initialStateMode === capsule.initialState?.mode
+      && capsule.initialStateSnapshot === capsule.initialState?.snapshotName,
+    'run capsule initial-state summary differs from its manifest',
+    reasons,
+  );
+  requireCondition(
+    digestMatches(capsule.initialState, capsule.initialStateSha256),
+    'run capsule initial-state digest is inconsistent',
+    reasons,
+  );
   const transcript = recordOrEmpty(capsule.transcript);
   requireCondition(isSha256(transcript.policySha256), 'run capsule transcript-policy digest is absent', reasons);
   requireCondition(['recentToolResults', 'maxMessages', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
@@ -45,8 +95,9 @@ export function evaluatePublicRunCapsule(value) {
   requireCondition(runtime.arcOfficialPackageAttested === true && isSha256(runtime.arcMetadataSha256), 'run capsule ARC runtime attestation is malformed', reasons);
   requireCondition(isPositiveInteger(runtime.gameConcurrency) && isPositiveInteger(runtime.gameAttempts), 'run capsule session topology counts are malformed', reasons);
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
-  requireCondition(runtime.scorecardBinding === 'capsule-bound-resume-checkpoint-v2', 'run capsule scorecard binding is unknown', reasons);
+  requireCondition(runtime.scorecardBinding === 'capsule-bound-state-checkpoint-v3', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);
+  requireCondition(runtime.config?.workspaceMode !== 'isolated-python', 'run capsule isolated-Python runtime identity is unattested', reasons);
   const task = recordOrEmpty(capsule.task);
   requireCondition(['anonymous-auto', 'registered'].includes(String(task.arcAuthMode || '')), 'run capsule ARC auth mode is unknown', reasons);
   requireCondition(Array.isArray(task.versionedGameIds) && task.versionedGameIds.length > 0, 'run capsule versioned game set is absent', reasons);
@@ -64,6 +115,18 @@ export function evaluatePublicRunCapsule(value) {
     runClass: String(capsule.runClass || ''),
     comparable: capsule.comparable === true,
   });
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function digestMatches(value, digest) {
+  try {
+    return isSha256(digest) && digest === sha256(canonicalJson(value));
+  } catch {
+    return false;
+  }
 }
 
 function requireCondition(condition, reason, reasons) {
