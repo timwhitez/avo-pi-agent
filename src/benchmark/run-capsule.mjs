@@ -8,6 +8,7 @@ import {
   effectiveAvoToolNames,
 } from '../core/avo-agent-base.mjs';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
@@ -21,6 +22,7 @@ import { writeJsonAtomic } from './report-safe-files.mjs';
 
 export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
 export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
+export { canonicalJson } from '../local/canonical-json.mjs';
 
 export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'package.json',
@@ -40,6 +42,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/core/observation.mjs',
   'src/core/workspace.mjs',
   'src/local/authority-directory.mjs',
+  'src/local/canonical-json.mjs',
   'src/local/child-environment.mjs',
   'src/local/regular-file-evidence.mjs',
   'src/loop/pi-sdk.mjs',
@@ -523,10 +526,6 @@ export function hashDirectoryTree(directory) {
   return Object.freeze(first);
 }
 
-export function canonicalJson(value) {
-  return JSON.stringify(canonicalValue(value));
-}
-
 function scanDirectoryTree(directory) {
   const root = path.resolve(directory);
   assertStateDirectory(root, 'state tree');
@@ -778,22 +777,6 @@ function command(executable, args, { cwd, maxBuffer = 8 * 1024 * 1024 } = {}) {
   if (result.error) throw new Error(`${executable} inspection failed: ${result.error.message}`, { cause: result.error });
   if (result.status !== 0) throw new Error(`${executable} inspection exited ${result.status}: ${String(result.stderr || '').slice(-1000)}`);
   return String(result.stdout || '');
-}
-
-function canonicalValue(value) {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error('canonical JSON rejects non-finite numbers');
-    return Object.is(value, -0) ? 0 : value;
-  }
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new Error('canonical JSON accepts only plain JSON values');
-  }
-  return Object.fromEntries(Object.keys(value).sort().map((key) => {
-    if (value[key] === undefined) throw new Error(`canonical JSON rejects undefined at ${key}`);
-    return [key, canonicalValue(value[key])];
-  }));
 }
 
 function deepFreeze(value) {

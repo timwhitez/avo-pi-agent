@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-import { canonicalJson } from './run-capsule.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
 
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
