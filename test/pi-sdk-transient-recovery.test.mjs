@@ -144,3 +144,11 @@ test('recovery budget is bounded by AVO_TRANSIENT_TURN_RECOVERIES', async () => 
     delete process.env.AVO_TRANSIENT_TURN_RECOVERIES;
   }
 });
+
+test('cooldownWaitMs parses provider reset_seconds and caps the wait', async () => {
+  const mod = await import('../src/loop/pi-sdk.mjs');
+  assert.equal(mod.cooldownWaitMs('{"reset_seconds":30}'), 30_000);
+  assert.equal(mod.cooldownWaitMs('cooling down, reset_seconds":502617'), 60_000, 'long cooldowns cap at 60s inside a game');
+  assert.equal(mod.cooldownWaitMs('model is cooling down'), 0, 'no reset hint means no extra wait');
+  assert.equal(mod.cooldownWaitMs(null), 0);
+});
