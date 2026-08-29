@@ -159,6 +159,17 @@ test('rejects old recorder, incomplete detector coverage or game-set mismatch', 
   assert.equal(evaluateRoundAuthority(games).authoritative, false);
 });
 
+test('rejects records whose short and versioned identities are cross-wired', () => {
+  const input = fixture();
+  [input.benchmark.games[0].versionedGameId, input.benchmark.games[1].versionedGameId] = [
+    input.benchmark.games[1].versionedGameId,
+    input.benchmark.games[0].versionedGameId,
+  ];
+  const result = evaluateRoundAuthority(input);
+  assert.equal(result.authoritative, false);
+  assert.ok(result.reasons.some((reason) => /bind each short identity/.test(reason)));
+});
+
 test('rejects legacy fixed-output attestation and malformed proof digests', () => {
   const legacy = fixture();
   legacy.benchmark.provenance.providerPreflight = {

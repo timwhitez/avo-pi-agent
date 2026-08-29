@@ -241,6 +241,16 @@ function bindBenchmarkReport(definition, report, reasons) {
     reasons,
   );
   requireCondition(
+    Array.isArray(report?.games)
+      && report.games.every((game) => (
+        typeof game?.gameId === 'string'
+        && typeof game?.versionedGameId === 'string'
+        && game.gameId === game.versionedGameId.split('-')[0]
+      )),
+    'report game records do not bind each short identity to its exact versioned identity',
+    reasons,
+  );
+  requireCondition(
     Number.isSafeInteger(provenance.publicGameCount)
       && provenance.publicGameCount === capsuleGames.values.length,
     'report public-game count differs from the private capsule',
