@@ -45,6 +45,11 @@ test('validator uses npm ci, executes discovered tests, builds, and never falls 
   assert.match(source, /writeAuthorityJson\(evidenceFile/);
 });
 
+test('standalone tracing stays rooted at the app when the repository has its own lockfile', async () => {
+  const config = (await import('../apps/mission-control-v3/next.config.mjs')).default;
+  assert.equal(config.outputFileTracingRoot, path.join(root, 'apps', 'mission-control-v3'));
+});
+
 test('local execution documentation states the current fail-closed boundary', () => {
   const document = read('docs/LOCAL_EXECUTION.md');
   assert.match(document, /Mission Control local gate/);

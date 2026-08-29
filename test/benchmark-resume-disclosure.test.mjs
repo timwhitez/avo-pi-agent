@@ -1,45 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// The disclosure contract exercised through buildProvenance: a resumed run
-// must publish both the original and the resume-time commit.
-import { buildProvenance } from '../src/benchmark/provenance.mjs';
+import {
+  classifyResume,
+  sealRunCapsule,
+} from '../src/benchmark/run-capsule.mjs';
 
-function provenanceWithResume(resumeContext, gitSha) {
-  const games = [{ gameId: 'ls20', versionedGameId: 'ls20@1' }];
-  const provenance = buildProvenance({
-    provider: { baseUrl: 'https://provider.internal/v1', model: 'm', reasoningEffort: 'high' },
-    providerPreflight: { challengeVerified: true, responseFreshnessVerified: true },
-    games,
+function capsule(overrides = {}) {
+  return sealRunCapsule({
+    schema: 'avo.run-capsule.v1',
     runId: 'run-x',
-    gitSha,
-  });
-  if (resumeContext) {
-    provenance.resume = Object.freeze({
-      resumed: true,
-      resumedAt: new Date().toISOString(),
-      originalGitSha: resumeContext.originalGitSha,
-      resumedAtGitSha: resumeContext.resumedAtGitSha || gitSha,
-      originalCreatedAt: resumeContext.originalCreatedAt,
-    });
-  }
-  return provenance;
+    git: { commit: 'a'.repeat(40) },
+    prompts: { systemSha256: 'b'.repeat(64) },
+    ...overrides,
+  }, { createdAt: '2026-08-28T06:45:00Z' });
 }
 
-test('a resumed run discloses both commits in published provenance', () => {
-  const provenance = provenanceWithResume(
-    { originalGitSha: 'a'.repeat(40), resumedAtGitSha: 'b'.repeat(40), originalCreatedAt: '2026-08-28T06:45:00Z' },
-    'b'.repeat(40),
-  );
-  assert.equal(provenance.gitSha, 'b'.repeat(40));
-  assert.equal(provenance.resume.resumed, true);
-  assert.equal(provenance.resume.originalGitSha, 'a'.repeat(40));
-  assert.equal(provenance.resume.resumedAtGitSha, 'b'.repeat(40));
-  assert.notEqual(provenance.resume.originalGitSha, provenance.resume.resumedAtGitSha);
+test('an exact-capsule resume remains comparable', () => {
+  const original = capsule();
+  const decision = classifyResume(original, structuredClone(original));
+  assert.deepEqual(decision, {
+    runClass: 'recovered',
+    comparable: true,
+    sourceCapsuleHash: original.capsuleHash,
+  });
 });
 
-test('a fresh run carries no resume disclosure', () => {
-  const provenance = provenanceWithResume(null, 'c'.repeat(40));
-  assert.equal(provenance.resume, undefined);
-  assert.equal(provenance.gitSha, 'c'.repeat(40));
+test('changed conditions cannot resume as one comparable run', () => {
+  const original = capsule();
+  const changed = capsule({ prompts: { systemSha256: 'c'.repeat(64) } });
+  assert.notEqual(changed.capsuleHash, original.capsuleHash);
+  assert.throws(() => classifyResume(original, changed), /run capsule changed/);
+});
+
+test('explicit migration starts a non-comparable diagnostic lineage', () => {
+  const original = capsule();
+  const changed = capsule({ git: { commit: 'd'.repeat(40) } });
+  assert.deepEqual(classifyResume(original, changed, 'migrated'), {
+    runClass: 'diagnostic-migrated',
+    comparable: false,
+    sourceCapsuleHash: original.capsuleHash,
+  });
 });

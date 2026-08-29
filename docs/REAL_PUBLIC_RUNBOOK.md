@@ -69,13 +69,16 @@ publication, or client-side frontend configuration.
 4. inspect the installed `arc-agi` and `arcengine` module paths and package
    versions, rejecting local/mock paths;
 5. dynamically discover and freeze the complete public game set;
-6. invoke the production CLI for `run-public --all` with the Pi SDK path;
-7. discover the newly generated JSON run report for the exact run ID;
-8. reject any non-`pi-sdk` loop declaration;
-9. reject missing, duplicate, unexpected, malformed, or errored game records;
-10. accept a score only from an explicit official scorecard origin;
-11. produce private raw evidence and a separately redacted public report;
-12. scan the public report for literal secrets, URLs, and network endpoints.
+6. seal a clean-worktree run capsule covering code, prompts, tools,
+   dependencies, transcript policy, runtime config, game set and initial state;
+7. invoke the production CLI for `run-public --all` with capsule-bound
+   checkpoints;
+8. discover the newly generated JSON run report for the exact run ID;
+9. reject any non-`pi-sdk` loop declaration or capsule mismatch;
+10. reject missing, duplicate, unexpected, malformed, or errored game records;
+11. accept a score only from an explicit official scorecard origin;
+12. produce private raw evidence and a separately redacted public report;
+13. scan the public report for literal secrets, URLs, and network endpoints.
 
 A failure at any stage exits non-zero and writes a redacted failure report. It
 does not invent a score or convert an incomplete run into a partial success.
@@ -97,17 +100,17 @@ rather than mixing effort levels inside one run.
 
 ## Resuming an interrupted benchmark
 
-A long real-set run can be interrupted (process kill, host reboot, a fix
-release). The run supports an operator-initiated resume instead of replaying
+A long real-set run can be interrupted by a process kill or host reboot. The
+run supports an operator-initiated resume instead of replaying
 every game from scratch:
 
 1. Pin the run ID: `AVO_REAL_RUN_ID=<original-id>`.
 2. Set `AVO_RESUME_RUN=1`.
 3. Relaunch `npm run benchmark:local`.
 
-Resume refuses to start unless the original `provenance.json` exists and the
-repository Git SHA still matches it, and unless neither a completed private
-manifest nor a completed public report exists. Finished games are checkpointed
+Resume refuses to start unless the original `provenance.json` and
+`run-capsule.json` exist, the newly computed capsule is identical, and neither
+a completed private manifest nor a completed public report exists. Finished games are checkpointed
 under `runs/private/<runId>/resume/<game>.json` as the run progresses; the
 restarted child reloads those checkpoints, prints
 `[resume] N completed game checkpoint(s) loaded`, and skips those games.
@@ -117,6 +120,24 @@ complete dynamically discovered game set before it can pass acceptance.
 Without `AVO_RESUME_RUN=1` a pinned run ID is still rejected with
 `runId already exists and cannot be reused`, so accidental reuse stays a hard
 error.
+
+Code, prompt, tool, dependency, model setting, game-set, transcript-policy or
+initial-state drift requires a fresh run. `AVO_RESUME_MODE=migrated` permits
+diagnostic recovery from old checkpoints, writes a new capsule lineage and
+forces `status=diagnostic-migrated`, `officialScore.value=null`, and a non-zero
+exit. It can never pass official authority gates.
+
+## Initial state modes
+
+Canonical runs default to `cold-start`: the runner creates empty memory and
+workspace directories under `runs/private/<runId>/state/` and seals their
+empty hashes. For a declared warm start, set
+`AVO_BENCHMARK_STATE_MODE=warm-start`, provide existing `AVO_MEMORY_DIR` and
+`AVO_WORKSPACE_DIR`, and name the input with
+`AVO_BENCHMARK_STATE_SNAPSHOT=<stable-name>`. The runner hashes both complete
+input trees, copies them into the run-owned namespace, verifies identical
+hashes, and uses only those copies. It rejects links, hard links, oversized
+files, concurrent mutation, or an unnamed snapshot.
 
 ## Local evidence classes
 

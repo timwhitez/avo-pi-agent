@@ -6,6 +6,7 @@ import path from 'node:path';
 import { preflightResponsesProvider } from '../src/benchmark/provider-attestation.mjs';
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { publicRunCapsuleFixture } from './support/run-capsule.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
 const provider = {
@@ -42,6 +43,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
       provenance: {
+        runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {

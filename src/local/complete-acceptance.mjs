@@ -13,6 +13,9 @@ export function evaluateCompleteLocalAcceptance(repair) {
   const clean = repair?.clean === true;
   const complete = repair?.status === 'complete';
   const officialOrigin = isOfficialScoreOrigin(scoreOrigin);
+  const runCapsuleHash = isSha256(final?.runCapsuleHash) ? final.runCapsuleHash : null;
+  const runClass = String(final?.runClass || '');
+  const runCapsuleComparable = final?.runCapsuleComparable === true;
 
   const accepted = complete
     && clean
@@ -20,7 +23,10 @@ export function evaluateCompleteLocalAcceptance(repair) {
     && officialOrigin
     && officialScore !== null
     && findingCount === 0
-    && openFindingCount === 0;
+    && openFindingCount === 0
+    && runCapsuleHash !== null
+    && runCapsuleComparable
+    && ['cold-start', 'warm-start', 'recovered'].includes(runClass);
 
   return Object.freeze({
     accepted,
@@ -32,8 +38,15 @@ export function evaluateCompleteLocalAcceptance(repair) {
     scoreOrigin,
     findingCount,
     openFindingCount,
+    runCapsuleHash,
+    runClass,
+    runCapsuleComparable,
     rounds: Array.isArray(repair?.rounds) ? repair.rounds.length : null,
   });
+}
+
+function isSha256(value) {
+  return /^[a-f0-9]{64}$/.test(String(value || ''));
 }
 
 function isOfficialScoreOrigin(value) {

@@ -143,6 +143,9 @@ try {
       officialScore: authority.officialScore,
       authoritative: authority.authoritative,
       clean: authority.clean,
+      runCapsuleHash: authority.runCapsuleHash,
+      runClass: authority.runClass,
+      runCapsuleComparable: authority.runCapsuleComparable,
       authorityReasons: authority.reasons,
       trajectoryFileCount: loaded.ingestion.fileCount,
       trajectoryBytes: loaded.ingestion.bytes,
@@ -267,6 +270,8 @@ async function runBenchmark(roundId, traceDir, memoryRoot, workspaceRoot) {
       AVO_TRAJECTORY_DIR: traceDir,
       AVO_MEMORY_DIR: memoryRoot,
       AVO_WORKSPACE_DIR: workspaceRoot,
+      AVO_BENCHMARK_STATE_MODE: 'warm-start',
+      AVO_BENCHMARK_STATE_SNAPSHOT: `${roundId}-input`,
       AVO_REPAIR_ROUND: String(roundId.split('-').at(-1)),
       AVO_LOCAL_LOCK_TOKEN: lock.token,
     },
@@ -338,7 +343,7 @@ function writeSummaries() {
     final: summary.final,
     rounds: summary.rounds.map(publicRound),
     failure: summary.failure,
-    acceptanceRule: 'clean=true only after an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector executed, zero parse errors and zero findings of any status',
+    acceptanceRule: 'clean=true only after one comparable clean-worktree run capsule, an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector executed, zero parse errors and zero findings of any status',
   };
   writeAuthorityJson(path.join(publicRoot, `trajectory-repair-${baseRunId}.redacted.json`), publicSummary, { root: publicRoot });
 }
@@ -352,6 +357,9 @@ function publicRound(record) {
     officialScore: record.officialScore,
     authoritative: record.authoritative,
     clean: record.clean,
+    runCapsuleHash: record.runCapsuleHash,
+    runClass: record.runClass,
+    runCapsuleComparable: record.runCapsuleComparable,
     authorityReasons: record.authorityReasons,
     trajectoryFileCount: record.trajectoryFileCount,
     trajectoryBytes: record.trajectoryBytes,

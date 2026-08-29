@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { publicRunCapsuleFixture } from './support/run-capsule.mjs';
 
 function fixture() {
   const roundId = 'strict-round-0';
@@ -15,6 +16,7 @@ function fixture() {
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
       provenance: {
+        runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {

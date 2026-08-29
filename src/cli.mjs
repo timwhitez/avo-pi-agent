@@ -116,6 +116,9 @@ async function runPublic(args) {
   let selected = [];
   let runError = null;
   let resumeDir = null;
+  let runCapsuleHash = null;
+  let runClass = null;
+  let sourceCapsuleHashes = [];
 
   try {
     await environment.start();
@@ -130,7 +133,18 @@ async function runPublic(args) {
     // a restarted run with the same context skips those games instead of
     // replaying hours of provider work.
     resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
-    const resumedRecords = loadResumedRecords(resumeDir);
+    runCapsuleHash = resumeDir ? requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH) : null;
+    runClass = resumeDir ? requiredRunClass(process.env.AVO_RUN_CLASS) : null;
+    sourceCapsuleHashes = process.env.AVO_RESUME_SOURCE_CAPSULE_HASH
+      ? [requiredCapsuleHash(process.env.AVO_RESUME_SOURCE_CAPSULE_HASH)]
+      : [];
+    if (sourceCapsuleHashes.length && runClass !== 'diagnostic-migrated') {
+      throw new Error('cross-capsule checkpoint loading is allowed only for diagnostic-migrated runs');
+    }
+    const resumedRecords = loadResumedRecords(resumeDir, {
+      capsuleHash: runCapsuleHash,
+      allowedCapsuleHashes: sourceCapsuleHashes,
+    });
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
@@ -205,7 +219,7 @@ async function runPublic(args) {
         results[index] = result;
         // Never checkpoint an errored attempt: a resume must replay it, not
         // inherit its failure into the completeness gate.
-        if (!result.error) saveResumedRecord(resumeDir, gameId, result);
+        if (!result.error) saveResumedRecord(resumeDir, gameId, result, { capsuleHash: runCapsuleHash });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
@@ -256,11 +270,14 @@ async function runPublic(args) {
     if (resumeDir && replayedGames > 0) {
       // The session actually played games: its scorecard is the latest real
       // score evidence for this run.
-      saveSessionScorecard(resumeDir, { replayedGames, scorecard: aggregateScorecard });
+      saveSessionScorecard(resumeDir, { replayedGames, scorecard: aggregateScorecard, capsuleHash: runCapsuleHash });
     } else if (resumeDir && replayedGames === 0) {
       // Every game came from checkpoints; a fresh empty session's scorecard
       // must not masquerade as the run's official score.
-      const saved = loadLatestSessionScorecard(resumeDir);
+      const saved = loadLatestSessionScorecard(resumeDir, {
+        capsuleHash: runCapsuleHash,
+        allowedCapsuleHashes: sourceCapsuleHashes,
+      });
       if (saved?.scorecard) aggregateScorecard = saved.scorecard;
     }
     await environment.close();
@@ -273,6 +290,8 @@ async function runPublic(args) {
     expectedGames: selected.length,
     runError,
   });
+  report.runCapsuleHash = runCapsuleHash;
+  report.runClass = runClass;
   if (resumeDir) {
     report.scorecardCoverage = {
       replayedGames,
@@ -334,6 +353,20 @@ function extractOfficialScore(scorecard) {
     scorecard.aggregateScore,
   ];
   return candidates.find((value) => typeof value === 'number' && Number.isFinite(value)) ?? null;
+}
+
+function requiredCapsuleHash(value) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error('AVO_RUN_CAPSULE_HASH must be a SHA-256 digest');
+  return text;
+}
+
+function requiredRunClass(value) {
+  const text = String(value || '');
+  if (!['cold-start', 'warm-start', 'recovered', 'diagnostic-migrated'].includes(text)) {
+    throw new Error('AVO_RUN_CLASS is invalid');
+  }
+  return text;
 }
 
 function writeReport(report) {

@@ -1,4 +1,5 @@
 import { finiteNumberOrNull, nonNegativeIntegerOrNull } from '../../../src/local/numeric.mjs';
+import { evaluatePublicRunCapsule } from '../../../src/benchmark/run-capsule-authority.mjs';
 
 export const RUN_MODES = Object.freeze(['diagnostic', 'competition']);
 export const REASONING_LEVELS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -64,6 +65,8 @@ export function summarizeMissionControlReport(report, mode) {
     officialScore: authority.accepted ? authority.score : null,
     reportedScore: authority.score,
     scoreOrigin: authority.origin,
+    runCapsuleHash: authority.runCapsuleHash,
+    runClass: authority.runClass,
     games: nonNegativeIntegerOrNull(report?.completeness?.actualCount),
     wins: nonNegativeIntegerOrNull(aggregates.wins),
     totalLevels: nonNegativeIntegerOrNull(aggregates.totalLevels),
@@ -83,6 +86,7 @@ export function evaluateCompetitionReportAuthority(report) {
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
+  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule);
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);
@@ -105,12 +109,15 @@ export function evaluateCompetitionReportAuthority(report) {
   requireCondition(provenance?.arcAuth?.keyAcquired === true, 'ARC runtime did not acquire an authentication key', reasons);
   requireCondition(['anonymous-auto', 'registered'].includes(String(provenance?.arcAuth?.mode || '')), 'ARC auth mode is not accepted', reasons);
   requireCondition(publicGameCount !== null && expectedCount !== null && publicGameCount === expectedCount, 'provenance public game count is inconsistent', reasons);
+  reasons.push(...capsuleAuthority.reasons);
 
   return Object.freeze({
     accepted: reasons.length === 0,
     reasons: Object.freeze(reasons),
     score,
     origin,
+    runCapsuleHash: capsuleAuthority.capsuleHash,
+    runClass: capsuleAuthority.runClass,
   });
 }
 

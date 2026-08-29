@@ -6,6 +6,8 @@ import { writeJsonAtomic } from './report-safe-files.mjs';
 
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_RECORDS = 64;
+const RESUME_RECORD_SCHEMA = 'avo.resume-record.v2';
+const SESSION_SCORECARD_SCHEMA = 'avo.session-scorecard.v2';
 
 /**
  * Durable per-game checkpoint cache for interrupted benchmark runs.
@@ -30,8 +32,9 @@ export function resolveResumeDirectory(candidate, { root = process.cwd() } = {})
   return resolved;
 }
 
-export function loadResumedRecords(resumeDir) {
+export function loadResumedRecords(resumeDir, { capsuleHash, allowedCapsuleHashes = [] } = {}) {
   if (!resumeDir) return new Map();
+  const acceptedCapsules = acceptedCapsuleSet(capsuleHash, allowedCapsuleHashes);
   const entries = fs.readdirSync(resumeDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && entry.name !== 'scorecard.json')
     .slice(0, MAX_RECORDS);
@@ -48,24 +51,35 @@ export function loadResumedRecords(resumeDir) {
     } catch (error) {
       throw new Error(`resume checkpoint ${entry.name} is not valid JSON`, { cause: error });
     }
-    const record = normalizeGameRecord(value, entry.name);
+    if (value?.schema !== RESUME_RECORD_SCHEMA || !value?.record) {
+      throw new Error(`resume checkpoint ${entry.name} is not bound to a run capsule`);
+    }
+    if (!acceptedCapsules.has(value.capsuleHash)) {
+      throw new Error(`resume checkpoint ${entry.name} belongs to a different run capsule`);
+    }
+    const record = normalizeGameRecord(value.record, entry.name);
     if (record.loop !== 'pi-sdk') {
       throw new Error(`resume checkpoint ${entry.name} was not produced by the pi-sdk loop`);
     }
     if (records.has(record.gameId)) {
       throw new Error(`resume checkpoint duplicates game ${record.gameId}`);
     }
-    records.set(record.gameId, value);
+    records.set(record.gameId, value.record);
   }
   return records;
 }
 
-export function saveResumedRecord(resumeDir, gameId, result) {
+export function saveResumedRecord(resumeDir, gameId, result, { capsuleHash } = {}) {
   if (!resumeDir) return null;
+  const boundCapsuleHash = requireCapsuleHash(capsuleHash);
   const safeId = String(gameId || '').replace(/[^a-z0-9_]/gi, '');
   if (!safeId) throw new Error(`resume checkpoint requires a game id, got ${JSON.stringify(gameId)}`);
   const file = path.join(resumeDir, `${safeId}.json`);
-  writeJsonAtomic(file, result, { root: resumeDir, exclusive: true });
+  writeJsonAtomic(file, {
+    schema: RESUME_RECORD_SCHEMA,
+    capsuleHash: boundCapsuleHash,
+    record: result,
+  }, { root: resumeDir, exclusive: true });
   return file;
 }
 
@@ -74,10 +88,13 @@ export function saveResumedRecord(resumeDir, gameId, result) {
  * replays zero games must not publish an empty fresh-session scorecard as
  * the run's official score; the latest saved one is the real evidence.
  */
-export function saveSessionScorecard(resumeDir, { replayedGames, scorecard }) {
+export function saveSessionScorecard(resumeDir, { replayedGames, scorecard, capsuleHash }) {
   if (!resumeDir) return null;
+  const boundCapsuleHash = requireCapsuleHash(capsuleHash);
   const file = path.join(resumeDir, 'scorecard.json');
   fs.writeFileSync(file, `${JSON.stringify({
+    schema: SESSION_SCORECARD_SCHEMA,
+    capsuleHash: boundCapsuleHash,
     savedAt: new Date().toISOString(),
     replayedGames: Number(replayedGames) || 0,
     scorecard: scorecard ?? null,
@@ -85,8 +102,9 @@ export function saveSessionScorecard(resumeDir, { replayedGames, scorecard }) {
   return file;
 }
 
-export function loadLatestSessionScorecard(resumeDir) {
+export function loadLatestSessionScorecard(resumeDir, { capsuleHash, allowedCapsuleHashes = [] } = {}) {
   if (!resumeDir) return null;
+  const acceptedCapsules = acceptedCapsuleSet(capsuleHash, allowedCapsuleHashes);
   const file = path.join(resumeDir, 'scorecard.json');
   if (!fs.existsSync(file)) return null;
   const stat = fs.lstatSync(file);
@@ -94,8 +112,23 @@ export function loadLatestSessionScorecard(resumeDir) {
     throw new Error('resume scorecard checkpoint is not a bounded regular file');
   }
   const value = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (typeof value?.savedAt !== 'string' || !Number.isInteger(value?.replayedGames)) {
+  if (value?.schema !== SESSION_SCORECARD_SCHEMA
+      || !acceptedCapsules.has(value?.capsuleHash)
+      || typeof value?.savedAt !== 'string'
+      || !Number.isInteger(value?.replayedGames)) {
     throw new Error('resume scorecard checkpoint is malformed');
   }
   return value;
+}
+
+function acceptedCapsuleSet(capsuleHash, allowedCapsuleHashes) {
+  const accepted = new Set([requireCapsuleHash(capsuleHash)]);
+  for (const value of allowedCapsuleHashes) accepted.add(requireCapsuleHash(value));
+  return accepted;
+}
+
+function requireCapsuleHash(value) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error('resume checkpoint requires a valid run capsule hash');
+  return text;
 }

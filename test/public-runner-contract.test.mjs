@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
+  const capsuleHash = 'a'.repeat(64);
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
   fs.mkdirSync(path.join(root, 'runs'));
@@ -227,6 +228,10 @@ process.exit(result.status ?? 1);
       OPENAI_REASONING_EFFORT: 'max',
       AVO_MAX_ACTIONS: '200',
       AVO_MEMORY_DIR: path.join(root, 'memory'),
+      AVO_REAL_RUN_ID: 'contract-run',
+      AVO_RESUME_DIR: path.join(root, 'runs', 'private', 'contract-run', 'resume'),
+      AVO_RUN_CAPSULE_HASH: capsuleHash,
+      AVO_RUN_CLASS: 'cold-start',
     },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -241,4 +246,11 @@ process.exit(result.status ?? 1);
   assert.equal(report.aggregateScorecard.games, 25);
   assert.equal(report.aggregateScorecard.levels, 50);
   assert.equal(report.summary.allWon, true);
+  assert.equal(report.runCapsuleHash, capsuleHash);
+  assert.equal(report.runClass, 'cold-start');
+  const checkpoint = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'g01.json',
+  ), 'utf8'));
+  assert.equal(checkpoint.schema, 'avo.resume-record.v2');
+  assert.equal(checkpoint.capsuleHash, capsuleHash);
 });

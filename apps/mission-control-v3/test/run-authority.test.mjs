@@ -7,6 +7,7 @@ import {
   requireRunMode,
   summarizeMissionControlReport,
 } from '../lib/run-authority.mjs';
+import { publicRunCapsuleFixture } from '../../../test/support/run-capsule.mjs';
 
 function authoritative(overrides = {}) {
   return {
@@ -16,6 +17,7 @@ function authoritative(overrides = {}) {
     officialScore: { value: 0, origin: 'aggregateScorecard.score' },
     aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
     provenance: {
+      runCapsule: publicRunCapsuleFixture(),
       noMockAttestation: true,
       wireApi: 'responses',
       publicGameCount: 25,
@@ -86,6 +88,12 @@ test('official state requires all benchmark provenance gates and preserves score
     authoritative({ provenance: { ...authoritative().provenance, noMockAttestation: false } }),
     authoritative({ completeness: { complete: true, expectedCount: 25, actualCount: 24 } }),
     authoritative({ officialScore: { value: null, origin: 'aggregateScorecard.score' } }),
+    authoritative({
+      provenance: {
+        ...authoritative().provenance,
+        runCapsule: publicRunCapsuleFixture({ runClass: 'diagnostic-migrated', comparable: false }),
+      },
+    }),
   ]) {
     assert.equal(summarizeMissionControlReport(report, 'competition').official, false);
   }

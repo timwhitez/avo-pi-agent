@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { publicRunCapsuleFixture } from './support/run-capsule.mjs';
 
 function fixture() {
   const roundId = 'repair-round-0';
@@ -14,6 +15,7 @@ function fixture() {
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0.75, origin: 'aggregateScorecard.score' },
       provenance: {
+        runCapsule: publicRunCapsuleFixture(),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {
@@ -166,4 +168,21 @@ test('rejects mismatched run identity and provider/runtime attestation gaps', ()
   const result = evaluateRoundAuthority(input);
   assert.equal(result.authoritative, false);
   assert.ok(result.reasons.length >= 4);
+});
+
+test('rejects missing and migrated run capsules', () => {
+  const missing = fixture();
+  delete missing.benchmark.provenance.runCapsule;
+  const missingResult = evaluateRoundAuthority(missing);
+  assert.equal(missingResult.authoritative, false);
+  assert.ok(missingResult.reasons.some((reason) => /run capsule attestation/.test(reason)));
+
+  const migrated = fixture();
+  migrated.benchmark.provenance.runCapsule = publicRunCapsuleFixture({
+    runClass: 'diagnostic-migrated',
+    comparable: false,
+  });
+  const migratedResult = evaluateRoundAuthority(migrated);
+  assert.equal(migratedResult.authoritative, false);
+  assert.ok(migratedResult.reasons.some((reason) => /not comparable/.test(reason)));
 });
