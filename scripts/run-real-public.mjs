@@ -111,6 +111,7 @@ try {
   }
 
   stage.value = 'agent-execution';
+  const beforeSnapshotMs = Date.now();
   const before = snapshotJsonFiles(runsRoot);
   const stdoutFile = path.join(privateDir, 'runner.stdout.log');
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
@@ -143,9 +144,25 @@ try {
   }
 
   stage.value = 'artifact-discovery';
+  // With a pinned run ID the child writes a deterministic report filename,
+  // so a resumed pass rewrites a file that already existed before this
+  // process started and never appears as "new". Accept that exact file when
+  // it was rewritten during this pass; selectRunReport still validates its
+  // runId, kind and record set.
+  const candidateFiles = findNewJsonReports(runsRoot, before)
+    .filter((file) => !file.startsWith(privateDir) && file !== publicFile);
+  if (resuming) {
+    const deterministic = path.resolve(runsRoot, `${runId}-official-public-environments.json`);
+    if (!candidateFiles.includes(deterministic) && fs.existsSync(deterministic)) {
+      const stat = fs.lstatSync(deterministic);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error('deterministic run report path is not a regular file');
+      }
+      if (stat.mtimeMs >= beforeSnapshotMs) candidateFiles.unshift(deterministic);
+    }
+  }
   const selected = selectRunReport(
-    findNewJsonReports(runsRoot, before)
-      .filter((file) => !file.startsWith(privateDir) && file !== publicFile),
+    candidateFiles,
     { runId, kind: 'official-public-environments', root: runsRoot },
   );
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
