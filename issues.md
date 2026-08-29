@@ -152,12 +152,12 @@ The order matters because performance experiments are meaningless until the meas
 
 ### Phase 0 — freeze and correct the evidence boundary
 
-Implement [#170](https://github.com/timwhitez/avo-pi-agent/issues/170), then [#169](https://github.com/timwhitez/avo-pi-agent/issues/169), then the P0 historical-correction slice of [#182](https://github.com/timwhitez/avo-pi-agent/issues/182).
+Implement [#170](https://github.com/timwhitez/avo-pi-agent/issues/170), restore the clean-checkout local gate in [#71](https://github.com/timwhitez/avo-pi-agent/issues/71), then [#169](https://github.com/timwhitez/avo-pi-agent/issues/169). Resolve the lifecycle chain #166 → #167 → #168 before the remaining historical-correction slice of [#182](https://github.com/timwhitez/avo-pi-agent/issues/182).
 
 Deliverables:
 
-- preserve the historical artifact unchanged;
-- add a correction record that classifies it as a recovered diagnostic run;
+- preserve the historical records and observed scorecard value while changing their acceptance classification;
+- classify the cross-commit artifact as a migrated diagnostic run rather than accepted evidence;
 - set the 25-game official aggregate to unavailable;
 - define the versioned run capsule and result schema;
 - make publication fail closed when score coverage or provenance is incomplete.
@@ -357,15 +357,17 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 
 **Last synchronized:** 2026-08-30
 
-- Open Issues audited: **17/17**; all remain valid after the corrections recorded in their bodies and audit comments.
-- Open implementation PRs: **0**. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) is this tracking/audit document only.
+- Open Issues audited: **18/18**. The original 17 remain valid after correction; [#71](https://github.com/timwhitez/avo-pi-agent/issues/71) was re-opened after a supported-runtime clean-checkout failure proved its remaining package-contract defect.
+- Open implementation PRs: **1** — Draft [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) remains the tracking/audit document only.
 - Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
 - PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
+- PR #184 local gates: `npm ci` passed; **340/340 Node tests**; secret scan; **25/25** offline games; Python bridge compilation; Mission Control **81/81** plus Next standalone production build; `git diff --check`. No public benchmark.
 - Public benchmark: **not run**. It remains blocked until the P0 validity repairs are integrated into one exact test state.
 
 | Issue | Audit state | Fix PR | Independent review | Dependency / next state |
 |---|---|---|---|---|
-| #170 | Valid P0 | — | — | **NEXT** — capsule identity foundation |
+| #170 | Valid P0; implementation complete locally | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | In progress on exact head `1dd1e5d` | Await independent verdict; PR remains unmerged |
+| #71 | Valid P0 local-gate defect; stale body corrected and issue re-opened | — | — | Clean checkout lacks the manifest/lock required by its first acceptance stage; independent PR after #170 review |
 | #169 | Valid P0; evidence wording corrected | — | — | After #170 |
 | #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
 | #167 | Valid P0; cross-run chronology corrected | — | — | After #166 |
