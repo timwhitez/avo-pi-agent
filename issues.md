@@ -362,13 +362,13 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 - Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
 - PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
 - PR #184 local gates: `npm ci` passed; **340/340 Node tests**; secret scan; **25/25** offline games; Python bridge compilation; Mission Control **81/81** plus Next standalone production build; `git diff --check`. No public benchmark.
-- PR #185 local gates: clean Mission Control `npm ci`; **81/81** app tests; Next standalone production build; **326/326** root Node tests; secret scan; **25/25** offline games; Python bridge compilation; JSON parse; `git diff --check`. No public benchmark.
+- PR #185 local gates after review repair: clean Mission Control `npm ci` of 926 packages; production audit **0 vulnerabilities**; **81/81** app tests; Next 16.3.3 standalone production build; **327/327** root Node tests; secret scan; **25/25** offline games; Python bridge compilation; JSON parse; `git diff --check`. No public benchmark.
 - Public benchmark: **not run**. It remains blocked until the P0 validity repairs are integrated into one exact test state.
 
 | Issue | Audit state | Fix PR | Independent review | Dependency / next state |
 |---|---|---|---|---|
-| #170 | Valid P0; implementation complete locally | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | In progress on exact head `1dd1e5d` | Await independent verdict; PR remains unmerged |
-| #71 | Valid P0 local-gate defect; implementation complete locally | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | In progress on exact head `7e4e385` | Await independent verdict; PR remains unmerged |
+| #170 | Valid P0; first implementation under repair | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | Changes requested on `1dd1e5d`: state binding, execution revalidation, repair-state propagation, public commitment, isolated-Python identity | Fix every finding, rerun gates, then exact-head re-review; PR remains unmerged |
+| #71 | Valid P0 local-gate defect; implementation complete locally | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | Re-review in progress on `5493bed`; first review found and prompted removal of 2 high/2 moderate vulnerabilities | Await independent verdict; PR remains unmerged |
 | #169 | Valid P0; evidence wording corrected | — | — | After #170 |
 | #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
 | #167 | Valid P0; cross-run chronology corrected | — | — | After #166 |
