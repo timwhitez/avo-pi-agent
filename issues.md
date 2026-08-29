@@ -358,16 +358,16 @@ Do not use the unqualified phrase “model capability insufficient” unless the
 **Last synchronized:** 2026-08-30
 
 - Issues audited: **18/18**. **17 remain open**; [#71](https://github.com/timwhitez/avo-pi-agent/issues/71) was proved necessary, fixed by reviewed Draft PR #185, and closed with exact-head evidence.
-- Open implementation PRs: **2** — Draft [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170 and Draft [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) for #71. Draft [#183](https://github.com/timwhitez/avo-pi-agent/pull/183) remains the tracking/audit document only.
+- Open Draft PRs: **3** — implementation [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) for #170, reviewed implementation [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) for #71, and this tracking/audit-only PR #183. None is merged.
 - Calibrated local baseline: `PATH=.venv/bin:$PATH node --test` — **326 passed, 0 failed, 0 skipped** on `d7012e3`.
 - PR #183 local gates: **326/326 Node tests**, secret scan passed, **25/25** offline contract games won, Python bridge compiled, and `git diff --check` passed.
-- PR #184 local gates: `npm ci` passed; **340/340 Node tests**; secret scan; **25/25** offline games; Python bridge compilation; Mission Control **81/81** plus Next standalone production build; `git diff --check`. No public benchmark.
+- PR #184 exact head `776b5d4`: clean root `npm ci` of 94 packages and `npm ls`; **345/345 Node tests**; fresh, recovered, and diagnostic-migrated production CLI paths; missing capsule and post-seal mutation rejected before ARC; secret scan; **25/25** offline games; Python bridge/JS syntax; `git diff --check`. A temporary integration stack with reviewed #185 passed clean app install of 926 packages, **81/81** tests, Next 16.3.3 webpack standalone build without Pi-runtime bundle warnings, and authenticated HTTP smoke (**401/200**). No public benchmark.
 - PR #185 local gates after review repair: clean Mission Control `npm ci` of 926 packages; production audit **0 vulnerabilities**; **81/81** app tests; Next 16.3.3 standalone production build; **327/327** root Node tests; secret scan; **25/25** offline games; Python bridge compilation; JSON parse; `git diff --check`. No public benchmark.
 - Public benchmark: **not run**. It remains blocked until the P0 validity repairs are integrated into one exact test state.
 
 | Issue | Audit state | Fix PR | Independent review | Dependency / next state |
 |---|---|---|---|---|
-| #170 | Valid P0; first implementation under repair | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | Changes requested on `1dd1e5d`: state binding, execution revalidation, repair-state propagation, public commitment, isolated-Python identity | Fix every finding, rerun gates, then exact-head re-review; PR remains unmerged |
+| #170 | Valid P0; all five first-review findings repaired at `776b5d4` | [#184](https://github.com/timwhitez/avo-pi-agent/pull/184) | Exact-head re-review in progress; first review on `1dd1e5d` requested state binding, execution revalidation, repair-state propagation, public commitment, and isolated-Python identity | Await independent verdict; keep PR Draft/unmerged; #169 remains blocked on this approval |
 | #71 | Closed with evidence; valid P0 local-gate defect fixed | [#185](https://github.com/timwhitez/avo-pi-agent/pull/185) | **APPROVE** on exact head `716b725`; first review found and prompted removal of 2 high/2 moderate vulnerabilities | PR remains Draft and unmerged for human confirmation |
 | #169 | Valid P0; evidence wording corrected | — | — | After #170 |
 | #166 | Valid P0; error/trajectory wording corrected | — | — | After benchmark validity |
