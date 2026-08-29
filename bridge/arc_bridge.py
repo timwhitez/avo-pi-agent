@@ -308,8 +308,16 @@ def main() -> int:
                     "arc_auth": auth,
                     "scorecard": jsonable(scorecard),
                     "scorecard_session": {
-                        "started_at": session_started_at,
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "started_at": jsonable(
+                            getattr(scorecard, "open_at", session_started_at)
+                        ),
+                        "observed_at": jsonable(
+                            getattr(
+                                scorecard,
+                                "last_update",
+                                datetime.now(timezone.utc),
+                            )
+                        ),
                     },
                 }
             elif command == "close":

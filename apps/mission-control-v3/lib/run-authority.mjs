@@ -1,5 +1,6 @@
 import { finiteNumberOrNull, nonNegativeIntegerOrNull } from '../../../src/local/numeric.mjs';
 import { evaluatePublicRunCapsule } from '../../../src/benchmark/run-capsule-authority.mjs';
+import { evaluateScorecardCoverage } from '../../../src/benchmark/scorecard-evidence.mjs';
 
 export const RUN_MODES = Object.freeze(['diagnostic', 'competition']);
 export const REASONING_LEVELS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -91,6 +92,7 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
     expectedRunId: report?.runId,
     benchmarkReport: report,
   });
+  const scorecardAuthority = evaluateScorecardCoverage(report?.scorecardEvidence, report?.games);
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
   requireCondition(
@@ -104,6 +106,20 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
   requireCondition(loop.complete === true && loop.loop === 'pi-sdk', 'production Pi loop attestation failed', reasons);
   requireCondition(score !== null, 'official score is absent or non-numeric', reasons);
   requireCondition(isOfficialScoreOrigin(origin), 'score origin is not an accepted official scorecard field', reasons);
+  requireCondition(
+    report?.scoreStatus === 'official'
+      && scorecardAuthority.scoreStatus === 'official'
+      && scorecardAuthority.coverage.exact === true,
+    scorecardAuthority.rejectionReason || 'scorecard session/execution coverage is not exact',
+    reasons,
+  );
+  requireCondition(
+    score !== null
+      && score === scorecardAuthority.officialScore.value
+      && origin === scorecardAuthority.officialScore.origin,
+    'published official score differs from exact scorecard evidence',
+    reasons,
+  );
   requireCondition(provenance.noMockAttestation === true, 'real-provider no-mock attestation is absent', reasons);
   requireCondition(provenance.wireApi === 'responses', 'provider wire API is not Responses', reasons);
   requireCondition(
@@ -132,7 +148,8 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
 
 export function isOfficialScoreOrigin(value) {
   const origin = String(value || '');
-  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin) || origin === 'aggregateScorecard.score';
+  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin)
+    || ['aggregateScorecard.score', 'scorecardEvidence.score'].includes(origin);
 }
 
 function requireCondition(condition, reason, reasons) {

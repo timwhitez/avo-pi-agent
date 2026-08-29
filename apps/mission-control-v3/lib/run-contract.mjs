@@ -161,12 +161,23 @@ function validateReportMode(report, expectedMode) {
     else report.summary.diagnosticScore = score;
     return;
   }
-  if (!['complete', 'failed'].includes(String(report.status || ''))) throw new Error('competition report status is invalid');
+  const status = String(report.status || '');
+  if (!['complete', 'failed', 'diagnostic-recovered', 'diagnostic-migrated'].includes(status)) {
+    throw new Error('competition report status is invalid');
+  }
   if (report.status === 'complete') {
     if (report?.completeness?.complete !== true) throw new Error('competition report is not complete');
     const score = finiteNumberOrNull(report?.officialScore?.value);
     if (score === null) throw new Error('competition report lacks an official score');
     report.officialScore.value = score;
+  } else if (status.startsWith('diagnostic-')) {
+    if (report?.completeness?.complete !== true) throw new Error('diagnostic competition report is not complete');
+    if (finiteNumberOrNull(report?.officialScore?.value) !== null) {
+      throw new Error('diagnostic competition report cannot carry an official score');
+    }
+    if (status === 'diagnostic-recovered' && report?.scoreStatus !== 'rejected') {
+      throw new Error('diagnostic recovery must disclose rejected scorecard coverage');
+    }
   }
 }
 

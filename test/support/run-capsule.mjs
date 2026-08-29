@@ -3,12 +3,64 @@ import crypto from 'node:crypto';
 import { canonicalJson, sealRunCapsule } from '../../src/benchmark/run-capsule.mjs';
 import { projectPublicRunCapsule } from '../../src/benchmark/run-capsule-public.mjs';
 import { fingerprint } from '../../src/benchmark/redaction.mjs';
+import { evaluateScorecardCoverage, normalizeScorecardSnapshot } from '../../src/benchmark/scorecard-evidence.mjs';
 
 const ARC_RUNTIME = Object.freeze({
   arcAgiVersion: '0.9.9',
   arcEngineVersion: '0.9.9',
   officialPackageAttested: true,
 });
+
+export function scorecardCoverageFixture({
+  versionedGameIds = ['g1-v1'],
+  score = 0,
+  sessionId = 'test-scorecard',
+} = {}) {
+  const evidence = normalizeScorecardSnapshot({
+    scorecard_session: {
+      started_at: '2026-08-30T00:00:00Z',
+      observed_at: '2026-08-30T00:01:00Z',
+    },
+    scorecard: {
+      card_id: sessionId,
+      score,
+      total_environments: versionedGameIds.length,
+      total_actions: versionedGameIds.length,
+      environments: versionedGameIds.map((versionedGameId, index) => ({
+        id: versionedGameId,
+        runs: [{
+          id: versionedGameId,
+          guid: `${sessionId}-${index}`,
+          score: 0,
+          levels_completed: 0,
+          actions: 1,
+          resets: 0,
+          state: 'GAME_OVER',
+          completed: false,
+        }],
+      })),
+    },
+  });
+  const games = versionedGameIds.map((versionedGameId) => {
+    const gameEvidence = evidence.games.find((game) => game.versionedGameId === versionedGameId);
+    return {
+      gameId: versionedGameId.split('-')[0],
+      versionedGameId,
+      executions: [{
+        versionedGameId,
+        executionIdSha256: gameEvidence.executions[0].executionIdSha256,
+      }],
+    };
+  });
+  const authority = evaluateScorecardCoverage([evidence], games);
+  return Object.freeze({
+    games: Object.freeze(games),
+    scoreStatus: authority.scoreStatus,
+    scorecardCoverage: authority.coverage,
+    scorecardEvidence: authority.scorecards,
+    officialScore: authority.officialScore,
+  });
+}
 
 export function privateRunCapsuleEvidenceFixture({
   runId = 'test-run',
@@ -135,7 +187,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       gameAttempts: 3,
       transientTurnRecoveries: 5,
       sessionTopology: 'one-arcade-session-per-process-pass',
-      scorecardBinding: 'capsule-bound-state-checkpoint-v3',
+      scorecardBinding: 'exact-session-execution-v4',
       providerStreamTimeoutMs: 1_200_000,
       providerStreamMaxRetries: 4,
       config: {

@@ -5,20 +5,23 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
 } from './support/run-capsule.mjs';
 
-function fixture() {
+function fixture(score = 0.75) {
   const roundId = 'repair-round-0';
   const versionedGameIds = ['g1-v1', 'g2-v1'];
   const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({
     runId: roundId,
     versionedGameIds,
   });
+  const scorecard = scorecardCoverageFixture({ versionedGameIds, score });
   return {
     roundId,
     privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
+      ...scorecard,
       runId: roundId,
       status: 'complete',
       completeness: {
@@ -29,7 +32,6 @@ function fixture() {
         versionedGameIds,
       },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
-      officialScore: { value: 0.75, origin: 'aggregateScorecard.score' },
       privateArtifactHashes: {
         runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
       },
@@ -50,10 +52,6 @@ function fixture() {
           proofHash: 'd'.repeat(64),
         },
       },
-      games: versionedGameIds.map((versionedGameId) => ({
-        gameId: versionedGameId.split('-')[0],
-        versionedGameId,
-      })),
     },
     analysis: {
       runId: roundId,
@@ -90,21 +88,20 @@ test('accepts only a complete real-provider official-score v5 trajectory round',
   assert.equal(result.clean, true);
   assert.equal(result.reasons.length, 0);
   assert.equal(result.providerAttestationVersion, 2);
-  assert.deepEqual(result.officialScore, { value: 0.75, origin: 'aggregateScorecard.score' });
+  assert.deepEqual(result.officialScore, { value: 0.75, origin: 'scorecardEvidence.score' });
 });
 
 test('preserves a genuine numeric official score of zero', () => {
-  const input = fixture();
-  input.benchmark.officialScore.value = 0;
+  const input = fixture(0);
   const result = evaluateRoundAuthority(input);
   assert.equal(result.authoritative, true);
-  assert.deepEqual(result.officialScore, { value: 0, origin: 'aggregateScorecard.score' });
+  assert.deepEqual(result.officialScore, { value: 0, origin: 'scorecardEvidence.score' });
 });
 
 test('rejects coercible non-numeric score values even with an official origin', () => {
   for (const value of [null, undefined, '', '   ', false, true, [], [1], {}, '0x10', 'Infinity']) {
     const input = fixture();
-    input.benchmark.officialScore.value = value;
+    input.benchmark.officialScore = { ...input.benchmark.officialScore, value };
     const result = evaluateRoundAuthority(input);
     assert.equal(result.authoritative, false, `unexpected authority for ${JSON.stringify(value)}`);
     assert.equal(result.officialScore.value, null);
@@ -139,10 +136,31 @@ test('rejects a missing or non-official score origin', () => {
   assert.equal(evaluateRoundAuthority(missing).authoritative, false);
 
   const local = fixture();
-  local.benchmark.officialScore.origin = 'localHeuristic.score';
+  local.benchmark.officialScore = { ...local.benchmark.officialScore, origin: 'localHeuristic.score' };
   const result = evaluateRoundAuthority(local);
   assert.equal(result.authoritative, false);
   assert.ok(result.reasons.some((reason) => /score origin/.test(reason)));
+});
+
+test('rejects missing or mixed scorecard session/execution evidence', () => {
+  const missing = fixture();
+  delete missing.benchmark.scorecardEvidence;
+  const missingResult = evaluateRoundAuthority(missing);
+  assert.equal(missingResult.authoritative, false);
+  assert.ok(missingResult.reasons.some((reason) => /scorecard evidence is missing/i.test(reason)));
+
+  const mixed = fixture();
+  mixed.benchmark.scorecardEvidence = [
+    ...mixed.benchmark.scorecardEvidence,
+    ...scorecardCoverageFixture({
+      versionedGameIds: ['g1-v1', 'g2-v1'],
+      score: 0.5,
+      sessionId: 'second-session',
+    }).scorecardEvidence,
+  ];
+  const mixedResult = evaluateRoundAuthority(mixed);
+  assert.equal(mixedResult.authoritative, false);
+  assert.ok(mixedResult.reasons.some((reason) => /multiple scorecard sessions/i.test(reason)));
 });
 
 test('rejects old recorder, incomplete detector coverage or game-set mismatch', () => {

@@ -181,6 +181,7 @@ class GameAction(Enum):
         object.__setattr__(self, "action_data", data)
   `);
   fs.writeFileSync(path.join(fakePy, 'arc_agi.py'), String.raw`
+from datetime import datetime, timezone
 from enum import Enum
 from arcengine import GameAction
 
@@ -199,16 +200,21 @@ class Frame:
         self.state = env.state
         self.levels_completed = env.level
         self.win_levels = env.win_levels
-        self.guid = f"{env.game_id}-{env.level}-{env.steps}"
+        self.guid = env.guid
         self.full_reset = False
         self.available_actions = [
             GameAction.RESET, GameAction.ACTION1, GameAction.ACTION2,
             GameAction.ACTION3, GameAction.ACTION4,
         ]
 
+class Scorecard(dict):
+    open_at = datetime(2026, 8, 30, 0, 0, tzinfo=timezone.utc)
+    last_update = datetime(2026, 8, 30, 0, 1, tzinfo=timezone.utc)
+
 class Env:
-    def __init__(self, game_id, size):
+    def __init__(self, game_id, size, guid):
         self.game_id = game_id
+        self.guid = guid
         self.size = size
         self.win_levels = 2
         self.level = 0
@@ -252,7 +258,7 @@ class Env:
 
 class Arcade:
     def __init__(self, operation_mode=None, logger=None):
-        self.environments = {}
+        self.environments = []
         self.make_calls = 0
         self.arc_api_key = "mock-test-key"
 
@@ -263,15 +269,31 @@ class Arcade:
         self.make_calls += 1
         short = game_id.split("-")[0]
         index = int(short[1:])
-        env = Env(short, 3 + index % 3)
-        self.environments[short] = env
+        env = Env(game_id, 3 + index % 3, f"{game_id}-run-{self.make_calls}")
+        self.environments.append(env)
         return env
 
     def get_scorecard(self):
-        completed = sum(env.level for env in self.environments.values())
-        return {"score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
-                "games": len(self.environments), "levels": completed,
-                "make_calls": self.make_calls}
+        completed = sum(env.level for env in self.environments)
+        return Scorecard({
+            "card_id": "contract-scorecard",
+            "score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
+            "total_environments": len(self.environments),
+            "total_actions": sum(env.steps for env in self.environments),
+            "environments": [{
+                "id": env.game_id,
+                "runs": [{
+                    "id": env.game_id,
+                    "guid": env.guid,
+                    "score": 100.0 if env.state == "WIN" else 0.0,
+                    "levels_completed": env.level,
+                    "actions": env.steps,
+                    "resets": 0,
+                    "state": env.state,
+                    "completed": env.state == "WIN",
+                }],
+            } for env in self.environments],
+        })
   `);
 
   // The production child-environment boundary deliberately strips
@@ -430,11 +452,17 @@ process.exit(result.status ?? 1);
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
   const report = JSON.parse(fs.readFileSync(path.join(root, 'runs', reports[0]), 'utf8'));
-  assert.equal(report.aggregateScorecard.games, 25);
-  assert.equal(report.aggregateScorecard.levels, 50);
-  assert.equal(report.aggregateScorecard.make_calls, 25);
+  assert.equal(report.scoreStatus, 'official');
+  assert.equal(report.scorecardCoverage.exact, true);
+  assert.equal(report.scorecardEvidence.length, 1);
+  assert.equal(report.scorecardEvidence[0].gameCount, 25);
+  assert.equal(report.scorecardEvidence[0].executionCount, 25);
+  assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
+  assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
+  assert.equal(report.aggregateScorecard.score, 100);
   assert.equal(report.summary.allWon, true);
   assert.equal(report.results[0].versionedGameId, 'g01-v1');
+  assert.match(report.results[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
   assert.equal(report.runCapsuleHash, capsule.capsuleHash);
   assert.equal(report.runClass, 'cold-start');
   const checkpoint = JSON.parse(fs.readFileSync(path.join(

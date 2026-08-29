@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
-import { loadLatestSessionScorecard, loadResumedRecords, resolveResumeDirectory, saveResumedRecord, saveSessionScorecard } from './benchmark/resume-cache.mjs';
+import { loadResumedRecords, loadSessionScorecards, resolveResumeDirectory, saveResumedRecord, saveSessionScorecard } from './benchmark/resume-cache.mjs';
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
@@ -20,6 +20,7 @@ import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
+import { evaluateScorecardCoverage, hashExecutionId, normalizeScorecardSnapshot } from './benchmark/scorecard-evidence.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
 
@@ -117,9 +118,10 @@ async function runPublic(args) {
   const selection = parseSelection(args);
   const results = [];
   let replayedGames = 0;
+  const replayedGameIds = new Set();
   const environment = new ArcBridgeClient({ python: config.python });
   const progress = createProgressStatusReporter();
-  let aggregateScorecard = null;
+  let sessionScorecards = [];
   let selected = [];
   let runError = null;
   let resumeDir = null;
@@ -192,6 +194,7 @@ async function runPublic(args) {
         return;
       }
       replayedGames += 1;
+      replayedGameIds.add(gameId);
       const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
@@ -226,6 +229,7 @@ async function runPublic(args) {
       try {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
+        const executions = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
@@ -235,9 +239,16 @@ async function runPublic(args) {
             config: gameConfig,
             captureScorecard: false,
           }), gameConfig);
+          const agentResult = await agent.run();
+          const executionIdSha256 = hashExecutionId(agent.frame?.guid, `${versionedGameId} execution GUID`);
+          if (executions.some((execution) => execution.executionIdSha256 === executionIdSha256)) {
+            throw new Error(`${versionedGameId} reused an execution GUID across attempts`);
+          }
+          executions.push({ versionedGameId, executionIdSha256 });
           result = {
-            ...await agent.run(),
+            ...agentResult,
             versionedGameId,
+            executions: executions.slice(),
             actionBudget,
             outerTurnBudget: gameConfig.maxOuterTurns,
           };
@@ -311,26 +322,32 @@ async function runPublic(args) {
   } catch (error) {
     runError = error;
   } finally {
-    aggregateScorecard = await environment.scorecard().catch(() => null);
-    if (resumeDir && replayedGames > 0) {
-      // The session actually played games: its scorecard is the latest real
-      // score evidence for this run.
-      saveSessionScorecard(resumeDir, {
-        replayedGames,
-        scorecard: aggregateScorecard,
-        capsuleHash: runCapsuleHash,
-        allowedCapsuleHashes: sourceCapsuleHashes,
-        stateBinding: currentStateBinding(config),
-      });
-    } else if (resumeDir && replayedGames === 0) {
-      // Every game came from checkpoints; a fresh empty session's scorecard
-      // must not masquerade as the run's official score.
-      const saved = loadLatestSessionScorecard(resumeDir, {
-        capsuleHash: runCapsuleHash,
-        allowedCapsuleHashes: sourceCapsuleHashes,
-        stateBinding: currentStateBinding(config),
-      });
-      if (saved?.scorecard) aggregateScorecard = saved.scorecard;
+    try {
+      if (replayedGames > 0) {
+        const evidence = normalizeScorecardSnapshot(await environment.scorecardEvidence());
+        const replayedRecords = results.filter((result) => result && replayedGameIds.has(result.gameId));
+        if (resumeDir) {
+          saveSessionScorecard(resumeDir, {
+            evidence,
+            records: replayedRecords,
+            capsuleHash: runCapsuleHash,
+            allowedCapsuleHashes: sourceCapsuleHashes,
+            stateBinding: currentStateBinding(config),
+          });
+        } else {
+          sessionScorecards = [evidence];
+        }
+      }
+      if (resumeDir) {
+        sessionScorecards = loadSessionScorecards(resumeDir, {
+          capsuleHash: runCapsuleHash,
+          allowedCapsuleHashes: sourceCapsuleHashes,
+          stateBinding: currentStateBinding(config),
+          requireStateMatch: runClass !== 'diagnostic-migrated',
+        });
+      }
+    } catch (error) {
+      runError ??= error;
     }
     await environment.close();
     await progress.flush();
@@ -338,7 +355,7 @@ async function runPublic(args) {
 
   const completed = results.filter(Boolean);
   const report = makeReport('official-public-environments', completed, config, {
-    aggregateScorecard,
+    scorecards: sessionScorecards,
     expectedGames: selected.length,
     runError,
   });
@@ -346,6 +363,7 @@ async function runPublic(args) {
   report.runClass = runClass;
   if (resumeDir) {
     report.scorecardCoverage = {
+      ...report.scorecardCoverage,
       replayedGames,
       checkpointedGames: Math.max(0, completed.length - replayedGames),
     };
@@ -376,10 +394,10 @@ function currentStateBinding(config) {
   });
 }
 
-function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
+function makeReport(kind, results, config, { scorecards = [], expectedGames = results.length, runError = null } = {}) {
   const wins = results.filter((r) => r.won).length;
   const safeResults = redactRuntimeObject(results);
-  const safeScorecard = redactRuntimeObject(aggregateScorecard);
+  const scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
   return {
     schemaVersion: 1,
     runId: process.env.AVO_REAL_RUN_ID || null,
@@ -395,23 +413,21 @@ function makeReport(kind, results, config, { aggregateScorecard = null, expected
       totalLevels: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
       totalActions: safeResults.reduce((sum, r) => sum + r.actions, 0),
       allWon: !runError && expectedGames > 0 && safeResults.length === expectedGames && wins === expectedGames,
-      officialScore: extractOfficialScore(safeScorecard),
+      officialScore: scoreAuthority.officialScore.value,
     },
-    aggregateScorecard: safeScorecard,
+    scoreStatus: scoreAuthority.scoreStatus,
+    scoreRejectionReason: scoreAuthority.rejectionReason,
+    scorecardCoverage: scoreAuthority.coverage,
+    scorecardEvidence: redactRuntimeObject(scoreAuthority.scorecards),
+    officialScore: scoreAuthority.officialScore,
+    ...(scoreAuthority.unacceptedScoreEvidence
+      ? { unacceptedScoreEvidence: scoreAuthority.unacceptedScoreEvidence }
+      : {}),
+    aggregateScorecard: scoreAuthority.scoreStatus === 'official'
+      ? { score: scoreAuthority.officialScore.value }
+      : null,
     results: safeResults,
   };
-}
-
-function extractOfficialScore(scorecard) {
-  if (!scorecard || typeof scorecard !== 'object') return null;
-  const candidates = [
-    scorecard.score,
-    scorecard.total_score,
-    scorecard.totalScore,
-    scorecard.aggregate_score,
-    scorecard.aggregateScore,
-  ];
-  return candidates.find((value) => typeof value === 'number' && Number.isFinite(value)) ?? null;
 }
 
 function requiredCapsuleHash(value) {

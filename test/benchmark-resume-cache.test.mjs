@@ -6,13 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  loadLatestSessionScorecard,
+  loadSessionScorecards,
   loadResumedRecords,
   resolveResumeDirectory,
   saveResumedRecord,
   saveSessionScorecard,
 } from '../src/benchmark/resume-cache.mjs';
 import { canonicalJson } from '../src/benchmark/run-capsule.mjs';
+import { hashExecutionId, normalizeScorecardSnapshot } from '../src/benchmark/scorecard-evidence.mjs';
 
 function sandbox() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-resume-'));
@@ -30,6 +31,10 @@ const record = (gameId, overrides = {}) => ({
   won: false,
   error: null,
   loop: 'pi-sdk',
+  executions: [{
+    versionedGameId: `${gameId}-00000000`,
+    executionIdSha256: hashExecutionId(`${gameId}-execution`),
+  }],
   lineage: { proposals: 1, pending: 0, committed: 1, attempts: 1 },
   ...overrides,
 });
@@ -44,6 +49,34 @@ const stateBinding = Object.freeze({
   sha256: crypto.createHash('sha256').update(canonicalJson(stateCore)).digest('hex'),
 });
 const options = Object.freeze({ capsuleHash, stateBinding });
+
+function scorecardEvidence(gameIds, { cardId = 'card-a', score = 0.0011 } = {}) {
+  return normalizeScorecardSnapshot({
+    scorecard_session: {
+      started_at: '2026-08-30T00:00:00Z',
+      observed_at: '2026-08-30T00:01:00Z',
+    },
+    scorecard: {
+      card_id: cardId,
+      score,
+      total_environments: gameIds.length,
+      total_actions: gameIds.length * 41,
+      environments: gameIds.map((gameId) => ({
+        id: `${gameId}-00000000`,
+        runs: [{
+          id: `${gameId}-00000000`,
+          guid: `${gameId}-execution`,
+          score: 0,
+          levels_completed: 2,
+          actions: 41,
+          resets: 0,
+          state: 'NOT_FINISHED',
+          completed: false,
+        }],
+      })),
+    },
+  });
+}
 
 test('resume directory must live inside runs/private and be a regular directory', () => {
   const root = sandbox();
@@ -96,24 +129,56 @@ test('the scorecard sidecar is not treated as a game record', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-d/resume', { root });
   saveResumedRecord(dir, 'ls20', record('ls20'), options);
-  saveSessionScorecard(dir, { replayedGames: 8, scorecard: { score: 0.0011 }, ...options });
+  saveSessionScorecard(dir, {
+    evidence: scorecardEvidence(['ls20']), records: [record('ls20')], ...options,
+  });
   const loaded = loadResumedRecords(dir, options);
   assert.equal(loaded.size, 1);
   assert.ok(loaded.has('ls20'));
 });
 
-test('session scorecard checkpoints round-trip and validate', () => {
+test('session scorecard journal preserves every exact session and validates', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-c/resume', { root });
-  assert.equal(loadLatestSessionScorecard(dir, options), null);
-  saveSessionScorecard(dir, { replayedGames: 8, scorecard: { score: 0.0011, environments: [] }, ...options });
-  const loaded = loadLatestSessionScorecard(dir, options);
-  assert.equal(loaded.replayedGames, 8);
-  assert.equal(loaded.scorecard.score, 0.0011);
-  assert.match(loaded.savedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(loadSessionScorecards(dir, options), []);
+  saveResumedRecord(dir, 'ls20', record('ls20'), options);
+  saveSessionScorecard(dir, {
+    evidence: scorecardEvidence(['ls20']), records: [record('ls20')], ...options,
+  });
+  saveResumedRecord(dir, 'vc33', record('vc33'), options);
+  saveSessionScorecard(dir, {
+    evidence: scorecardEvidence(['vc33'], { cardId: 'card-b', score: 0.0022 }),
+    records: [record('vc33')],
+    ...options,
+  });
+  const loaded = loadSessionScorecards(dir, options);
+  assert.equal(loaded.length, 2);
+  assert.deepEqual(loaded.map((item) => item.score), [0.0011, 0.0022]);
 
-  fs.writeFileSync(path.join(dir, 'scorecard.json'), '{"savedAt": 5}');
-  assert.throws(() => loadLatestSessionScorecard(dir, options), /malformed/);
+  fs.writeFileSync(path.join(dir, 'scorecards.json'), '{"entries": 5}');
+  assert.throws(() => loadSessionScorecards(dir, options), /malformed/);
+});
+
+test('legacy latest-only scorecards fail closed instead of implying exact coverage', () => {
+  const root = sandbox();
+  const dir = resolveResumeDirectory('runs/private/run-legacy-score/resume', { root });
+  fs.writeFileSync(path.join(dir, 'scorecard.json'), JSON.stringify({ scorecard: { score: 1 } }));
+  assert.throws(() => loadSessionScorecards(dir, options), /legacy.*cannot establish/);
+});
+
+test('journal retains a rejected session scorecard instead of discarding evidence', () => {
+  const root = sandbox();
+  const dir = resolveResumeDirectory('runs/private/run-rejected-score/resume', { root });
+  saveResumedRecord(dir, 'ls20', record('ls20'), options);
+  saveSessionScorecard(dir, {
+    evidence: scorecardEvidence(['ls20', 'vc33']),
+    records: [record('ls20')],
+    ...options,
+  });
+  const journal = JSON.parse(fs.readFileSync(path.join(dir, 'scorecards.json'), 'utf8'));
+  assert.equal(journal.entries[0].captureStatus, 'rejected');
+  assert.match(journal.entries[0].captureRejectionReason, /coverage differs/);
+  assert.equal(loadSessionScorecards(dir, options).length, 1);
 });
 
 test('legacy and cross-capsule checkpoints fail closed unless the source capsule is explicit', () => {

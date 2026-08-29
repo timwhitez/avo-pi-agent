@@ -6,7 +6,8 @@ import { normalizeGameId, normalizeVersionedGameId } from './report-records.mjs'
 export const SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v1';
 
 export function hashExecutionId(value, name = 'execution ID') {
-  const text = String(value ?? '');
+  if (typeof value !== 'string') throw new Error(`${name} is absent or malformed`);
+  const text = value;
   if (!text || text !== text.trim() || text.length > 256) {
     throw new Error(`${name} is absent or malformed`);
   }
@@ -116,7 +117,9 @@ export function validateScorecardEvidence(value) {
 
 export function evaluateScorecardCoverage(values, records) {
   try {
-    const scorecards = requireArray(values, 'scorecard evidence set').map(validateScorecardEvidence);
+    const scorecards = (values === undefined || values === null
+      ? []
+      : requireArray(values, 'scorecard evidence set')).map(validateScorecardEvidence);
     const expected = normalizeRecordRefs(records);
     const observed = scorecards.flatMap((scorecard) => flattenEvidenceRefs(scorecard.games));
     const expectedKeys = expected.map(refKey);

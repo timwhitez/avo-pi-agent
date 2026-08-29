@@ -3,6 +3,7 @@ import {
   nonNegativeIntegerOrNull,
 } from '../local/numeric.mjs';
 import { evaluatePublicRunCapsule } from '../benchmark/run-capsule-authority.mjs';
+import { evaluateScorecardCoverage } from '../benchmark/scorecard-evidence.mjs';
 
 export function evaluateRoundAuthority({
   roundId,
@@ -29,6 +30,7 @@ export function evaluateRoundAuthority({
     expectedRunId: benchmark?.runId,
     benchmarkReport: benchmark,
   });
+  const scorecardAuthority = evaluateScorecardCoverage(benchmark?.scorecardEvidence, benchmark?.games);
 
   const expectedCount = nonNegativeIntegerOrNull(benchmark?.completeness?.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(benchmark?.completeness?.actualCount);
@@ -62,6 +64,20 @@ export function evaluateRoundAuthority({
   requireCondition(benchmark?.loopAttestation?.complete === true && benchmark?.loopAttestation?.loop === 'pi-sdk', 'production Pi loop attestation failed', reasons);
   requireCondition(officialScoreValue !== null, 'official score is absent or non-numeric', reasons);
   requireCondition(isOfficialScoreOrigin(officialScore?.origin), 'score origin is not an explicit official scorecard field', reasons);
+  requireCondition(
+    benchmark?.scoreStatus === 'official'
+      && scorecardAuthority.scoreStatus === 'official'
+      && scorecardAuthority.coverage.exact === true,
+    scorecardAuthority.rejectionReason || 'scorecard session/execution coverage is not exact',
+    reasons,
+  );
+  requireCondition(
+    officialScoreValue !== null
+      && officialScoreValue === scorecardAuthority.officialScore.value
+      && String(officialScore?.origin || '') === scorecardAuthority.officialScore.origin,
+    'published official score differs from exact scorecard evidence',
+    reasons,
+  );
 
   requireCondition(provenance.noMockAttestation === true, 'no-mock provider attestation is absent', reasons);
   requireCondition(provenance.wireApi === 'responses', 'provider wire API is not Responses', reasons);
@@ -195,7 +211,8 @@ function recordOrEmpty(value) {
 
 function isOfficialScoreOrigin(value) {
   const origin = String(value || '');
-  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin) || origin === 'aggregateScorecard.score';
+  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin)
+    || ['aggregateScorecard.score', 'scorecardEvidence.score'].includes(origin);
 }
 
 function isSha256(value) {

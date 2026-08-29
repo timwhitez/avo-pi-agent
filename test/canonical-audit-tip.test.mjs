@@ -10,6 +10,7 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
 } from './support/run-capsule.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
@@ -27,6 +28,7 @@ function response(payload) {
 test('canonical review tip contains replay-resistant provider proof and null-safe metrics together', async () => {
   const runId = 'round-1';
   const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({ runId });
+  const scorecard = scorecardCoverageFixture({ score: 0 });
   await assert.rejects(
     () => preflightResponsesProvider(provider, {
       nonce: challenge,
@@ -44,6 +46,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
     privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
+      ...scorecard,
       runId,
       status: 'complete',
       completeness: {
@@ -54,7 +57,6 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
         versionedGameIds: ['g1-v1'],
       },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
-      officialScore: { value: 0, origin: 'aggregateScorecard.score' },
       privateArtifactHashes: {
         runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
       },
@@ -75,7 +77,6 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
           proofHash: 'd'.repeat(64),
         },
       },
-      games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
     },
     analysis: {
       runId,

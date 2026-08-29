@@ -113,4 +113,7 @@ test('malformed timestamps, totals and raw identities fail closed', () => {
   const raw = snapshot();
   raw.scorecard.environments[0].runs[0].id = 'other-v1';
   assert.throws(() => normalizeScorecardSnapshot(raw), /differs/);
+  const nonString = snapshot();
+  nonString.scorecard.environments[0].runs[0].guid = { value: 'run-1' };
+  assert.throws(() => normalizeScorecardSnapshot(nonString), /guid is absent or malformed/);
 });

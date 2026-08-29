@@ -426,7 +426,10 @@ test('official capsules reject isolated Python until runtime and image identity 
 });
 
 test('migrated diagnostics cannot publish an official score', () => {
-  const observed = { value: 0.75, origin: 'aggregateScorecard.score' };
+  const observed = {
+    scoreStatus: 'official',
+    officialScore: { value: 0.75, origin: 'scorecardEvidence.score' },
+  };
   const result = classifyCapsuleResult({
     runClass: 'diagnostic-migrated',
     comparable: false,
@@ -434,5 +437,19 @@ test('migrated diagnostics cannot publish an official score', () => {
   assert.equal(result.status, 'diagnostic-migrated');
   assert.equal(result.officialScore.value, null);
   assert.equal(result.officialScore.origin, 'unavailable');
-  assert.deepEqual(result.unacceptedScoreEvidence, observed);
+  assert.deepEqual(result.unacceptedScoreEvidence, observed.officialScore);
+});
+
+test('mixed-session recovery remains diagnostic with its rejected score evidence', () => {
+  const scorecardAuthority = {
+    scoreStatus: 'rejected',
+    rejectionReason: 'published executions span multiple scorecard sessions',
+    officialScore: { value: null, origin: 'unavailable' },
+    unacceptedScoreEvidence: [{ score: 0.1 }, { score: 0.2 }],
+  };
+  const result = classifyCapsuleResult({ runClass: 'recovered', comparable: true }, scorecardAuthority);
+  assert.equal(result.status, 'diagnostic-recovered');
+  assert.equal(result.officialScore.value, null);
+  assert.match(result.officialScore.reason, /multiple scorecard sessions/);
+  assert.deepEqual(result.unacceptedScoreEvidence, scorecardAuthority.unacceptedScoreEvidence);
 });

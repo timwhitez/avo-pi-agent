@@ -11,6 +11,7 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
 } from '../../../test/support/run-capsule.mjs';
 
 const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
@@ -18,7 +19,9 @@ const runId = 'test-run';
 
 function authoritative(overrides = {}) {
   const capsuleProvenance = runCapsuleProvenanceFixture({ runId });
+  const scorecard = scorecardCoverageFixture({ score: 0 });
   return {
+    ...scorecard,
     runId,
     status: 'complete',
     completeness: {
@@ -29,12 +32,10 @@ function authoritative(overrides = {}) {
       versionedGameIds: ['g1-v1'],
     },
     loopAttestation: { complete: true, loop: 'pi-sdk' },
-    officialScore: { value: 0, origin: 'aggregateScorecard.score' },
     privateArtifactHashes: {
       runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
     },
     aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
-    games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
     provenance: {
       ...capsuleProvenance,
       runCapsule: publicRunCapsuleFixture(),
@@ -91,6 +92,14 @@ test('complete but non-authoritative competition report is rejected', () => {
   assert.equal(summary.authorityState, 'rejected');
   assert.equal(summary.officialScore, null);
   assert.equal(summary.reportedScore, 0.7);
+});
+
+test('competition authority rejects reports without exact scorecard execution coverage', () => {
+  const report = authoritative();
+  delete report.scorecardEvidence;
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
+  assert.equal(authority.accepted, false);
+  assert.ok(authority.reasons.some((reason) => /scorecard evidence is missing/i.test(reason)));
 });
 
 test('public report hashes cannot replace actual private capsule evidence', () => {

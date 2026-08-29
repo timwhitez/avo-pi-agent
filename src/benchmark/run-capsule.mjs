@@ -36,6 +36,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/benchmark/resume-cache.mjs',
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
+  'src/benchmark/scorecard-evidence.mjs',
   'src/benchmark/run-capsule-authority.mjs',
   'src/benchmark/run-capsule-evidence.mjs',
   'src/benchmark/run-capsule-public.mjs',
@@ -283,7 +284,7 @@ export function buildRunCapsule({
       gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
       transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
       sessionTopology: 'one-arcade-session-per-process-pass',
-      scorecardBinding: 'capsule-bound-state-checkpoint-v3',
+      scorecardBinding: 'exact-session-execution-v4',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
       providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
       config: {
@@ -370,13 +371,32 @@ export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
   });
 }
 
-export function classifyCapsuleResult(resumeDecision, observedOfficialScore) {
+export function classifyCapsuleResult(resumeDecision, scorecardAuthority) {
+  const scoreStatus = String(scorecardAuthority?.scoreStatus || 'rejected');
+  const observedOfficialScore = scorecardAuthority?.officialScore ?? Object.freeze({
+    value: null,
+    origin: 'unavailable',
+    reason: 'scorecard coverage authority is absent',
+  });
   if (resumeDecision?.comparable === true
-      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)) {
+      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)
+      && scoreStatus === 'official') {
     return Object.freeze({
       status: 'complete',
       officialScore: observedOfficialScore,
       unacceptedScoreEvidence: null,
+    });
+  }
+  if (resumeDecision?.comparable === true
+      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)) {
+    return Object.freeze({
+      status: 'diagnostic-recovered',
+      officialScore: Object.freeze({
+        value: null,
+        origin: 'unavailable',
+        reason: scorecardAuthority?.rejectionReason || 'scorecard execution coverage is not exact',
+      }),
+      unacceptedScoreEvidence: scorecardAuthority?.unacceptedScoreEvidence ?? null,
     });
   }
   if (resumeDecision?.comparable === false && resumeDecision.runClass === 'diagnostic-migrated') {

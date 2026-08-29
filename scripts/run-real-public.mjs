@@ -17,7 +17,6 @@ import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.m
 import {
   aggregateGameMetrics,
   copyRegularFileExclusive,
-  extractOfficialScore,
   findNewJsonReports,
   hashFile,
   selectRunReport,
@@ -26,6 +25,7 @@ import {
   validateProductionLoops,
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
+import { evaluateScorecardCoverage } from '../src/benchmark/scorecard-evidence.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
 import {
   assertRunStateMatchesInitial,
@@ -295,10 +295,13 @@ try {
   stage.value = 'game-completeness';
   const completeness = validateCompleteGameSet(games, selected.records);
 
-  stage.value = 'official-score-origin';
-  const observedOfficialScore = extractOfficialScore(selected.report);
+  stage.value = 'scorecard-execution-coverage';
+  const scorecardAuthority = evaluateScorecardCoverage(
+    selected.report?.scorecardEvidence,
+    selected.records,
+  );
   const aggregates = aggregateGameMetrics(selected.records);
-  const resultClassification = classifyCapsuleResult(resumeDecision, observedOfficialScore);
+  const resultClassification = classifyCapsuleResult(resumeDecision, scorecardAuthority);
   const { status: acceptedStatus, officialScore } = resultClassification;
 
   const privateManifest = {
@@ -307,6 +310,10 @@ try {
     status: acceptedStatus,
     loopAttestation,
     completeness,
+    scoreStatus: scorecardAuthority.scoreStatus,
+    scoreRejectionReason: scorecardAuthority.rejectionReason,
+    scorecardCoverage: scorecardAuthority.coverage,
+    scorecardEvidence: scorecardAuthority.scorecards,
     officialScore,
     ...(resultClassification.unacceptedScoreEvidence
       ? { unacceptedScoreEvidence: resultClassification.unacceptedScoreEvidence }
@@ -337,6 +344,10 @@ try {
     provenance,
     loopAttestation,
     completeness,
+    scoreStatus: scorecardAuthority.scoreStatus,
+    scoreRejectionReason: scorecardAuthority.rejectionReason,
+    scorecardCoverage: scorecardAuthority.coverage,
+    scorecardEvidence: scorecardAuthority.scorecards,
     officialScore,
     aggregates,
     games: selected.records,
@@ -346,10 +357,10 @@ try {
   assertNoPrivateMaterial(serialized, { explicitSecrets });
   writeJsonAtomic(publicFile, publicReport, { root: publicDir, exclusive: true });
 
-  if (resumeDecision.comparable) {
+  if (acceptedStatus === 'complete') {
     console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
   } else {
-    console.log('[real-run] DIAGNOSTIC-MIGRATED complete; official score withheld because the capsule changed');
+    console.log(`[real-run] ${acceptedStatus.toUpperCase()} complete; official score withheld: ${officialScore.reason}`);
     process.exitCode = 2;
   }
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
@@ -398,6 +409,12 @@ function normalizeCheckpointRecord(value) {
     won: value?.won === true,
     error: value?.error || null,
     loop: value?.loop || null,
+    executions: Array.isArray(value?.executions)
+      ? value.executions.map((execution) => ({
+        versionedGameId: execution?.versionedGameId || null,
+        executionIdSha256: execution?.executionIdSha256 || null,
+      }))
+      : [],
   };
 }
 
@@ -453,13 +470,13 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
   const manifestFile = path.join(privateDir, 'manifest.private.json');
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    if (manifest.status === 'complete' || manifest.status === 'diagnostic-migrated') {
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(manifest.status)) {
       throw new Error(`cannot resume ${runId}: the run already completed`);
     }
   }
   if (fs.existsSync(publicFile)) {
     const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
-    if (prior.status === 'complete' || prior.status === 'diagnostic-migrated') {
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(prior.status)) {
       throw new Error(`cannot resume ${runId}: a complete public report already exists`);
     }
   }
