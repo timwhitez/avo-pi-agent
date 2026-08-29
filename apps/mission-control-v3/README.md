@@ -49,6 +49,14 @@ Durable AVO memory and scratch workspaces are namespaced from the authenticated 
 
 The service fails closed with HTTP 503 if `AVO_MISSION_CONTROL_ACCESS_TOKEN` is missing or shorter than 24 characters. Do not put this value in source, URLs, browser storage, `NEXT_PUBLIC_*`, logs, Issues, or PR text.
 
+The document response carries a Content-Security-Policy with
+`connect-src 'self'`, so CopilotKit's browser-side update checks and
+announcement fetches to `cdn.copilotkit.ai` / `api.cloud.copilotkit.ai`
+cannot leave the host; the chat runtime itself stays same-origin through
+`/api/copilotkit`. Launch the server with
+`COPILOTKIT_TELEMETRY_DISABLED=true` as well to disable the runtime's
+anonymous telemetry.
+
 Request bodies are incrementally bounded by actual bytes before parsing or downstream forwarding. Missing, malformed, oversized, or understated `Content-Length` values cannot bypass the stream limit. JSON input additionally receives fatal UTF-8 decoding and bounded object complexity. The CopilotKit runtime receives a replacement request containing only accepted bounded bytes, never the original unbounded stream.
 
 Session creation, run reads/starts/controls, SSE openings, comparisons, and CopilotKit requests have per-subject fixed-window rate limits. The default global and per-subject active-run capacity is one, checked synchronously before a child process is spawned. Session count is bounded as well.
