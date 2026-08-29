@@ -49,8 +49,9 @@ test('validator uses npm ci, executes discovered tests, builds, and never falls 
 test('local execution documentation states the current fail-closed boundary', () => {
   const document = read('docs/LOCAL_EXECUTION.md');
   assert.match(document, /Mission Control local gate/);
-  assert.match(document, /2026-08-26/);
+  assert.match(document, /2026-08-30/);
   assert.match(document, /Next\.js 15\.5\.21/);
+  assert.match(document, /Next\.js 16\.3\.3 for the 16\.x line/);
   assert.match(document, /React\/React DOM[\s\S]*19\.1\.9/);
   assert.match(document, /CopilotKit 1\.69\.3/);
   assert.match(document, /Next\.js 16\.3\.3/);

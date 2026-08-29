@@ -117,8 +117,8 @@ The contract requires:
 - unchanged manifest, lock, and test corpus after install, tests, and build;
 - a valid `.next/BUILD_ID` and standalone server artifact.
 
-As of **2026-08-26**, the enforced public security floors are Next.js 15.5.21
-for the 15.x line, Next.js 16.2.11 for the 16.x line, and React/React DOM
+As of **2026-08-30**, the enforced public security floors are Next.js 15.5.21
+for the 15.x line, Next.js 16.3.3 for the 16.x line, and React/React DOM
 19.0.8, 19.1.9, or 19.2.8 for their respective lines. These floors correspond
 to the current upstream advisories and are minimums, not a claim that any
 specific CopilotKit combination has already passed this repository's build.
