@@ -171,6 +171,9 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
     },
     transcript: {
       policySha256: 'b'.repeat(64),
+      toolResultElisionTemplateSha256: 'c'.repeat(64),
+      toolResultTruncationTemplateSha256: 'd'.repeat(64),
+      thinkingElisionPolicySha256: 'e'.repeat(64),
       recentToolResults: 6,
       maxMessages: 160,
       maxTokens: 120_000,

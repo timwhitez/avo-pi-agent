@@ -210,10 +210,18 @@ async function runPublic(args) {
       let observedActions = 0;
       let observedLevels = 0;
       let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
+      let activeAttempt = null;
+      let contextSequence = 0;
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
           if (event.type === 'avo_runtime_status' || event.type === 'avo_context_compaction') {
-            process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject(event))}\n`);
+            process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject({
+              ...event,
+              gameId,
+              versionedGameId,
+              attempt: activeAttempt,
+              contextSequence: ++contextSequence,
+            }))}\n`);
             return;
           }
           if (event.type !== 'tool_execution_end') return;
@@ -248,6 +256,7 @@ async function runPublic(args) {
         const executionOccurrences = new Map();
         const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          activeAttempt = attempt;
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
             gameId,

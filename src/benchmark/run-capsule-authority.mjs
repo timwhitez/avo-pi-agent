@@ -137,6 +137,9 @@ export function evaluatePublicRunCapsule(value, {
   );
   const transcript = recordOrEmpty(capsule.transcript);
   requireCondition(isSha256(transcript.policySha256), 'run capsule transcript-policy digest is absent', reasons);
+  requireCondition(isSha256(transcript.toolResultElisionTemplateSha256), 'run capsule tool-result-elision template digest is absent', reasons);
+  requireCondition(isSha256(transcript.toolResultTruncationTemplateSha256), 'run capsule tool-result-truncation template digest is absent', reasons);
+  requireCondition(isSha256(transcript.thinkingElisionPolicySha256), 'run capsule thinking-elision policy digest is absent', reasons);
   requireCondition(['recentToolResults', 'maxMessages', 'maxTokens', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
   const runtime = recordOrEmpty(capsule.runtime);
   requireCondition(/^v\d+\.\d+\.\d+/.test(String(runtime.node || '')), 'run capsule Node runtime version is absent', reasons);

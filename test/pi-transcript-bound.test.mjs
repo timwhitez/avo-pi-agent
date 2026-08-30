@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   COMPACTION_NOTICE_TEMPLATE_SHA256,
+  THINKING_ELISION_POLICY_SHA256,
+  TOOL_RESULT_ELISION_TEMPLATE_SHA256,
   boundTranscript,
   replaceRuntimeStatus,
   runtimeStatusMessage,
@@ -39,7 +41,12 @@ test('older tool results are elided while recent ones and identity fields surviv
       toolResult(index),
     );
   }
-  const bounded = boundTranscript(messages, { recentToolResults: 3, maxMessages: 160 });
+  const compactions = [];
+  const bounded = boundTranscript(messages, {
+    recentToolResults: 3,
+    maxMessages: 160,
+    onCompaction: (event) => compactions.push(event),
+  });
   // Every historical toolCallId keeps its toolResult role so provider APIs see
   // a matching result per tool call; only the payload is elided.
   const results = bounded.filter((message) => message.role === 'toolResult');
@@ -52,6 +59,17 @@ test('older tool results are elided while recent ones and identity fields surviv
     assert.equal(result.toolName, 'act');
     assert.equal('details' in result, true);
   }
+  assert.deepEqual(compactions.map((event) => ({
+    mode: event.mode,
+    toolResultsElided: event.toolResultsElided,
+    thinkingBlocksRemoved: event.thinkingBlocksRemoved,
+    template: event.toolResultElisionTemplateSha256,
+  })), [{
+    mode: 'soft',
+    toolResultsElided: 9,
+    thinkingBlocksRemoved: 0,
+    template: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
+  }]);
 });
 
 test('elided environment output preserves its durable evidence lookup key', () => {
@@ -99,7 +117,12 @@ test('historical reasoning blocks are elided while the latest turn keeps its thi
     });
     messages.push(toolResult(index));
   }
-  const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 160 });
+  const compactions = [];
+  const bounded = boundTranscript(messages, {
+    recentToolResults: 2,
+    maxMessages: 160,
+    onCompaction: (event) => compactions.push(event),
+  });
   const assistants = bounded.filter((message) => message.role === 'assistant');
   const withThinking = assistants.filter((message) => message.content.some((block) => block.type === 'thinking'));
   assert.equal(withThinking.length, 1, 'only the final assistant message may keep thinking');
@@ -107,6 +130,63 @@ test('historical reasoning blocks are elided while the latest turn keeps its thi
   for (const message of assistants) {
     assert.ok(message.content.some((block) => block.type === 'text'), 'text content survives the thinking elision');
   }
+  assert.equal(compactions.length, 1, 'soft transforms are logged without a hard overflow');
+  assert.equal(compactions[0].mode, 'soft');
+  assert.equal(compactions[0].toolResultsElided, 6);
+  assert.equal(compactions[0].thinkingBlocksRemoved, 7);
+  assert.equal(compactions[0].thinkingElisionPolicySha256, THINKING_ELISION_POLICY_SHA256);
+});
+
+test('soft elision preserves the latest exact environment evidence behind newer reads', () => {
+  const ref = 'evidence-000001-123456789abc';
+  const messages = [
+    user(0),
+    {
+      ...assistant(1),
+      content: [...assistant(1).content, {
+        type: 'toolCall', id: 'call-1', name: 'act', arguments: { action: 'ACTION1' },
+      }],
+    },
+    {
+      ...toolResult(1, 'FULL EXACT FRAME [[1,2],[3,4]]'),
+      details: { evidenceRef: ref, frame: [[1, 2], [3, 4]] },
+    },
+  ];
+  for (let index = 2; index <= 8; index += 1) {
+    messages.push(
+      {
+        ...assistant(index),
+        content: [...assistant(index).content, {
+          type: 'toolCall', id: `call-${index}`, name: 'memory_read', arguments: {},
+        }],
+      },
+      { ...toolResult(index, `memory ${index}`), toolName: 'memory_read' },
+    );
+  }
+  const status = runtimeStatusMessage({
+    state: 'ACTIVE',
+    environmentActions: 1,
+    maxActions: 100,
+    terminalReason: 'none',
+    allowedNext: 'inspect evidence or take one legal gameplay action',
+  }, { outerTurns: 8, maxOuterTurns: 100 });
+  const compactions = [];
+  const bounded = boundTranscript(replaceRuntimeStatus(messages, status.text), {
+    recentToolResults: 2,
+    maxMessages: 6,
+    maxTokens: 120_000,
+    onCompaction: (event) => compactions.push(event),
+  });
+  const exact = bounded.find((message) => message.toolCallId === 'call-1');
+  assert.equal(exact.content[0].text, 'FULL EXACT FRAME [[1,2],[3,4]]');
+  assert.ok(bounded.some((message) => message.role === 'assistant'
+    && message.content.some((block) => block.id === 'call-1')));
+  assert.ok(compactions.some((event) => event.mode === 'soft'
+    && event.latestEvidenceRef === ref
+    && event.exactLatestEvidenceRetained === true));
+  assert.ok(compactions.some((event) => event.mode === 'hard'
+    && event.latestEvidenceRef === ref
+    && event.exactLatestEvidenceRetained === true));
 });
 
 test('hard message cap applies across roles and discloses the compaction', () => {
@@ -130,9 +210,10 @@ test('hard message cap applies across roles and discloses the compaction', () =>
   assert.ok(users.some((message) => message.content[0].text.includes('prompt 0')), 'initial prompt survives');
   const recentIds = bounded.filter((message) => message.role === 'toolResult').map((message) => message.toolCallId);
   assert.deepEqual(recentIds.slice(-2), ['call-39', 'call-40']);
-  assert.equal(compactions.length, 1);
-  assert.equal(compactions[0].templateSha256, COMPACTION_NOTICE_TEMPLATE_SHA256);
-  assert.equal(compactions[0].noticeIncluded, true);
+  assert.deepEqual(compactions.map((event) => event.mode), ['soft', 'hard']);
+  const hardCompaction = compactions.find((event) => event.mode === 'hard');
+  assert.equal(hardCompaction.templateSha256, COMPACTION_NOTICE_TEMPLATE_SHA256);
+  assert.equal(hardCompaction.noticeIncluded, true);
   for (const message of bounded) {
     if (message.role === 'toolResult' && message.content[0].text.includes('elided')) {
       assert.equal(message.toolCallId.length > 0, true);
@@ -192,6 +273,10 @@ test('latest exact evidence outranks the synthetic compaction notice under a tig
   assert.ok(referenceOnly.some((message) => message.content?.[0]?.text?.includes(
     'latest_evidence_ref=evidence-000004-aaaaaaaaaaaa',
   )));
+  assert.throws(() => boundTranscript(replaceRuntimeStatus(messages, status.text), {
+    maxMessages: 2,
+    maxTokens: 120_000,
+  }), /cannot preserve the latest exact evidence or its durable reference/);
 });
 
 test('token bound preserves one original task and one replaceable runtime status across many user messages', () => {

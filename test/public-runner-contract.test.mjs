@@ -90,9 +90,14 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         this.options = options;
         this.state = { messages: [], errorMessage: undefined };
       }
-      subscribe() { return () => {}; }
+      subscribe(listener) { this.listener = listener; return () => {}; }
       followUp() {}
       async prompt() {
+        this.listener?.({
+          type: 'avo_runtime_status',
+          templateSha256: 'a'.repeat(64),
+          status: { state: 'ACTIVE' },
+        });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
         const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
         if (tools.has('diagnostic_ack')) {
@@ -574,6 +579,18 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.match(result.stdout, /"games": 25/);
   assert.match(result.stdout, /"wins": 25/);
   assert.match(result.stdout, /"officialScore": 100/);
+  const contextRecords = result.stdout.split('\n')
+    .filter((line) => line.startsWith('[avo-context] '))
+    .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
+  assert.equal(contextRecords.length, 26);
+  for (const record of contextRecords) {
+    assert.match(record.gameId, /^g\d{2}$/);
+    assert.equal(record.versionedGameId, `${record.gameId}-v1`);
+    assert.ok([1, 2].includes(record.attempt));
+    assert.ok(Number.isInteger(record.contextSequence) && record.contextSequence > 0);
+  }
+  const g02Context = contextRecords.filter((record) => record.gameId === 'g02');
+  assert.deepEqual(g02Context.map((record) => [record.attempt, record.contextSequence]), [[1, 1], [2, 2]]);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);

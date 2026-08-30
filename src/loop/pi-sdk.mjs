@@ -17,6 +17,21 @@ export const COMPACTION_NOTICE_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
   .update(COMPACTION_NOTICE_TEMPLATE)
   .digest('hex');
+export const TOOL_RESULT_ELISION_TEMPLATE = '[older {toolName} output elided; {recoveryHint}]';
+export const TOOL_RESULT_ELISION_TEMPLATE_SHA256 = crypto
+  .createHash('sha256')
+  .update(TOOL_RESULT_ELISION_TEMPLATE)
+  .digest('hex');
+export const TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE = '[tool output truncated at {maxChars} characters to stay within the model context window; {recoveryHint}]';
+export const TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256 = crypto
+  .createHash('sha256')
+  .update(TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE)
+  .digest('hex');
+export const THINKING_ELISION_POLICY = 'remove thinking blocks from historical assistant turns; preserve the latest assistant turn';
+export const THINKING_ELISION_POLICY_SHA256 = crypto
+  .createHash('sha256')
+  .update(THINKING_ELISION_POLICY)
+  .digest('hex');
 export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
   api: 'openai-responses',
   reasoning: true,
@@ -127,7 +142,20 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           const result = await tool.execute(params);
           let text = String(result.text ?? '');
           if (text.length > maxToolResultChars) {
-            text = `${text.slice(0, maxToolResultChars)}\n[tool output truncated at ${maxToolResultChars} characters to stay within the model context window; ${toolRecoveryHint(tool.name, result.details)}]`;
+            const originalChars = text.length;
+            const notice = TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE
+              .replace('{maxChars}', String(maxToolResultChars))
+              .replace('{recoveryHint}', () => toolRecoveryHint(tool.name, result.details));
+            text = `${text.slice(0, maxToolResultChars)}\n${notice}`;
+            onEvent({
+              type: 'avo_context_compaction',
+              mode: 'tool_result_truncation',
+              templateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
+              toolName: tool.name,
+              originalChars,
+              retainedChars: maxToolResultChars,
+              latestEvidenceRef: String(result.details?.evidenceRef || '') || null,
+            });
           }
           return {
             content: [{ type: 'text', text }],
@@ -418,12 +446,19 @@ export function boundTranscript(messages, {
     return messages;
   }
 
+  const latestEvidence = latestEvidencePair(messages);
   const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
+  const latestEvidenceResultIndex = latestEvidence.indexes.at(-1);
+  if (latestEvidenceResultIndex >= 0) keepTools.add(latestEvidenceResultIndex);
   const kept = [];
+  let toolResultsElided = 0;
+  let thinkingBlocksRemoved = 0;
   messages.forEach((message, index) => {
     if (message?.role === 'toolResult' && !keepTools.has(index)) {
+      toolResultsElided += 1;
       kept.push({
         ...message,
+        contextElided: true,
         content: [{ type: 'text', text: elidedToolOutput(message) }],
       });
       return;
@@ -432,18 +467,37 @@ export function boundTranscript(messages, {
       // The Responses transport replays every stored reasoning item verbatim;
       // at maximal reasoning effort those historical payloads dominate the
       // context window, so only the latest assistant turn keeps its thinking.
+      const content = message.content.filter((block) => block?.type !== 'thinking');
+      thinkingBlocksRemoved += message.content.length - content.length;
       kept.push({
         ...message,
-        content: message.content.filter((block) => block?.type !== 'thinking'),
+        content,
       });
       return;
     }
     kept.push(message);
   });
-  if (kept.length <= maxMessages && transcriptTokens(kept, estimateMessageTokens) <= maxTokens) {
-    return repairToolPairs(kept);
+  const repaired = repairToolPairs(kept);
+  const orphanedToolResultsDropped = kept.length - repaired.length;
+  if (toolResultsElided || thinkingBlocksRemoved || orphanedToolResultsDropped) {
+    onCompaction({
+      type: 'avo_context_compaction',
+      mode: 'soft',
+      toolResultElisionTemplateSha256: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
+      thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
+      toolResultsElided,
+      thinkingBlocksRemoved,
+      orphanedToolResultsDropped,
+      latestEvidenceRef: latestEvidence.ref,
+      exactLatestEvidenceRetained: latestEvidence.exact
+        && latestEvidence.indexes.length === 2
+        && latestEvidence.indexes.every((index) => repaired.includes(messages[index])),
+    });
   }
-  return hardBoundTranscript(kept, {
+  if (repaired.length <= maxMessages && transcriptTokens(repaired, estimateMessageTokens) <= maxTokens) {
+    return repaired;
+  }
+  return hardBoundTranscript(repaired, {
     maxMessages,
     maxTokens,
     estimateMessageTokens,
@@ -475,7 +529,8 @@ function hardBoundTranscript(messages, {
     evidenceIndexes.map((index) => messages[index]),
     estimateMessageTokens,
   );
-  const keepsExactEvidence = latestEvidence.indexes.length === 2
+  const keepsExactEvidence = latestEvidence.exact
+    && latestEvidence.indexes.length === 2
     && selected.size + evidenceIndexes.length <= maxMessages
     && tokens + evidenceTokens <= maxTokens;
   if (keepsExactEvidence) {
@@ -489,6 +544,9 @@ function hardBoundTranscript(messages, {
   );
   const noticeTokens = messageTokens(provisionalNotice, estimateMessageTokens);
   const reserveNotice = selected.size + 1 <= maxMessages && tokens + noticeTokens <= maxTokens;
+  if (latestEvidence.ref && !keepsExactEvidence && !reserveNotice) {
+    throw new Error('transcript bounds cannot preserve the latest exact evidence or its durable reference');
+  }
   if (reserveNotice) tokens += noticeTokens;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (selected.has(index)) continue;
@@ -498,7 +556,9 @@ function hardBoundTranscript(messages, {
     selected.add(index);
     tokens += candidateTokens;
   }
-  let retained = repairToolPairs(messages.filter((_message, index) => selected.has(index)));
+  const selectedMessages = messages.filter((_message, index) => selected.has(index));
+  let retained = repairToolPairs(selectedMessages);
+  const orphanedToolResultsDropped = selectedMessages.length - retained.length;
   const droppedMessages = messages.length - retained.length;
   let noticeIncluded = false;
   if (reserveNotice) {
@@ -517,8 +577,10 @@ function hardBoundTranscript(messages, {
   }
   onCompaction({
     type: 'avo_context_compaction',
+    mode: 'hard',
     templateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     droppedMessages,
+    orphanedToolResultsDropped,
     latestEvidenceRef: latestEvidence.ref,
     exactLatestEvidenceRetained: keepsExactEvidence,
     noticeIncluded,
@@ -556,9 +618,13 @@ function latestEvidencePair(messages) {
         break;
       }
     }
-    return { ref, indexes: [callIndex, resultIndex].filter((index) => index >= 0) };
+    return {
+      ref,
+      indexes: [callIndex, resultIndex].filter((index) => index >= 0),
+      exact: callIndex >= 0 && !isElidedToolResult(result),
+    };
   }
-  return { ref: null, indexes: [] };
+  return { ref: null, indexes: [], exact: false };
 }
 
 function isCompactionNotice(message) {
@@ -601,7 +667,15 @@ function repairToolPairs(messages) {
 
 function elidedToolOutput(message) {
   const toolName = String(message?.toolName || 'unknown');
-  return `[older ${toolName} output elided; ${toolRecoveryHint(toolName, message?.details)}]`;
+  return TOOL_RESULT_ELISION_TEMPLATE
+    .replace('{toolName}', () => toolName)
+    .replace('{recoveryHint}', () => toolRecoveryHint(toolName, message?.details));
+}
+
+function isElidedToolResult(message) {
+  return message?.contextElided === true
+    || (String(message?.content?.[0]?.text || '').startsWith('[older ')
+      && String(message.content[0].text).includes(' output elided;'));
 }
 
 function toolRecoveryHint(toolName, details) {

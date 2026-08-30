@@ -52,10 +52,11 @@ async function loadAdapterCapturing() {
   fs.copyFileSync(path.resolve(process.cwd(), 'src/loop/pi-sdk.mjs'), path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
 
   const mod = await import(pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href);
+  const events = [];
   const loop = await mod.createPiSdkLoop({
     provider: { model: 'm', baseUrl: 'https://provider.internal/v1', apiKey: 'sk-probe-key-value', reasoningEffort: 'high' },
     maxActions: 5, maxOuterTurns: 5,
-  }, {});
+  }, { onEvent: (event) => events.push(event) });
   await loop.run({
     systemPrompt: 's', initialPrompt: 'p', shouldStop: () => true,
     runtimeStatus: () => ({
@@ -71,11 +72,11 @@ async function loadAdapterCapturing() {
     }],
   });
   const agentOptions = globalThis.__avoCapAgent.options;
-  return { agentOptions, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  return { agentOptions, events, mod, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
 test('tool results are capped before entering the model context', async () => {
-  const { agentOptions, cleanup } = await loadAdapterCapturing();
+  const { agentOptions, events, mod, cleanup } = await loadAdapterCapturing();
   try {
     const tools = agentOptions.initialState.tools;
     assert.equal(tools.length, 1);
@@ -87,6 +88,15 @@ test('tool results are capped before entering the model context', async () => {
     assert.match(text, /do not repeat/);
     assert.doesNotMatch(text, /re-call|re-query/);
     assert.equal(output.details.ok, true, 'details pass through untouched');
+    assert.deepEqual(events, [{
+      type: 'avo_context_compaction',
+      mode: 'tool_result_truncation',
+      templateSha256: mod.TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
+      toolName: 'fat_read',
+      originalChars: 60_000,
+      retainedChars: 24_000,
+      latestEvidenceRef: null,
+    }]);
   } finally {
     cleanup();
   }
