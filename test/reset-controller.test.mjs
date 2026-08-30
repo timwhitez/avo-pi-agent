@@ -103,6 +103,10 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
       sequenceActionsExecuted: 0,
       sequenceActionsSkipped: 0,
       sequenceCancellations: 0,
+      memoryClaimsProposed: 0,
+      memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 0,
+      memoryClaimsSurfaced: 0,
       episodeId: 'episode-000002',
     });
     assert.deepEqual(agent.scorecardExecutionGuids(), ['sdk-reused-guid', 'sdk-reused-guid']);

@@ -31,12 +31,12 @@ export function loadLocalEnv(cwd = process.cwd()) {
   }
 }
 
-function integer(name, fallback, min = 1) {
+function integer(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const raw = process.env[name];
   if (!raw) return fallback;
-  const value = Number.parseInt(raw, 10);
-  if (!Number.isFinite(value) || value < min) {
-    throw new Error(`${name} must be an integer >= ${min}`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer from ${min} through ${max}`);
   }
   return value;
 }
@@ -72,6 +72,7 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
     maxActions: integer('AVO_MAX_ACTIONS', 1000),
     maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 1000),
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
+    memorySurfaceLimit: integer('AVO_MEMORY_SURFACE_LIMIT', 4, 0, 8),
     memoryDir: process.env.AVO_MEMORY_DIR || '.avo-memory',
     workspaceDir: process.env.AVO_WORKSPACE_DIR || '.avo-workspaces',
     workspaceMode: enumValue('AVO_WORKSPACE_MODE', 'files-only', ['disabled', 'files-only', 'isolated-python']),
@@ -91,6 +92,7 @@ export function publicConfigSummary(config) {
     maxActions: config.maxActions,
     maxOuterTurns: config.maxOuterTurns,
     stallWindow: config.stallWindow,
+    memorySurfaceLimit: config.memorySurfaceLimit,
     memoryDir: config.memoryDir,
     workspaceDir: config.workspaceDir,
     workspaceMode: config.workspaceMode,

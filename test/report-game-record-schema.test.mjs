@@ -37,6 +37,8 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
     terminalRejectedCommands: null, postTerminalGameplayActions: null, fullResets: null,
     actionSequences: null, sequenceActionsRequested: null, sequenceActionsExecuted: null,
     sequenceActionsSkipped: null, sequenceCancellations: null,
+    memoryClaimsProposed: null, memoryClaimsConfirmed: null,
+    memoryClaimsCorrected: null, memoryClaimsSurfaced: null,
   });
 });
 
@@ -54,6 +56,10 @@ test('preserves controller telemetry and validates total environment-action acco
     sequenceActionsExecuted: 2,
     sequenceActionsSkipped: 1,
     sequenceCancellations: 1,
+    memoryClaimsProposed: 2,
+    memoryClaimsConfirmed: 1,
+    memoryClaimsCorrected: 1,
+    memoryClaimsSurfaced: 5,
     episodeId: 'episode-000002',
   }));
   assert.deepEqual(
@@ -70,6 +76,10 @@ test('preserves controller telemetry and validates total environment-action acco
       sequenceActionsExecuted: record.sequenceActionsExecuted,
       sequenceActionsSkipped: record.sequenceActionsSkipped,
       sequenceCancellations: record.sequenceCancellations,
+      memoryClaimsProposed: record.memoryClaimsProposed,
+      memoryClaimsConfirmed: record.memoryClaimsConfirmed,
+      memoryClaimsCorrected: record.memoryClaimsCorrected,
+      memoryClaimsSurfaced: record.memoryClaimsSurfaced,
       episodeId: record.episodeId,
     },
     {
@@ -85,6 +95,10 @@ test('preserves controller telemetry and validates total environment-action acco
       sequenceActionsExecuted: 2,
       sequenceActionsSkipped: 1,
       sequenceCancellations: 1,
+      memoryClaimsProposed: 2,
+      memoryClaimsConfirmed: 1,
+      memoryClaimsCorrected: 1,
+      memoryClaimsSurfaced: 5,
       episodeId: 'episode-000002',
     },
   );
@@ -105,7 +119,17 @@ test('preserves controller telemetry and validates total environment-action acco
     sequenceActionsExecuted: 2,
     sequenceActionsSkipped: 1,
     sequenceCancellations: 1,
+    memoryClaimsProposed: 2,
+    memoryClaimsConfirmed: 1,
+    memoryClaimsCorrected: 1,
+    memoryClaimsSurfaced: 5,
   });
+  const incompleteMemoryTelemetry = { ...record };
+  delete incompleteMemoryTelemetry.memoryClaimsSurfaced;
+  assert.throws(
+    () => normalizeGameRecord(incompleteMemoryTelemetry),
+    /memory-claim telemetry must be either complete or entirely unavailable/,
+  );
   assert.throws(
     () => normalizeGameRecord({ ...record, sequenceActionsRequested: 2 }),
     /must equal executed plus skipped/,
@@ -203,6 +227,8 @@ test('aggregates controller telemetry across attempts without dropping prior res
       fullResets: 1, episodeId: 'episode-000002',
       actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
       sequenceActionsSkipped: 0, sequenceCancellations: 0,
+      memoryClaimsProposed: 1, memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 0, memoryClaimsSurfaced: 2,
     },
     {
       actions: 3, gameplayActions: 3, resets: 0, rejectedCommands: 1,
@@ -210,6 +236,8 @@ test('aggregates controller telemetry across attempts without dropping prior res
       fullResets: 0, episodeId: 'episode-000001',
       actionSequences: 1, sequenceActionsRequested: 4, sequenceActionsExecuted: 3,
       sequenceActionsSkipped: 1, sequenceCancellations: 1,
+      memoryClaimsProposed: 2, memoryClaimsConfirmed: 1,
+      memoryClaimsCorrected: 1, memoryClaimsSurfaced: 3,
     },
   ]);
   assert.deepEqual(aggregate, {
@@ -225,6 +253,10 @@ test('aggregates controller telemetry across attempts without dropping prior res
     sequenceActionsExecuted: 3,
     sequenceActionsSkipped: 1,
     sequenceCancellations: 1,
+    memoryClaimsProposed: 3,
+    memoryClaimsConfirmed: 1,
+    memoryClaimsCorrected: 1,
+    memoryClaimsSurfaced: 5,
     episodeId: 'episode-000002',
   });
   assert.throws(
@@ -234,6 +266,8 @@ test('aggregates controller telemetry across attempts without dropping prior res
       fullResets: 0, episodeId: 'episode-000002',
       actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
       sequenceActionsSkipped: 0, sequenceCancellations: 0,
+      memoryClaimsProposed: 0, memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 0, memoryClaimsSurfaced: 0,
     }]),
     /episodeId is inconsistent/,
   );

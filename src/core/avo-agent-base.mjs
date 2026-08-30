@@ -21,6 +21,8 @@ const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
 const MAX_ACTION_SEQUENCE = 20;
 const MAX_TRAJECTORY_DIFF_CELLS = 128;
+const CLAIM_REF_SCHEMA = { type: 'string', maxLength: 32, pattern: '^claim-[0-9]{6,16}$' };
+const EVIDENCE_REF_SCHEMA = { type: 'string', maxLength: 64, pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' };
 const ACTION_EXPECTATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -93,6 +95,10 @@ export class AvoArcAgent {
     this.sequenceActionsExecuted = 0;
     this.sequenceActionsSkipped = 0;
     this.sequenceCancellations = 0;
+    this.memoryClaimsProposed = 0;
+    this.memoryClaimsConfirmed = 0;
+    this.memoryClaimsCorrected = 0;
+    this.memoryClaimsSurfaced = 0;
     this.executionError = null;
     this.episodeSequence = 1;
     this.uniqueStates = new Set();
@@ -210,10 +216,10 @@ export class AvoArcAgent {
         execute: async () => {
           const evidenceRef = this.currentObservationRef;
           if (!evidenceRef) throw new Error('current observation has no durable evidence reference');
-          return this.toolResult(
+          return this.withRelevantMemory(this.toolResult(
             `${this.describe(this.frame, evidenceRef)}\nEVIDENCE_REF: ${evidenceRef}`,
             { frame: this.frame, evidenceRef, contextExactEvidence: false },
-          );
+          ), 'current observation');
         },
       },
       {
@@ -225,7 +231,7 @@ export class AvoArcAgent {
           properties: {
             ref: { type: 'string', pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' },
             startSequence: { type: 'integer', minimum: 1 },
-            limit: { type: 'integer', minimum: 1, maximum: 20 },
+            limit: { type: 'integer', minimum: 1, maximum: 8 },
             part: { type: 'string', enum: ['summary', 'event', 'before', 'after', 'region', 'diff'] },
             compareRef: { type: 'string', pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' },
             x: { type: 'integer', minimum: 0, maximum: 63 },
@@ -251,7 +257,7 @@ export class AvoArcAgent {
           },
           additionalProperties: false,
         },
-        execute: async (params) => this.act(params),
+        execute: async (params) => this.withRelevantMemory(await this.act(params), params?.reasoning),
       },
       {
         name: 'act_sequence',
@@ -292,7 +298,7 @@ export class AvoArcAgent {
           properties: { rationale: { type: 'string' } },
           additionalProperties: false,
         },
-        execute: async (params) => this.reset(params),
+        execute: async (params) => this.withRelevantMemory(await this.reset(params), params?.rationale),
       },
       {
         name: 'knowledge_read',
@@ -366,11 +372,22 @@ export class AvoArcAgent {
       {
         name: 'memory_read',
         label: 'Read persistent game memory',
-        description: 'Read structured discoveries and a summary of committed lineage, failed attempts, and supervisor interventions retained across turns and levels.',
-        parameters: { type: 'object', properties: {}, additionalProperties: false },
-        execute: async () => {
+        description: 'Read legacy harness notes, lineage summary, and one bounded page of typed claims. Page or filter claims by stable ID sequence, status, and local text query.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', maxLength: 1000 },
+            status: { type: 'string', enum: ['all', 'proposed', 'confirmed', 'contradicted', 'superseded'] },
+            startSequence: { type: 'integer', minimum: 1 },
+            limit: { type: 'integer', minimum: 1, maximum: 20 },
+          },
+          additionalProperties: false,
+        },
+        execute: async (input = {}) => {
           const snapshot = this.memory.snapshot();
-          return this.toolResult(JSON.stringify(snapshot, null, 2), { memory: snapshot });
+          const claimPage = this.memory.queryClaims(input);
+          const memory = { ...snapshot, claimPage };
+          return this.toolResult(JSON.stringify(memory, null, 2), { memory });
         },
       },
       {
@@ -393,16 +410,28 @@ export class AvoArcAgent {
       },
       {
         name: 'memory_update',
-        label: 'Update persistent memory',
-        description: 'Merge validated discoveries. Valid keys: actionSemantics, objects, goals, invariants, failedHypotheses, provenStrategies, notes.',
+        label: 'Curate one typed persistent-memory claim',
+        description: 'Propose a hypothesis, confirm it with retrievable evidence, or create an evidence-backed contradiction/supersession while retaining the old claim.',
         parameters: {
-          type: 'object', required: ['patch'],
-          properties: { patch: OBJECT_SCHEMA }, additionalProperties: false,
+          type: 'object',
+          required: ['operation'],
+          properties: {
+            operation: { type: 'string', enum: ['propose', 'confirm', 'contradict', 'supersede'] },
+            claimId: CLAIM_REF_SCHEMA,
+            subject: { type: 'string', minLength: 1, maxLength: 64 },
+            type: { type: 'string', minLength: 1, maxLength: 64 },
+            content: { type: 'string', minLength: 1, maxLength: 2000 },
+            confidence: { type: 'integer', minimum: 0, maximum: 100 },
+            importance: { type: 'integer', minimum: 0, maximum: 100 },
+            tags: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 64 } },
+            evidenceRefs: { type: 'array', maxItems: 16, items: EVIDENCE_REF_SCHEMA },
+            supports: { type: 'array', maxItems: 16, items: CLAIM_REF_SCHEMA },
+            contradicts: { type: 'array', maxItems: 16, items: CLAIM_REF_SCHEMA },
+            derivedFrom: { type: 'array', maxItems: 16, items: CLAIM_REF_SCHEMA },
+          },
+          additionalProperties: false,
         },
-        execute: async ({ patch }) => {
-          const snapshot = this.memory.merge(patch);
-          return this.toolResult('Memory updated.', { memory: snapshot });
-        },
+        execute: async (input) => this.updateMemoryClaim(input),
       },
       {
         name: 'candidate_propose',
@@ -464,7 +493,6 @@ export class AvoArcAgent {
         },
         execute: async ({ summary }) => {
           this.finished = true;
-          this.memory.merge({ notes: [`Final summary: ${summary}`] });
           return this.toolResult('Run finished.', { summary }, true);
         },
       },
@@ -602,7 +630,11 @@ export class AvoArcAgent {
       contextExactEvidence: false,
       telemetry: this.commandTelemetry(),
     };
-    return this.toolResult(JSON.stringify({ type: 'ACTION_SEQUENCE', ...details }), details, terminate);
+    return this.withRelevantMemory(
+      this.toolResult('', details, terminate),
+      requested.map((step) => step.reasoning).filter(Boolean).join(' '),
+      'ACTION_SEQUENCE',
+    );
   }
 
   async reset({ rationale = '' } = {}) {
@@ -736,6 +768,10 @@ export class AvoArcAgent {
       sequenceActionsExecuted: this.sequenceActionsExecuted,
       sequenceActionsSkipped: this.sequenceActionsSkipped,
       sequenceCancellations: this.sequenceCancellations,
+      memoryClaimsProposed: this.memoryClaimsProposed,
+      memoryClaimsConfirmed: this.memoryClaimsConfirmed,
+      memoryClaimsCorrected: this.memoryClaimsCorrected,
+      memoryClaimsSurfaced: this.memoryClaimsSurfaced,
       episodeId: this.episodeId(),
     };
   }
@@ -813,6 +849,19 @@ export class AvoArcAgent {
         : `Attempt ${record.id} remains in trajectory only and was not committed: ${evaluation.reasons.join('; ')}.`,
       { proposal, record, best: this.memory.lineage.best() },
     );
+  }
+
+  updateMemoryClaim(input) {
+    const outcome = this.memory.applyClaim(input, this.claimEvidenceLedger());
+    if (outcome.operation === 'propose') this.memoryClaimsProposed += 1;
+    else if (outcome.operation === 'confirm') this.memoryClaimsConfirmed += 1;
+    else this.memoryClaimsCorrected += 1;
+    const details = { ...outcome, telemetry: this.commandTelemetry() };
+    return this.toolResult(JSON.stringify({ type: 'MEMORY_CLAIM', ...details }), details);
+  }
+
+  claimEvidenceLedger() {
+    return this.evidenceLedger;
   }
 
   recordEvidence({
@@ -990,6 +1039,27 @@ export class AvoArcAgent {
     return describeFrame(this.frame, previousFrame, evidenceRef);
   }
 
+  withRelevantMemory(result, query = '', jsonType = null) {
+    const relevantMemory = this.memory.relevantClaims({
+      query: String(query || ''),
+      state: this.frame?.state ?? null,
+      levelsCompleted: this.frame?.levelsCompleted ?? 0,
+      availableActions: this.frame?.availableActions ?? [],
+    }, this.config.memorySurfaceLimit ?? 4);
+    this.memoryClaimsSurfaced += relevantMemory.length;
+    const details = {
+      ...result.details,
+      relevantMemory,
+      ...(result.details?.telemetry ? { telemetry: this.commandTelemetry() } : {}),
+    };
+    const text = jsonType
+      ? JSON.stringify({ type: jsonType, ...details })
+      : relevantMemory.length
+        ? `${result.text}\nRELEVANT_MEMORY ${JSON.stringify(relevantMemory)}`
+        : result.text;
+    return { ...result, text, details };
+  }
+
   toolResult(text, details = {}, terminate = false) {
     return { text, details, terminate };
   }
@@ -1011,7 +1081,7 @@ AVO contract:
 2. Use direct interaction with compact typed previews, exact referenced text grids, and currently legal gameplay actions as the primary ARC policy. When a delta is truncated or the shape changes, use trajectory_read after/region/diff before relying on missing cells. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
 3. Gameplay actions and the separate reset controller both consume environment actions. Use one act while uncertain; act_sequence may execute a tested 1–20 step plan but cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or execution failure. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
-5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
+5. Do not follow a rigid fixed workflow. Relevant typed memory claims may be surfaced automatically with their status and evidence refs; use memory_update to distinguish unverified proposals from evidence-backed confirmations or corrections. Consult full memory, evolution history, knowledge, or scratch files only when useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
 7. Continue through every level while useful valid experiments remain. You may explicitly finish an active episode only when no useful valid experiment remains. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
@@ -1021,7 +1091,15 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
   async run() {
     if (!this.frame) await this.initialize();
     const initialEvidence = this.currentObservationRef;
-    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe(null, initialEvidence)}`;
+    const initialMemory = this.memory.relevantClaims({
+      query: 'initial objective legal actions',
+      state: this.frame.state,
+      levelsCompleted: this.frame.levelsCompleted,
+      availableActions: this.frame.availableActions,
+    }, this.config.memorySurfaceLimit ?? 4);
+    this.memoryClaimsSurfaced += initialMemory.length;
+    const memoryText = initialMemory.length ? `\n\nRELEVANT_MEMORY ${JSON.stringify(initialMemory)}` : '';
+    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe(null, initialEvidence)}${memoryText}`;
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
       tools: this.exposedTools(),
@@ -1048,6 +1126,10 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       sequenceActionsExecuted: this.sequenceActionsExecuted,
       sequenceActionsSkipped: this.sequenceActionsSkipped,
       sequenceCancellations: this.sequenceCancellations,
+      memoryClaimsProposed: this.memoryClaimsProposed,
+      memoryClaimsConfirmed: this.memoryClaimsConfirmed,
+      memoryClaimsCorrected: this.memoryClaimsCorrected,
+      memoryClaimsSurfaced: this.memoryClaimsSurfaced,
       episodeId: this.episodeId(),
       trajectoryEvidence: this.trajectoryEvidence(),
       objective: this.objectiveState(),

@@ -109,7 +109,7 @@ so only controller reset or explicit finish remains legal. The run stops on:
 
 ## Persistent state
 
-Per-game memory schema v3 stores:
+Per-game memory schema v4 stores:
 
 - action semantics, objects, goals and invariants;
 - failed hypotheses and proven strategies;
@@ -117,9 +117,16 @@ Per-game memory schema v3 stores:
 - all evaluated attempts;
 - accepted parent-linked lineage;
 - supervisor interventions.
+- bounded typed claims with stable IDs, explicit proposed/confirmed/terminal
+  status, exact evidence refs and claim relations.
 
 Writes are bounded, atomic and mode-restricted. Legacy memory is migrated while
-preserving failed and accepted records.
+preserving failed and accepted records. The model-facing update tool cannot
+write the legacy flat fields: it proposes typed claims, then requires current
+durable evidence to confirm, contradict or supersede them. Terminal claims stay
+queryable, while only a small deterministic active set is surfaced with initial
+and later observations. `AVO_MEMORY_SURFACE_LIMIT=0` disables that automatic
+surface for controlled comparisons without deleting memory.
 
 ## Scratch workspace
 

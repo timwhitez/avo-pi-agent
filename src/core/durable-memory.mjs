@@ -96,6 +96,9 @@ export class DurableMemory extends PersistentMemory {
 
   protectedEvidenceIds() {
     const ids = new Set();
+    for (const claim of this.data.claims) {
+      for (const ref of claim.evidenceRefs) ids.add(String(ref));
+    }
     for (const proposal of this.lineage.pendingProposals()) {
       if (proposal.baseline?.evidenceRef) ids.add(String(proposal.baseline.evidenceRef));
     }

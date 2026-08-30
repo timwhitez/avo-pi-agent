@@ -65,6 +65,8 @@ Optional local runtime variables:
 - `AVO_MAX_ACTIONS` — default `1000`
 - `AVO_MAX_OUTER_TURNS` — default `1000`
 - `AVO_STALL_WINDOW` — default `8`
+- `AVO_MEMORY_SURFACE_LIMIT` — default `4`, bounded `0..8`; `0` disables only
+  automatic claim surfacing for controlled comparisons
 
 Missing or invalid values produce only a redacted `configuration` failure;
 runtime values are never printed. Rotate any key previously placed in source,

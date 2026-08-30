@@ -122,10 +122,13 @@ secret scanner. It is not an ARC public score and the output labels it
 
 ### Persistent memory
 
-Each game has a structured memory record containing action semantics, objects,
-goals, invariants, failed hypotheses, proven strategies and bounded notes.
-Writes are atomic and permissions are restricted. Runtime memory lives under a
-gitignored directory.
+Each game has a structured memory record containing legacy harness notes plus
+bounded typed claims. Model-authored claims have stable IDs, explicit status,
+exact evidence references and correction relations. Confirmation and correction
+require retrievable trajectory evidence; contradicted and superseded records stay
+queryable, while only a small deterministic relevant set is surfaced
+automatically. Writes are atomic and permissions are restricted. Runtime memory
+lives under a gitignored directory.
 
 ### Candidate lineage
 

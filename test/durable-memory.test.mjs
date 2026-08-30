@@ -52,9 +52,20 @@ test('expires stale pending proposals and retains referenced evidence IDs', () =
       proposalId: acceptedProposal.id,
       evaluation: evaluation({ accepted: true, evidence: [{ id: 'evidence-action-2' }] }),
     });
+    const memoryClaim = reloaded.applyClaim({
+      operation: 'propose',
+      subject: 'action1',
+      type: 'action-semantics',
+      content: 'ACTION1 changes the observed state.',
+    }, [{ id: 'evidence-000003-cccccccccccc' }]).claim;
+    reloaded.applyClaim({
+      operation: 'confirm',
+      claimId: memoryClaim.id,
+      evidenceRefs: ['evidence-000003-cccccccccccc'],
+    }, [{ id: 'evidence-000003-cccccccccccc' }]);
     assert.deepEqual(
       new Set(reloaded.protectedEvidenceIds()),
-      new Set(['evidence-base-2', 'evidence-action-2']),
+      new Set(['evidence-base-2', 'evidence-action-2', 'evidence-000003-cccccccccccc']),
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

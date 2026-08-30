@@ -6,10 +6,18 @@ import { writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
+const MEMORY_SCHEMA_VERSION = 4;
+const MAX_CLAIMS = 1000;
+const MAX_CLAIM_REFS = 16;
+const MAX_CLAIM_CONTENT = 2000;
+const CLAIM_ID = /^claim-[0-9]{6,16}$/;
+const EVIDENCE_ID = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
+const CLAIM_STATUSES = new Set(['proposed', 'confirmed', 'contradicted', 'superseded']);
+const ACTIVE_CLAIM_STATUSES = new Set(['proposed', 'confirmed']);
 
 function initial(gameId) {
   return {
-    schemaVersion: 3,
+    schemaVersion: MEMORY_SCHEMA_VERSION,
     gameId,
     updatedAt: new Date(0).toISOString(),
     actionSemantics: {},
@@ -23,6 +31,8 @@ function initial(gameId) {
     committedLineage: [],
     candidateAttempts: [],
     supervisorInterventions: [],
+    claimSequence: 0,
+    claims: [],
   };
 }
 
@@ -75,7 +85,156 @@ export class PersistentMemory {
         best: this.lineage.best(),
       },
       supervisorInterventions: this.data.supervisorInterventions.slice(-8),
+      claimSummary: claimSummary(this.data.claims),
     };
+  }
+
+  queryClaims({ query = '', status = 'all', startSequence = 1, limit = 4 } = {}) {
+    if (typeof query !== 'string' || query.length > 1000) throw new Error('memory claim query is invalid');
+    if (status !== 'all' && !CLAIM_STATUSES.has(status)) throw new Error('memory claim status is invalid');
+    if (!Number.isSafeInteger(startSequence) || startSequence < 1) {
+      throw new Error('memory claim startSequence must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
+      throw new Error('memory claim limit must be an integer from 1 through 8');
+    }
+    const terms = words(query);
+    const matching = this.data.claims.filter((claim) => claim.sequence >= startSequence
+      && (status === 'all' || claim.status === status)
+      && (terms.length === 0 || terms.some((term) => claimSearchText(claim).includes(term))));
+    const claims = matching.slice(0, limit).map((claim) => structuredClone(claim));
+    return {
+      claims,
+      nextSequence: matching.length > claims.length ? claims.at(-1).sequence + 1 : null,
+      totalMatches: matching.length,
+    };
+  }
+
+  relevantClaims(context = {}, limit = 4) {
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > 8) {
+      throw new Error('memory surface limit must be an integer from 0 through 8');
+    }
+    if (limit === 0) return [];
+    const terms = words(JSON.stringify(context));
+    return this.data.claims
+      .filter((claim) => ACTIVE_CLAIM_STATUSES.has(claim.status))
+      .map((claim) => ({
+        claim,
+        score: claim.importance * 4
+          + claim.confidence * 2
+          + (claim.status === 'confirmed' ? 50 : 0)
+          + terms.filter((term) => claimSearchText(claim).includes(term)).length * 100,
+      }))
+      .sort((left, right) => right.score - left.score
+        || right.claim.sequence - left.claim.sequence
+        || left.claim.id.localeCompare(right.claim.id))
+      .slice(0, limit)
+      .map(({ claim }) => surfaceClaim(claim));
+  }
+
+  assertClaimEvidence(evidenceLedger = []) {
+    const known = new Set(evidenceLedger.map((event) => event?.id).filter(Boolean));
+    for (const claim of this.data.claims) {
+      for (const ref of claim.evidenceRefs) {
+        if (!known.has(ref)) throw new Error(`memory claim evidence is not retrievable: ${ref}`);
+      }
+    }
+  }
+
+  applyClaim(input, evidenceLedger = []) {
+    const operation = normalizeClaimOperation(input);
+    const knownEvidence = new Set(evidenceLedger.map((event) => event?.id).filter(Boolean));
+    const evidenceRefs = normalizeEvidenceRefs(input.evidenceRefs);
+    for (const ref of evidenceRefs) {
+      if (!knownEvidence.has(ref)) throw new Error(`memory claim evidence is not retrievable: ${ref}`);
+    }
+    const previousClaims = this.data.claims;
+    const previousSequence = this.data.claimSequence;
+    let claim;
+    let replaced = null;
+    try {
+      if (operation === 'propose') {
+        claim = this.#createClaim({ ...input, status: 'proposed', evidenceRefs });
+        this.data.claims = [...this.data.claims, claim];
+      } else {
+        const target = this.data.claims.find((entry) => entry.id === input.claimId);
+        if (!target) throw new Error(`memory claim not found: ${String(input.claimId || '')}`);
+        if (!ACTIVE_CLAIM_STATUSES.has(target.status)) {
+          throw new Error(`memory claim ${target.id} is already terminal`);
+        }
+        if (evidenceRefs.length === 0) {
+          throw new Error(`${operation} requires at least one retrievable evidence reference`);
+        }
+        if (operation === 'confirm') {
+          if (target.status !== 'proposed') throw new Error(`memory claim ${target.id} is already confirmed`);
+          claim = Object.freeze({
+            ...target,
+            status: 'confirmed',
+            confidence: optionalScore(input.confidence, target.confidence),
+            importance: optionalScore(input.importance, target.importance),
+            tags: input.tags === undefined ? target.tags : normalizeLabels(input.tags, 'tags'),
+            evidenceRefs: boundedUnion(target.evidenceRefs, evidenceRefs, 'evidenceRefs'),
+            updatedAt: new Date().toISOString(),
+          });
+          this.data.claims = this.data.claims.map((entry) => entry.id === target.id ? claim : entry);
+        } else {
+          const relations = normalizeRelations(input, new Set(this.data.claims.map((entry) => entry.id)));
+          const relation = operation === 'contradict' ? 'contradicts' : 'derivedFrom';
+          relations[relation] = boundedUnion([target.id], relations[relation], relation);
+          claim = this.#createClaim({
+            ...input,
+            subject: input.subject ?? target.subject,
+            type: input.type ?? target.type,
+            status: 'confirmed',
+            evidenceRefs,
+            relations,
+          });
+          const terminal = Object.freeze({
+            ...target,
+            status: operation === 'contradict' ? 'contradicted' : 'superseded',
+            updatedAt: claim.createdAt,
+          });
+          replaced = terminal;
+          this.data.claims = [
+            ...this.data.claims.map((entry) => entry.id === target.id ? terminal : entry),
+            claim,
+          ];
+        }
+      }
+      this.save();
+      return { operation, claim: structuredClone(claim), replaced: replaced ? structuredClone(replaced) : null };
+    } catch (error) {
+      this.data.claims = previousClaims;
+      this.data.claimSequence = previousSequence;
+      throw error;
+    }
+  }
+
+  #createClaim(input) {
+    if (this.data.claims.length >= MAX_CLAIMS) {
+      throw new Error(`memory claims exceed ${MAX_CLAIMS} records; archive before continuing`);
+    }
+    const sequence = this.data.claimSequence + 1;
+    if (!Number.isSafeInteger(sequence)) throw new Error('memory claim sequence is exhausted');
+    const knownClaims = new Set(this.data.claims.map((claim) => claim.id));
+    const now = new Date().toISOString();
+    const claim = Object.freeze({
+      id: `claim-${String(sequence).padStart(6, '0')}`,
+      sequence,
+      subject: normalizeLabel(input.subject, 'subject'),
+      type: normalizeLabel(input.type, 'type'),
+      content: boundedText(input.content, 'content'),
+      status: input.status,
+      confidence: optionalScore(input.confidence, input.status === 'confirmed' ? 75 : 25),
+      importance: optionalScore(input.importance, 50),
+      tags: normalizeLabels(input.tags ?? [], 'tags'),
+      evidenceRefs: normalizeEvidenceRefs(input.evidenceRefs),
+      relations: input.relations ?? normalizeRelations(input, knownClaims),
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.data.claimSequence = sequence;
+    return claim;
   }
 
   evolution({ proposalLimit = 100, attemptLimit = 100, committedLimit = 100 } = {}) {
@@ -182,6 +341,9 @@ function assertMemoryRoot(stat) {
 
 function migrate(data) {
   const version = Number(data.schemaVersion || 1);
+  if (!Number.isInteger(version) || version < 1 || version > MEMORY_SCHEMA_VERSION) {
+    throw new Error(`unsupported memory schema version: ${String(data.schemaVersion)}`);
+  }
   if (version < 2) {
     const legacy = Array.isArray(data.lineage) ? data.lineage : [];
     data.committedLineage = legacy.filter((record) => record.accepted);
@@ -189,13 +351,209 @@ function migrate(data) {
     data.supervisorInterventions = [];
   }
   if (version < 3) data.candidateProposals = [];
-  data.schemaVersion = 3;
+  if (version < 4) {
+    data.claimSequence = 0;
+    data.claims = [];
+  }
+  data.schemaVersion = MEMORY_SCHEMA_VERSION;
   data.candidateProposals = Array.isArray(data.candidateProposals) ? data.candidateProposals : [];
   data.committedLineage = Array.isArray(data.committedLineage) ? data.committedLineage : [];
   data.candidateAttempts = Array.isArray(data.candidateAttempts) ? data.candidateAttempts : [];
   data.supervisorInterventions = Array.isArray(data.supervisorInterventions) ? data.supervisorInterventions : [];
+  validateClaims(data);
   delete data.lineage;
   return data;
+}
+
+function normalizeClaimOperation(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('memory claim operation must be an object');
+  }
+  let encoded;
+  try {
+    encoded = JSON.stringify(input);
+  } catch (error) {
+    throw new Error('memory claim operation must be JSON-serializable', { cause: error });
+  }
+  if (Buffer.byteLength(encoded, 'utf8') > MAX_PATCH_BYTES) {
+    throw new Error(`memory claim operation exceeds ${MAX_PATCH_BYTES} bytes`);
+  }
+  const allowed = new Set([
+    'operation', 'claimId', 'subject', 'type', 'content', 'confidence', 'importance', 'tags',
+    'evidenceRefs', 'supports', 'contradicts', 'derivedFrom',
+  ]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw new Error('memory claim operation contains unknown fields');
+  }
+  const operation = String(input.operation || '');
+  if (!['propose', 'confirm', 'contradict', 'supersede'].includes(operation)) {
+    throw new Error('memory claim operation is invalid');
+  }
+  if (operation === 'propose' && input.claimId !== undefined) {
+    throw new Error('memory claim proposal cannot name an existing claim');
+  }
+  if (operation === 'propose' && (input.contradicts !== undefined || input.derivedFrom !== undefined)) {
+    throw new Error('proposals cannot terminalize claims; use contradict or supersede after evidence');
+  }
+  if (operation !== 'propose' && !CLAIM_ID.test(String(input.claimId || ''))) {
+    throw new Error(`${operation} requires a valid claimId`);
+  }
+  if (operation === 'confirm' && ['subject', 'type', 'content', 'supports', 'contradicts', 'derivedFrom']
+    .some((key) => input[key] !== undefined)) {
+    throw new Error('confirm may update only confidence, importance, tags, and evidenceRefs');
+  }
+  return operation;
+}
+
+function normalizeLabel(value, name) {
+  if (typeof value !== 'string') throw new Error(`memory claim ${name} is invalid`);
+  const normalized = value.trim().toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9_.-]/g, '');
+  if (!normalized || normalized.length > 64) throw new Error(`memory claim ${name} is invalid`);
+  return normalized;
+}
+
+function normalizeLabels(values, name) {
+  if (!Array.isArray(values) || values.length > 8) throw new Error(`memory claim ${name} is invalid`);
+  return unique(values.map((value) => normalizeLabel(value, name)));
+}
+
+function boundedText(value, name) {
+  if (typeof value !== 'string') throw new Error(`memory claim ${name} must be a string`);
+  const text = value.trim();
+  if (!text || text.length > MAX_CLAIM_CONTENT || /[\0]/.test(text)) {
+    throw new Error(`memory claim ${name} is invalid`);
+  }
+  return text;
+}
+
+function optionalScore(value, fallback) {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 0 || value > 100) {
+    throw new Error('memory claim confidence and importance must be integers from 0 through 100');
+  }
+  return value;
+}
+
+function normalizeEvidenceRefs(values = []) {
+  if (!Array.isArray(values) || values.length > MAX_CLAIM_REFS) {
+    throw new Error('memory claim evidenceRefs is invalid');
+  }
+  const refs = unique(values.map(String));
+  if (refs.some((ref) => ref.length > 64 || !EVIDENCE_ID.test(ref))) {
+    throw new Error('memory claim evidenceRefs is invalid');
+  }
+  return refs;
+}
+
+function normalizeRelations(input, knownClaims) {
+  const relations = {};
+  for (const field of ['supports', 'contradicts', 'derivedFrom']) {
+    const values = input[field] ?? [];
+    if (!Array.isArray(values) || values.length > MAX_CLAIM_REFS) {
+      throw new Error(`memory claim ${field} is invalid`);
+    }
+    relations[field] = unique(values.map(String));
+    for (const ref of relations[field]) {
+      if (!CLAIM_ID.test(ref) || !knownClaims.has(ref)) {
+        throw new Error(`memory claim relation is not retrievable: ${ref}`);
+      }
+    }
+  }
+  return relations;
+}
+
+function validateClaims(data) {
+  if (!Array.isArray(data.claims) || data.claims.length > MAX_CLAIMS
+      || !Number.isSafeInteger(data.claimSequence) || data.claimSequence < 0) {
+    throw new Error('memory claim collection is malformed');
+  }
+  const ids = new Set();
+  for (const claim of data.claims) {
+    if (!claim || typeof claim !== 'object' || Array.isArray(claim)
+        || !Number.isSafeInteger(claim.sequence) || claim.sequence < 1
+        || claim.id !== `claim-${String(claim.sequence).padStart(6, '0')}`
+        || ids.has(claim.id) || !CLAIM_STATUSES.has(claim.status)
+        || normalizeLabel(claim.subject, 'subject') !== claim.subject
+        || normalizeLabel(claim.type, 'type') !== claim.type
+        || boundedText(claim.content, 'content') !== claim.content
+        || optionalScore(claim.confidence, null) !== claim.confidence
+        || optionalScore(claim.importance, null) !== claim.importance
+        || JSON.stringify(normalizeLabels(claim.tags, 'tags')) !== JSON.stringify(claim.tags)
+        || normalizeEvidenceRefs(claim.evidenceRefs).length !== claim.evidenceRefs.length
+        || !validIsoTime(claim.createdAt) || !validIsoTime(claim.updatedAt)) {
+      throw new Error('memory claim collection is malformed');
+    }
+    ids.add(claim.id);
+  }
+  for (const claim of data.claims) {
+    const relations = normalizeRelations(claim.relations || {}, ids);
+    if (JSON.stringify(relations) !== JSON.stringify(claim.relations)) {
+      throw new Error('memory claim collection is malformed');
+    }
+  }
+  for (const claim of data.claims) {
+    if (claim.status === 'contradicted'
+        && !data.claims.some((entry) => entry.relations.contradicts.includes(claim.id))) {
+      throw new Error('memory contradicted claim has no linked correction');
+    }
+    if (claim.status === 'superseded'
+        && !data.claims.some((entry) => entry.relations.derivedFrom.includes(claim.id))) {
+      throw new Error('memory superseded claim has no linked correction');
+    }
+  }
+  const highWater = data.claims.reduce((max, claim) => Math.max(max, claim.sequence), 0);
+  if (data.claimSequence < highWater) throw new Error('memory claim sequence is behind its records');
+}
+
+function claimSummary(claims) {
+  return {
+    total: claims.length,
+    active: claims.filter((claim) => ACTIVE_CLAIM_STATUSES.has(claim.status)).length,
+    proposed: claims.filter((claim) => claim.status === 'proposed').length,
+    confirmed: claims.filter((claim) => claim.status === 'confirmed').length,
+    contradicted: claims.filter((claim) => claim.status === 'contradicted').length,
+    superseded: claims.filter((claim) => claim.status === 'superseded').length,
+  };
+}
+
+function claimSearchText(claim) {
+  return `${claim.id} ${claim.status} ${claim.subject} ${claim.type} ${claim.content} ${claim.tags.join(' ')}`.toLowerCase();
+}
+
+function surfaceClaim(claim) {
+  return {
+    id: claim.id,
+    status: claim.status,
+    subject: claim.subject,
+    type: claim.type,
+    content: claim.content.slice(0, 800),
+    contentTruncated: claim.content.length > 800,
+    confidence: claim.confidence,
+    importance: claim.importance,
+    tags: claim.tags.slice(),
+    evidenceRefs: claim.evidenceRefs.slice(),
+    relations: structuredClone(claim.relations),
+  };
+}
+
+function words(value) {
+  return unique(String(value || '').toLowerCase().split(/[^a-z0-9_.-]+/).filter((word) => word.length > 1));
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function boundedUnion(left, right, name) {
+  const values = unique([...left, ...right]);
+  if (values.length > MAX_CLAIM_REFS) throw new Error(`memory claim ${name} exceeds ${MAX_CLAIM_REFS} references`);
+  return values;
+}
+
+function validIsoTime(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
 
 function safe(value) {

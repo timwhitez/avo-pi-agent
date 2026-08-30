@@ -15,6 +15,12 @@ const SEQUENCE_TELEMETRY_FIELDS = Object.freeze([
   'sequenceActionsSkipped',
   'sequenceCancellations',
 ]);
+const MEMORY_TELEMETRY_FIELDS = Object.freeze([
+  'memoryClaimsProposed',
+  'memoryClaimsConfirmed',
+  'memoryClaimsCorrected',
+  'memoryClaimsSurfaced',
+]);
 
 export function extractGameRecords(report) {
   const records = [];
@@ -85,6 +91,10 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     field,
     reportedCount(ownValues(value, [field, camelToSnake(field)]), field, sourcePath),
   ]));
+  const memoryTelemetry = Object.fromEntries(MEMORY_TELEMETRY_FIELDS.map((field) => [
+    field,
+    reportedCount(ownValues(value, [field, camelToSnake(field)]), field, sourcePath),
+  ]));
   const episodeId = optionalString(firstOwn(value, ['episodeId', 'episode_id']), 'episodeId', sourcePath);
   if (totalLevels !== null && levelsCompleted > totalLevels) {
     invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds totalLevels=${totalLevels}`);
@@ -104,6 +114,12 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   if (unavailableSequenceTelemetry !== 0
       && unavailableSequenceTelemetry !== SEQUENCE_TELEMETRY_FIELDS.length) {
     invalidRecord(sourcePath, 'action-sequence telemetry must be either complete or entirely unavailable');
+  }
+  const unavailableMemoryTelemetry = Object.values(memoryTelemetry)
+    .filter((item) => item === null).length;
+  if (unavailableMemoryTelemetry !== 0
+      && unavailableMemoryTelemetry !== MEMORY_TELEMETRY_FIELDS.length) {
+    invalidRecord(sourcePath, 'memory-claim telemetry must be either complete or entirely unavailable');
   }
   if (unavailableControllerTelemetry === 0) {
     if (actions !== gameplayActions + resets) {
@@ -165,6 +181,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     postTerminalGameplayActions,
     fullResets,
     ...sequenceTelemetry,
+    ...memoryTelemetry,
     episodeId,
     won,
     error: optionalString(value.error, 'error', sourcePath),
@@ -211,6 +228,12 @@ export function validateProductionLoops(records, expectedGames, {
   if (unavailableSequences.length && !allowUnavailableControllerTelemetry) {
     throw new Error(`production loop attestation requires complete action-sequence telemetry: ${unavailableSequences.join(', ')}`);
   }
+  const unavailableMemory = records
+    .filter((record) => record.memoryClaimsProposed === null)
+    .map((record) => record.gameId);
+  if (unavailableMemory.length && !allowUnavailableControllerTelemetry) {
+    throw new Error(`production loop attestation requires complete memory-claim telemetry: ${unavailableMemory.join(', ')}`);
+  }
   const invalidLevelMetadata = records
     .filter((record) => record.levelMetadata !== 'totalLevels')
     .map((record) => ({ gameId: record.gameId, metadata: record.levelMetadata }));
@@ -230,6 +253,7 @@ export function validateProductionLoops(records, expectedGames, {
     controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
     terminalLifecycleTelemetry: unavailableLifecycle.length ? 'unavailable-diagnostic' : 'complete',
     actionSequenceTelemetry: unavailableSequences.length ? 'unavailable-diagnostic' : 'complete',
+    memoryClaimTelemetry: unavailableMemory.length ? 'unavailable-diagnostic' : 'complete',
     levelMetadata: invalidLevelMetadata.length ? 'legacy-diagnostic' : 'totalLevels-v2',
     trajectoryEvidence: unavailableTrajectory.length ? 'unavailable-diagnostic' : 'content-addressed-v1',
   };
@@ -298,6 +322,10 @@ export function aggregateGameMetrics(records) {
     sequenceActionsExecuted: optionalMetricTotal(records, 'sequenceActionsExecuted'),
     sequenceActionsSkipped: optionalMetricTotal(records, 'sequenceActionsSkipped'),
     sequenceCancellations: optionalMetricTotal(records, 'sequenceCancellations'),
+    memoryClaimsProposed: optionalMetricTotal(records, 'memoryClaimsProposed'),
+    memoryClaimsConfirmed: optionalMetricTotal(records, 'memoryClaimsConfirmed'),
+    memoryClaimsCorrected: optionalMetricTotal(records, 'memoryClaimsCorrected'),
+    memoryClaimsSurfaced: optionalMetricTotal(records, 'memoryClaimsSurfaced'),
   };
 }
 
@@ -344,6 +372,10 @@ export function aggregateAttemptTelemetry(attempts) {
     sequenceActionsExecuted: 0,
     sequenceActionsSkipped: 0,
     sequenceCancellations: 0,
+    memoryClaimsProposed: 0,
+    memoryClaimsConfirmed: 0,
+    memoryClaimsCorrected: 0,
+    memoryClaimsSurfaced: 0,
   };
   for (const [index, attempt] of attempts.entries()) {
     for (const field of Object.keys(totals)) {

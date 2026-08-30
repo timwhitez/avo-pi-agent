@@ -77,6 +77,10 @@ test('act_sequence persists every prefix transition and cancels its tail on leve
       sequenceActionsExecuted: 2,
       sequenceActionsSkipped: 1,
       sequenceCancellations: 1,
+      memoryClaimsProposed: 0,
+      memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 0,
+      memoryClaimsSurfaced: 0,
       episodeId: 'episode-000001',
     });
 

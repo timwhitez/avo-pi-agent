@@ -13,14 +13,6 @@ export function createPortablePiLoop({ maxSteps = 500 } = {}) {
         return tool.execute(params);
       };
 
-      await call('memory_update', {
-        patch: {
-          notes: ['Portable contract demo: infer player=1, goal=2, move right then down.'],
-          actionSemantics: {
-            ACTION1: 'up', ACTION2: 'down', ACTION3: 'left', ACTION4: 'right',
-          },
-        },
-      });
       let steps = 0;
       while (!shouldStop() && steps < maxSteps) {
         const observed = await call('observe');

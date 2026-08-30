@@ -26,6 +26,7 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     }
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
+    this.memory.assertClaimEvidence(this.evidenceLedger);
     this.attemptId = `attempt-${String(this.evidenceSequence + 1).padStart(6, '0')}`;
   }
 
@@ -63,6 +64,10 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
 
   trajectoryEvidence() {
     return this.evidenceStore.summary();
+  }
+
+  claimEvidenceLedger() {
+    return this.evidenceStore.events;
   }
 
   proposeCandidate(input) {

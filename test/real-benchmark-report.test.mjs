@@ -30,6 +30,8 @@ const report = {
       fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
       actionSequences: 1, sequenceActionsRequested: 3, sequenceActionsExecuted: 3,
       sequenceActionsSkipped: 0, sequenceCancellations: 0,
+      memoryClaimsProposed: 1, memoryClaimsConfirmed: 1,
+      memoryClaimsCorrected: 0, memoryClaimsSurfaced: 4,
       trajectoryEvidence: trajectoryEvidenceFixture(),
     },
     {
@@ -39,6 +41,8 @@ const report = {
       fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
       actionSequences: 2, sequenceActionsRequested: 6, sequenceActionsExecuted: 5,
       sequenceActionsSkipped: 1, sequenceCancellations: 1,
+      memoryClaimsProposed: 2, memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 1, memoryClaimsSurfaced: 5,
       trajectoryEvidence: trajectoryEvidenceFixture(),
     },
   ],
@@ -69,6 +73,10 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     sequenceActionsExecuted: 8,
     sequenceActionsSkipped: 1,
     sequenceCancellations: 1,
+    memoryClaimsProposed: 3,
+    memoryClaimsConfirmed: 1,
+    memoryClaimsCorrected: 1,
+    memoryClaimsSurfaced: 9,
   });
 });
 
@@ -112,6 +120,7 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     controllerTelemetry: 'complete',
     terminalLifecycleTelemetry: 'complete',
     actionSequenceTelemetry: 'complete',
+    memoryClaimTelemetry: 'complete',
     levelMetadata: 'totalLevels-v2',
     trajectoryEvidence: 'content-addressed-v1',
   });
@@ -131,6 +140,10 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     sequenceActionsExecuted: null,
     sequenceActionsSkipped: null,
     sequenceCancellations: null,
+    memoryClaimsProposed: null,
+    memoryClaimsConfirmed: null,
+    memoryClaimsCorrected: null,
+    memoryClaimsSurfaced: null,
     episodeId: null,
   }));
   assert.throws(() => validateProductionLoops(legacy, 2), /requires complete controller telemetry/);
@@ -143,6 +156,9 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
   assert.equal(validateProductionLoops(legacy, 2, {
     allowUnavailableControllerTelemetry: true,
   }).actionSequenceTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).memoryClaimTelemetry, 'unavailable-diagnostic');
   const missingLifecycle = records.map((record) => ({
     ...record,
     terminalRejectedCommands: null,
