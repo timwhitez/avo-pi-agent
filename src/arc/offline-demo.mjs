@@ -16,6 +16,8 @@ export class OfflineDemoEnvironment {
     this.winLevels = 3;
     this.level = 0;
     this.steps = 0;
+    this.gameplayActionsForwarded = 0;
+    this.postTerminalGameplayActions = 0;
     this.resetLevel();
   }
 
@@ -51,6 +53,10 @@ export class OfflineDemoEnvironment {
   }
 
   async step(action) {
+    this.gameplayActionsForwarded += 1;
+    if (['WIN', 'GAME_OVER', 'ERROR'].includes(this.state)) {
+      this.postTerminalGameplayActions += 1;
+    }
     this.steps += 1;
     const delta = DIRECTIONS[action];
     if (!delta) throw new Error(`unsupported offline action: ${action}`);
@@ -67,6 +73,13 @@ export class OfflineDemoEnvironment {
 
   async scorecard() {
     return { kind: 'offline-contract-demo', levels_completed: this.level, actions: this.steps };
+  }
+
+  async lifecycle() {
+    return {
+      gameplay_actions_forwarded: this.gameplayActionsForwarded,
+      post_terminal_gameplay_actions: this.postTerminalGameplayActions,
+    };
   }
 
   async close() {}

@@ -36,6 +36,9 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
       assert.equal(action, 'ACTION1');
       return frame({ state: calls.step === 1 ? 'GAME_OVER' : 'WIN' });
     },
+    async lifecycle() {
+      return { gameplay_actions_forwarded: calls.step, post_terminal_gameplay_actions: 0 };
+    },
     async scorecard() { return null; },
   };
 
@@ -94,7 +97,6 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
       resets: 1,
       rejectedCommands: 7,
       terminalRejectedCommands: 1,
-      postTerminalGameplayActions: 0,
       fullResets: 1,
       episodeId: 'episode-000002',
     });
@@ -162,6 +164,51 @@ test('GAME_OVER is episode-terminal but still permits finish without spending th
     assert.equal(finished.terminate, true);
     assert.equal(agent.isDone(), true);
     assert.equal(environmentCalls, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ERROR rejects gameplay while keeping reset and finish reachable', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-terminal-error-'));
+  const calls = { step: 0, reset: 0 };
+  const config = {
+    maxActions: 10,
+    stallWindow: 8,
+    memoryDir: path.join(root, 'memory'),
+    workspaceDir: path.join(root, 'workspace'),
+  };
+  const environment = {
+    async start() { return frame({ state: 'ERROR' }); },
+    async step() { calls.step += 1; return frame({ state: 'PLAYING' }); },
+    async reset() { calls.reset += 1; return frame({ state: 'PLAYING' }); },
+    async lifecycle() {
+      return { gameplay_actions_forwarded: calls.step, post_terminal_gameplay_actions: 0 };
+    },
+    async scorecard() { return null; },
+  };
+  try {
+    const recovering = new AvoArcAgent({
+      gameId: 'terminal-error-reset', environment, loop: inertLoop, config,
+    });
+    await recovering.initialize();
+    const recoveringTools = Object.fromEntries(recovering.tools().map((tool) => [tool.name, tool]));
+    const rejected = await recoveringTools.act.execute({ action: 'ACTION1', reasoning: 'must not forward' });
+    assert.equal(rejected.details.code, 'EPISODE_TERMINAL');
+    assert.equal(rejected.details.telemetry.terminalRejectedCommands, 1);
+    assert.deepEqual(calls, { step: 0, reset: 0 });
+    const reset = await recoveringTools.reset.execute({ rationale: 'recover from error episode' });
+    assert.equal(reset.details.frame.state, 'PLAYING');
+    assert.deepEqual(calls, { step: 0, reset: 1 });
+
+    const finishing = new AvoArcAgent({
+      gameId: 'terminal-error-finish', environment, loop: inertLoop,
+      config: { ...config, memoryDir: path.join(root, 'finish-memory') },
+    });
+    await finishing.initialize();
+    const finish = Object.fromEntries(finishing.tools().map((tool) => [tool.name, tool])).finish;
+    assert.equal((await finish.execute({ summary: 'stop after environment error' })).terminate, true);
+    assert.equal(finishing.isDone(), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -109,8 +109,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           }
           const terminalAction = await call('act', { action: 'ACTION1', reasoning: 'must be rejected before bridge' });
           if (terminalAction.details.code !== 'EPISODE_TERMINAL'
-              || terminalAction.details.telemetry?.terminalRejectedCommands !== 1
-              || terminalAction.details.telemetry?.postTerminalGameplayActions !== 0) {
+              || terminalAction.details.telemetry?.terminalRejectedCommands !== 1) {
             throw new Error('GAME_OVER gameplay was not rejected with terminal telemetry');
           }
           const reset = await call('reset', { rationale: 'exercise full-reset identity' });
@@ -251,6 +250,8 @@ class Env:
         self.reset_level()
         if game_id.startswith("g01-"):
             self.state = "GAME_OVER"
+        elif game_id == "error-v1":
+            self.state = "ERROR"
 
     def reset_level(self):
         self.player = [0, 0]
@@ -313,7 +314,7 @@ class Arcade:
     def make(self, game_id):
         self.make_calls += 1
         short = game_id.split("-")[0]
-        index = int(short[1:])
+        index = 1 if short == "error" else int(short[1:])
         env = Env(game_id, 3 + index % 3, f"{game_id}-run-{self.make_calls}")
         self.environments.append(env)
         return env
@@ -472,9 +473,27 @@ try {
     rejected = /EPISODE_TERMINAL/.test(String(error?.message));
   }
   if (!rejected) throw new Error('production Python bridge forwarded post-terminal gameplay');
+  const guardedLifecycle = await client.lifecycle();
+  if (guardedLifecycle.gameplay_actions_forwarded !== 0
+      || guardedLifecycle.post_terminal_gameplay_actions !== 0) {
+    throw new Error('bridge lifecycle telemetry did not reflect the guarded GAME_OVER action');
+  }
   const reset = await client.reset('recover after guarded stale action');
   if (reset.state !== 'PLAYING' || reset.full_reset !== true) {
     throw new Error('bridge reset did not prove zero forwarded terminal steps');
+  }
+  const errorFrame = await client.open('error-v1');
+  if (errorFrame.state !== 'ERROR') throw new Error('bridge ERROR fixture did not begin terminal');
+  rejected = false;
+  try {
+    await client.step('ACTION1', {}, 'stale ERROR action');
+  } catch (error) {
+    rejected = /EPISODE_TERMINAL/.test(String(error?.message));
+  }
+  if (!rejected) throw new Error('production Python bridge forwarded gameplay after ERROR');
+  const errorReset = await client.reset('recover from ERROR');
+  if (errorReset.state !== 'PLAYING' || errorReset.full_reset !== true) {
+    throw new Error('bridge reset did not recover ERROR');
   }
 } finally {
   await client.close();

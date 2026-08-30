@@ -209,6 +209,29 @@ def is_episode_terminal(state: Any) -> bool:
     return str(state or "").strip().upper() in {"WIN", "GAME_OVER", "ERROR"}
 
 
+def new_lifecycle(state: Any) -> dict[str, Any]:
+    return {
+        "state": str(state or "UNKNOWN"),
+        "gameplay_actions_forwarded": 0,
+        "post_terminal_gameplay_actions": 0,
+    }
+
+
+def forward_gameplay(
+    target: Any,
+    action: Any,
+    data: dict,
+    reasoning: dict | None,
+    lifecycle: dict[str, Any],
+):
+    """Instrument the single production seam immediately before env.step."""
+
+    lifecycle["gameplay_actions_forwarded"] += 1
+    if is_episode_terminal(lifecycle.get("state")):
+        lifecycle["post_terminal_gameplay_actions"] += 1
+    return target.step(action, data=data, reasoning=reasoning)
+
+
 def resolve_action(GameAction: Any, name: str) -> Any:
     normalized = str(name).upper()
     try:
@@ -275,7 +298,7 @@ def main() -> int:
             )
             return 0
         open_environments: dict[str, tuple[Any, str]] = {}
-        environment_states: dict[str, str] = {}
+        environment_lifecycles: dict[str, dict[str, Any]] = {}
         current_game_id = None
         if args.game:
             initial_env = arcade.make(args.game)
@@ -283,7 +306,7 @@ def main() -> int:
                 fail(f"Could not create ARC environment: {args.game}")
                 return 3
             open_environments["default"] = (initial_env, args.game)
-            environment_states["default"] = str(
+            environment_lifecycles["default"] = new_lifecycle(
                 serialize_frame(initial_env.observation_space)["state"]
             )
             current_game_id = args.game
@@ -317,7 +340,7 @@ def main() -> int:
                 # opens keep the single-environment contract via "default".
                 open_environments[handle or "default"] = (env, requested_game)
                 frame = serialize_frame(env.observation_space)
-                environment_states[handle or "default"] = str(frame["state"])
+                environment_lifecycles[handle or "default"] = new_lifecycle(frame["state"])
                 current_game_id = requested_game
                 response = {
                     "ok": True,
@@ -329,12 +352,13 @@ def main() -> int:
                 key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
                 frame = serialize_frame(target.observation_space)
-                environment_states[key] = str(frame["state"])
+                environment_lifecycles[key]["state"] = str(frame["state"])
                 response = {"ok": True, "frame": frame}
             elif command in ("step", "reset"):
                 key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
-                if command == "step" and is_episode_terminal(environment_states.get(key)):
+                lifecycle = environment_lifecycles[key]
+                if command == "step" and is_episode_terminal(lifecycle.get("state")):
                     raise ValueError(
                         "EPISODE_TERMINAL: gameplay step rejected; use reset or finish"
                     )
@@ -346,10 +370,29 @@ def main() -> int:
                 reasoning = request.get("reasoning")
                 if reasoning is not None and not isinstance(reasoning, dict):
                     reasoning = {"text": str(reasoning)}
-                raw = target.step(action, data=data, reasoning=reasoning)
+                raw = (
+                    forward_gameplay(target, action, data, reasoning, lifecycle)
+                    if command == "step"
+                    else target.step(action, data=data, reasoning=reasoning)
+                )
                 frame = serialize_frame(raw)
-                environment_states[key] = str(frame["state"])
+                lifecycle["state"] = str(frame["state"])
                 response = {"ok": True, "frame": frame}
+            elif command == "lifecycle":
+                key = resolve_environment_key(request, open_environments)
+                lifecycle = environment_lifecycles[key]
+                response = {
+                    "ok": True,
+                    "lifecycle": {
+                        "state": lifecycle["state"],
+                        "gameplay_actions_forwarded": lifecycle[
+                            "gameplay_actions_forwarded"
+                        ],
+                        "post_terminal_gameplay_actions": lifecycle[
+                            "post_terminal_gameplay_actions"
+                        ],
+                    },
+                }
             elif command == "scorecard":
                 scorecard = arcade.get_scorecard()
                 response = {

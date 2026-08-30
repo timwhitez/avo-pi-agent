@@ -252,6 +252,10 @@ export class ArcBridgeClient {
     return (await this.request({ command: 'reset', reasoning })).frame;
   }
 
+  async lifecycle() {
+    return (await this.request({ command: 'lifecycle' })).lifecycle;
+  }
+
   async scorecard() {
     return (await this.scorecardEvidence()).scorecard;
   }
@@ -285,6 +289,9 @@ export class ArcBridgeClient {
       },
       async reset(reasoning = undefined) {
         return (await client.request({ command: 'reset', reasoning, handle: safeHandle })).frame;
+      },
+      async lifecycle() {
+        return (await client.request({ command: 'lifecycle', handle: safeHandle })).lifecycle;
       },
       async scorecard() {
         return (await client.request({ command: 'scorecard' })).scorecard;

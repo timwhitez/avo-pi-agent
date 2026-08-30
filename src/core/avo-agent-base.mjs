@@ -57,7 +57,6 @@ export class AvoArcAgent {
     this.resets = 0;
     this.rejectedCommands = 0;
     this.terminalRejectedCommands = 0;
-    this.postTerminalGameplayActions = 0;
     this.fullResets = 0;
     this.episodeSequence = 1;
     this.uniqueStates = new Set();
@@ -467,7 +466,6 @@ export class AvoArcAgent {
       resets: this.resets,
       rejectedCommands: this.rejectedCommands,
       terminalRejectedCommands: this.terminalRejectedCommands,
-      postTerminalGameplayActions: this.postTerminalGameplayActions,
       fullResets: this.fullResets,
       episodeId: this.episodeId(),
     };
@@ -475,6 +473,26 @@ export class AvoArcAgent {
 
   scorecardExecutionGuids() {
     return this.executionGuids.slice();
+  }
+
+  async forwardingLifecycleTelemetry() {
+    if (typeof this.environment.lifecycle !== 'function') {
+      if (this.loop.kind === 'pi-sdk') {
+        throw new Error('production environment does not expose forwarding lifecycle telemetry');
+      }
+      return { postTerminalGameplayActions: null };
+    }
+    const value = await this.environment.lifecycle();
+    const forwarded = value?.gameplay_actions_forwarded ?? value?.gameplayActionsForwarded;
+    const postTerminal = value?.post_terminal_gameplay_actions ?? value?.postTerminalGameplayActions;
+    if (!Number.isSafeInteger(forwarded) || forwarded < 0
+        || !Number.isSafeInteger(postTerminal) || postTerminal < 0) {
+      throw new Error('environment forwarding lifecycle telemetry is malformed');
+    }
+    if (forwarded !== this.gameplayActions) {
+      throw new Error('environment forwarded gameplay count differs from agent accounting');
+    }
+    return { postTerminalGameplayActions: postTerminal };
   }
 
   proposeCandidate(input) {
@@ -587,6 +605,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       initialPrompt,
       shouldStop: () => this.isDone(),
     });
+    const forwardingLifecycle = await this.forwardingLifecycleTelemetry();
     return {
       gameId: this.gameId,
       state: this.frame.state,
@@ -597,7 +616,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       resets: this.resets,
       rejectedCommands: this.rejectedCommands,
       terminalRejectedCommands: this.terminalRejectedCommands,
-      postTerminalGameplayActions: this.postTerminalGameplayActions,
+      postTerminalGameplayActions: forwardingLifecycle.postTerminalGameplayActions,
       fullResets: this.fullResets,
       episodeId: this.episodeId(),
       objective: this.objectiveState(),
