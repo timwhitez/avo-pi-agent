@@ -7,11 +7,11 @@ import path from 'node:path';
 import {
   aggregateGameMetrics,
   extractGameRecords,
-  extractOfficialScore,
   selectRunReport,
   validateCompleteGameSet,
   validateProductionLoops,
 } from '../src/benchmark/report.mjs';
+import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
 
 const expected = [
   { gameId: 'aa01', versionedGameId: 'aa01-v1' },
@@ -19,12 +19,32 @@ const expected = [
 ];
 
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   runId: 'run-1',
   kind: 'official-public-environments',
   perGame: [
-    { gameId: 'aa01-v1', state: 'WIN', levelsCompleted: 3, winLevels: 3, actions: 10, won: true, loop: 'pi-sdk' },
-    { gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, winLevels: 3, actions: 20, won: false, loop: 'pi-sdk' },
+    {
+      gameId: 'aa01-v1', state: 'WIN', levelsCompleted: 3, totalLevels: 3,
+      actions: 10, gameplayActions: 10, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
+      fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
+      actionSequences: 1, sequenceActionsRequested: 3, sequenceActionsExecuted: 3,
+      sequenceActionsSkipped: 0, sequenceCancellations: 0,
+      memoryClaimsProposed: 1, memoryClaimsConfirmed: 1,
+      memoryClaimsCorrected: 0, memoryClaimsSurfaced: 4,
+      trajectoryEvidence: trajectoryEvidenceFixture(),
+    },
+    {
+      gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, totalLevels: 3,
+      actions: 20, gameplayActions: 20, resets: 0, rejectedCommands: 0,
+      terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
+      fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
+      actionSequences: 2, sequenceActionsRequested: 6, sequenceActionsExecuted: 5,
+      sequenceActionsSkipped: 1, sequenceCancellations: 1,
+      memoryClaimsProposed: 2, memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 1, memoryClaimsSurfaced: 5,
+      trajectoryEvidence: trajectoryEvidenceFixture(),
+    },
   ],
   aggregateScorecard: { score: 0.625 },
 };
@@ -40,8 +60,23 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     games: 2,
     wins: 1,
     levelsCompleted: 4,
-    winLevels: 6,
+    totalLevels: 6,
     actions: 30,
+    gameplayActions: 30,
+    resets: 0,
+    rejectedCommands: 0,
+    terminalRejectedCommands: 0,
+    postTerminalGameplayActions: 0,
+    fullResets: 0,
+    actionSequences: 3,
+    sequenceActionsRequested: 9,
+    sequenceActionsExecuted: 8,
+    sequenceActionsSkipped: 1,
+    sequenceCancellations: 1,
+    memoryClaimsProposed: 3,
+    memoryClaimsConfirmed: 1,
+    memoryClaimsCorrected: 1,
+    memoryClaimsSurfaced: 9,
   });
 });
 
@@ -82,10 +117,63 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     complete: true,
     attestedCount: 2,
     loop: 'pi-sdk',
+    controllerTelemetry: 'complete',
+    terminalLifecycleTelemetry: 'complete',
+    actionSequenceTelemetry: 'complete',
+    memoryClaimTelemetry: 'complete',
+    levelMetadata: 'totalLevels-v2',
+    trajectoryEvidence: 'content-addressed-v1',
   });
   assert.throws(() => validateProductionLoops(records.map((record) => ({ ...record, loop: null })), 2), /missing/);
   assert.throws(() => validateProductionLoops([{ ...records[0], loop: 'portable' }, records[1]], 2), /portable/);
   assert.throws(() => validateProductionLoops([], 2), /found 0/);
+  const legacy = records.map((record) => ({
+    ...record,
+    gameplayActions: null,
+    resets: null,
+    rejectedCommands: null,
+    terminalRejectedCommands: null,
+    postTerminalGameplayActions: null,
+    fullResets: null,
+    actionSequences: null,
+    sequenceActionsRequested: null,
+    sequenceActionsExecuted: null,
+    sequenceActionsSkipped: null,
+    sequenceCancellations: null,
+    memoryClaimsProposed: null,
+    memoryClaimsConfirmed: null,
+    memoryClaimsCorrected: null,
+    memoryClaimsSurfaced: null,
+    episodeId: null,
+  }));
+  assert.throws(() => validateProductionLoops(legacy, 2), /requires complete controller telemetry/);
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).controllerTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).terminalLifecycleTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).actionSequenceTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).memoryClaimTelemetry, 'unavailable-diagnostic');
+  const missingLifecycle = records.map((record) => ({
+    ...record,
+    terminalRejectedCommands: null,
+    postTerminalGameplayActions: null,
+  }));
+  assert.throws(
+    () => validateProductionLoops(missingLifecycle, 2),
+    /requires complete terminal lifecycle telemetry/,
+  );
+  assert.throws(
+    () => validateProductionLoops([
+      { ...records[0], postTerminalGameplayActions: 1 }, records[1],
+    ], 2),
+    /rejects post-terminal gameplay actions/,
+  );
 });
 
 test('report selection requires exactly one matching run ID and kind', () => {
@@ -106,22 +194,4 @@ test('report selection requires exactly one matching run ID and kind', () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test('score extraction accepts explicit scorecard origin and rejects local lookalikes', () => {
-  assert.deepEqual(extractOfficialScore(report), {
-    value: 0.625,
-    origin: 'aggregateScorecard.score',
-  });
-  assert.throws(
-    () => extractOfficialScore({ objective: { score: 99 }, localScore: 1 }),
-    /official scorecard value is absent/,
-  );
-  assert.throws(
-    () => extractOfficialScore({
-      first: { scorecard: { score: 0.1 } },
-      second: { scorecard: { score: 0.2 } },
-    }),
-    /ambiguous scorecard values/,
-  );
 });

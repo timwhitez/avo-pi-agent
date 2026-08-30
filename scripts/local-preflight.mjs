@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { loadLocalEnv } from '../src/config.mjs';
+import { getRuntimeConfig, loadLocalEnv } from '../src/config.mjs';
 import { redactRuntimeSecrets } from '../src/redaction.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
+import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
   discoverPublicGames,
   inspectOfficialArcRuntime,
@@ -19,6 +20,8 @@ try {
     import('@earendil-works/pi-ai'),
   ]);
 
+  const config = getRuntimeConfig();
+  const workspace = await attestWorkspaceCapability(config);
   const provider = requireRealProviderEnvironment();
   const providerPreflight = await preflightResponsesProvider(provider);
   const piStreamPreflight = await attestPiProviderStream();
@@ -37,8 +40,12 @@ try {
     node: process.versions.node,
     pythonCommand: python,
     piPackagesPresent: true,
+    workspace,
     provider: {
       wireApi: 'responses',
+      capabilityStatus: 'configured-with-bounded-probes',
+      capabilityManifestSha256: providerPreflight.capabilityManifestSha256,
+      effectiveCapabilities: provider.capabilities,
       requestAttested: providerPreflight.ok === true,
       piStreamAttested: piStreamPreflight.ok === true,
       piStream: piStreamPreflight,

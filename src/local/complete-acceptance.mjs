@@ -50,7 +50,5 @@ function isSha256(value) {
 }
 
 function isOfficialScoreOrigin(value) {
-  const origin = String(value || '');
-  return /(?:^|\.)scorecard(?:\.|$)/i.test(origin)
-    || origin === 'aggregateScorecard.score';
+  return value === 'scorecardEvidence.score';
 }

@@ -215,7 +215,7 @@ def supervisor_entries(value: Any) -> list[Any]:
                 normalized = key.lower().replace("_", "")
                 if "supervisor" in normalized and isinstance(child, list):
                     found.extend(child)
-                elif normalized in {"evolution", "lineage", "history", "state"}:
+                elif normalized in {"hypothesisjournal", "evolution", "lineage", "history", "state"}:
                     visit(child, depth + 1)
         elif isinstance(node, list):
             for child in node[:500]:

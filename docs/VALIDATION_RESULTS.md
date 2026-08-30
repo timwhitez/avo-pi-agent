@@ -5,6 +5,9 @@
 A real-provider ARC-AGI-3 public-set execution is retained as non-comparable
 diagnostic evidence in
 [`docs/results/real-public-20260828-high2.json`](results/real-public-20260828-high2.json).
+Those original bytes are immutable historical evidence; the hash-bound
+[`correction record`](results/real-public-20260828-high2.correction-v1.json)
+supersedes their classification without rewriting them.
 
 - **Accepted official score: unavailable.** The observed final-session
   scorecard value `0.0010988675559354109` is preserved as unaccepted
@@ -71,14 +74,14 @@ validation.
 
 ## What the historical checks support
 
-Within the combined worktree they provided evidence that:
+Within the combined worktree the historical checks observed the following.
+Their old candidate/commit vocabulary is retained here only as a description of
+what those checks asserted at the time; it did not demonstrate behavior change:
 
-- candidate proposals preceded their evaluation baseline;
-- model-authored score/correctness/acceptance fields were absent from the tool
-  contract;
-- only post-proposal objective evidence could satisfy prediction checks;
-- rejected attempts remained persisted but absent from committed lineage;
-- stale-parent and worse-objective candidates were rejected;
+- hypothesis records preceded their evaluation baseline;
+- model-authored outcome fields were absent from the tool contract;
+- only exact post-proposal evidence could satisfy prediction checks;
+- prediction-confirmed and contradicted records remained persisted;
 - supervisor intervention was conditional, evidence-referenced, and bounded;
 - Pi continuation exposed outer-turn exhaustion explicitly;
 - Provider and ARC secrets were absent from committed fixtures.

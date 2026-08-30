@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as CopilotCore from '@copilotkit/react-core';
 import * as CopilotUI from '@copilotkit/react-ui';
+import { extractHypothesisJournal } from '../lib/hypothesis-journal-view.mjs';
 
 const CopilotProvider = CopilotCore.CopilotKit || (({ children }) => children);
 const CopilotSidebar = CopilotUI.CopilotSidebar || (({ children }) => children);
@@ -298,7 +299,7 @@ export default function Page() {
               <section className="overview-grid" aria-label="Run summary">
                 <Metric label="Game" value={selected?.currentGame || '—'} />
                 <Metric label="Progress" value={`${selected?.progress?.gameIndex || 0}/${selected?.progress?.gameTotal || 0}`} />
-                <Metric label="Levels" value={`${selected?.progress?.levelsCompleted || 0}/${selected?.progress?.winLevels || 0}`} />
+                <Metric label="Levels" value={`${selected?.progress?.levelsCompleted ?? 0}/${selected?.progress?.totalLevels ?? '?'}`} />
                 <Metric label="Actions" value={selected?.progress?.actions ?? 0} />
               </section>
 
@@ -332,12 +333,12 @@ export default function Page() {
 
                   <section className="panel">
                     <div className="tabs" role="tablist" aria-label="Agent state views">
-                      {['memory', 'lineage', 'supervisor', 'findings', 'summary'].map((name) => (
+                      {['memory', 'hypotheses', 'supervisor', 'findings', 'summary'].map((name) => (
                         <button className="tab" key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>
                       ))}
                     </div>
                     {tab === 'memory' && <JsonView value={memory} empty="No persisted memory is available yet." />}
-                    {tab === 'lineage' && <JsonView value={extractLineage(memory)} empty="No proposal or committed lineage is available yet." />}
+                    {tab === 'hypotheses' && <JsonView value={extractHypothesisJournal(memory)} empty="No hypothesis or evidence evaluation is available yet." />}
                     {tab === 'supervisor' && <JsonView value={extractSupervisor(memory, trajectoryEvents)} empty="No supervisor intervention is available yet." />}
                     {tab === 'findings' && <Findings findings={findings} />}
                     {tab === 'summary' && <JsonView value={{ run: selectedRunListEntry, summary: selected.summary, provider: selected.provider }} empty="No summary is available yet." />}
@@ -400,7 +401,7 @@ function CopilotBindings({ state, start, control, compare, selectRun, seek }) {
   });
   useAction({
     name: 'select_avo_run',
-    description: 'Select a run for memory, lineage, findings, and replay inspection.',
+    description: 'Select a run for memory, hypothesis evidence, findings, and replay inspection.',
     parameters: [{ name: 'runId', type: 'string', required: true }],
     handler: async ({ runId }) => { selectRun(runId); return { selected: runId }; },
   });
@@ -488,17 +489,6 @@ function normalizeFindings(value) {
   if (Array.isArray(value.findings)) return value.findings;
   if (Array.isArray(value.openFindings)) return value.openFindings;
   return [];
-}
-
-function extractLineage(memory) {
-  // The persisted memory writer uses candidateProposals / candidateAttempts /
-  // committedLineage; keep the older nested-shape fallbacks for robustness.
-  return memory.map((entry) => ({
-    gameId: entry.gameId,
-    proposals: entry.value?.candidateProposals || entry.value?.proposals || entry.value?.lineage?.proposals || [],
-    attempts: entry.value?.candidateAttempts || entry.value?.attempts || entry.value?.lineage?.attempts || [],
-    committed: entry.value?.committedLineage || entry.value?.committed || entry.value?.lineage?.committed || [],
-  }));
 }
 
 function extractSupervisor(memory, events) {

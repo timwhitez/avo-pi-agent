@@ -2,27 +2,57 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Type } from '@earendil-works/pi-ai';
+import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-responses-shared';
 
 import {
   AvoArcAgent,
-  effectiveAvoToolNames,
+  effectiveAvoToolContract,
 } from '../core/avo-agent-base.mjs';
+import { EvidenceStore, summarizeEvidenceEvents } from '../core/evidence-store.mjs';
+import { EPISODE_OBSERVATION_SCHEMA } from '../core/observation.mjs';
+import {
+  actionBudgetPolicy,
+  deriveGameBudgets,
+} from '../arc/action-budget.mjs';
+import {
+  normalizePolicyProfile,
+  policyInitialPrompt,
+} from '../core/policy-profile.mjs';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
-  CONTINUATION_PROMPT,
-  PI_MODEL_CAPABILITY_MANIFEST,
+  COMPACTION_NOTICE_TEMPLATE_SHA256,
+  THINKING_ELISION_POLICY_SHA256,
+  TOOL_RESULT_ELISION_TEMPLATE_SHA256,
+  TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
   boundTranscript,
   createPiSdkLoop,
+  estimateStaticPiContextTokens,
   effectivePiSystemPrompt,
+  piToolContract,
+  runtimeStatusTemplateSha256,
 } from '../loop/pi-sdk.mjs';
+import {
+  assertProviderCapabilities,
+  providerCapabilityDigest,
+  transcriptMaxTokens,
+} from '../provider-capabilities.mjs';
+import {
+  experimentIdentitySha256,
+  validateExperimentRunBinding,
+} from './experiment-protocol.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { fingerprint } from './redaction.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
+import {
+  validateWorkspaceCapabilityAttestation,
+  workspaceCapabilityDigest,
+} from './workspace-attestation.mjs';
 
-export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
+export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v2';
 export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
 export { canonicalJson } from '../local/canonical-json.mjs';
 
@@ -31,25 +61,47 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'package-lock.json',
   'bridge/requirements.txt',
   'bridge/arc_bridge.py',
+  'scripts/pi-provider-smoke.mjs',
   'scripts/run-real-public.mjs',
   'src/arc/bridge-client.mjs',
+  'src/arc/action-budget.mjs',
+  'src/benchmark/experiment-protocol.mjs',
+  'src/benchmark/mechanism-metrics.mjs',
   'src/benchmark/resume-cache.mjs',
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
+  'src/benchmark/scorecard-evidence.mjs',
+  'src/benchmark/workspace-attestation.mjs',
+  'src/benchmark/pi-stream-attestation.mjs',
+  'src/benchmark/provider-attestation.mjs',
+  'src/benchmark/provenance-core.mjs',
+  'src/benchmark/provenance.mjs',
   'src/benchmark/run-capsule-authority.mjs',
   'src/benchmark/run-capsule-evidence.mjs',
   'src/benchmark/run-capsule-public.mjs',
   'src/benchmark/run-capsule.mjs',
   'src/cli.mjs',
   'src/config.mjs',
+  'src/core/avo-agent.mjs',
   'src/core/avo-agent-base.mjs',
+  'src/core/durable-avo-agent.mjs',
+  'src/core/durable-memory.mjs',
+  'src/core/evidence-lock.mjs',
+  'src/core/evidence-store.mjs',
+  'src/core/evaluator.mjs',
+  'src/core/hypothesis-journal.mjs',
+  'src/core/knowledge-base.mjs',
+  'src/core/memory.mjs',
   'src/core/observation.mjs',
+  'src/core/policy-profile.mjs',
+  'src/core/supervisor.mjs',
   'src/core/workspace.mjs',
   'src/local/authority-directory.mjs',
   'src/local/canonical-json.mjs',
   'src/local/child-environment.mjs',
   'src/local/regular-file-evidence.mjs',
   'src/loop/pi-sdk.mjs',
+  'src/provider-capabilities.mjs',
 ]);
 const STATE_MODES = new Set(['cold-start', 'warm-start']);
 const RESUME_MODES = new Set(['recovered', 'migrated']);
@@ -189,7 +241,11 @@ export function buildRunCapsule({
   arcRuntime,
   games,
   config,
+  workspaceAttestation,
   initialState,
+  memoryDir = null,
+  resumeCapsule = null,
+  experiment = null,
   env = process.env,
   git = null,
   dependencies = inspectDependencyClosure({ root, python }),
@@ -214,22 +270,51 @@ export function buildRunCapsule({
   }
   const workspaceMode = String(config?.workspaceMode || 'files-only');
   if (!WORKSPACE_MODES.has(workspaceMode)) throw new Error('run capsule workspace mode is invalid');
-  if (workspaceMode === 'isolated-python') {
-    throw new Error('official run capsule refuses isolated-python until the container runtime and image digest are attested');
+  const policyProfile = normalizePolicyProfile(config?.policyProfile);
+  const experimentBinding = experiment === null ? null : validateExperimentRunBinding(experiment);
+  if (experimentBinding
+      && (experimentBinding.gitCommit !== inspectedGit.commit
+        || experimentBinding.providerEndpointSha256 !== experimentIdentitySha256(
+          'endpoint', String(config?.provider?.baseUrl || '').replace(/\/$/, ''),
+        )
+        || experimentBinding.providerModelSha256 !== experimentIdentitySha256(
+          'model', config?.provider?.model,
+        ))) {
+    throw new Error('run capsule provider or Git identity differs from its experiment binding');
   }
+  validateWorkspaceCapabilityAttestation(workspaceAttestation, { config });
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
+  const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const providerIdentity = inspectProviderIdentity(runId, config?.provider);
   if (providerIdentity.providerFingerprint !== provenance?.providerFingerprint
       || providerIdentity.endpointFingerprint !== provenance?.providerEndpointFingerprint
       || providerIdentity.modelFingerprint !== provenance?.providerModelFingerprint) {
     throw new Error('run provenance provider identity differs from the effective provider config');
   }
-  const toolSchemas = canonicalToolSchemas(workspaceMode);
+  const toolSchemas = canonicalToolSchemas(workspaceMode, policyProfile);
+  const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
+  const providerToolSchemas = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
   const systemPrompt = effectivePiSystemPrompt(
-    AvoArcAgent.prototype.systemPrompt.call({}),
+    AvoArcAgent.prototype.systemPrompt.call({ policyProfile }),
     workspaceMode,
   );
+  const versionedGameIds = normalizeVersionedGames(games);
+  const sealedInitialState = validateInitialState(initialState);
+  const sealedTrajectoryStarts = resumeCapsule === null
+    ? inspectTrajectoryStarts({
+        memoryDir,
+        initialState: sealedInitialState,
+        versionedGameIds,
+      })
+    : resumeTrajectoryStarts(resumeCapsule, {
+        initialState: sealedInitialState,
+        runId,
+        versionedGameIds,
+      });
   const definition = {
     schema: RUN_CAPSULE_SCHEMA,
     runId: safeIdentifier(runId, 'run ID'),
@@ -238,42 +323,48 @@ export function buildRunCapsule({
       files: componentHashes,
       setSha256: sha256(canonicalJson(componentHashes)),
     },
+    policyProfile: {
+      requested: policyProfile,
+      effective: policyProfile,
+    },
     prompts: {
       systemSha256: sha256(systemPrompt),
       developerPresent: false,
       developerSha256: null,
-      initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      continuationSha256: sha256(CONTINUATION_PROMPT),
+      initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
+      compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
+      providerSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
       enabled: toolSchemas.map((tool) => tool.name),
       executionMode: 'sequential',
     },
+    workspaceCapability: {
+      sha256: workspaceCapabilityDigest(workspaceAttestation),
+      attestation: structuredClone(workspaceAttestation),
+    },
     transcript: {
       policySha256: sha256(boundTranscript.toString()),
+      toolResultElisionTemplateSha256: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
+      toolResultTruncationTemplateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
+      thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
+      maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
+      staticContextTokens: estimateStaticPiContextTokens(systemPrompt, piTools),
+      contextEstimator: providerCapabilities.tokenizer.contextEstimator,
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
-    modelInterface: {
-      implementationSha256: sha256(createPiSdkLoop.toString()),
-      capabilityStatus: 'declared-unverified',
-      wireApi: String(provenance?.wireApi || 'responses'),
-      providerFingerprint: providerIdentity.providerFingerprint,
-      endpointFingerprint: providerIdentity.endpointFingerprint,
-      modelFingerprint: providerIdentity.modelFingerprint,
+    modelInterface: modelInterfaceDefinition({
+      config,
+      provenance,
+      providerIdentity,
       reasoningEffort,
-      requestedCapabilities: {
-        streaming: true,
-        toolCalling: true,
-      },
-      declaredCapabilityManifest: structuredClone(PI_MODEL_CAPABILITY_MANIFEST),
-      samplingParameters: {
-        temperature: 'omitted-provider-default',
-        topP: 'omitted-provider-default',
-      },
-    },
+      providerCapabilities,
+      providerToolSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
+    }),
     runtime: {
       node: process.version,
       dependencies: validateDependencyClosure(dependencies),
@@ -283,13 +374,16 @@ export function buildRunCapsule({
       gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
       transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
       sessionTopology: 'one-arcade-session-per-process-pass',
-      scorecardBinding: 'capsule-bound-state-checkpoint-v3',
+      scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
       providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
+      actionBudgetPolicy: actionBudgetPolicy(env),
       config: {
         maxActions: positiveInteger(config?.maxActions, 1000, 'maxActions'),
         maxOuterTurns: positiveInteger(config?.maxOuterTurns, 1000, 'maxOuterTurns'),
         stallWindow: positiveInteger(config?.stallWindow, 8, 'stallWindow'),
+        policyProfile,
+        memorySurfaceLimit: boundedInteger(config?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
         workspaceMode,
         workspacePythonTimeoutMs: positiveInteger(config?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
         workspaceContainerRuntime: String(config?.workspaceContainerRuntime || 'docker'),
@@ -298,22 +392,39 @@ export function buildRunCapsule({
     },
     task: {
       arcAuthMode: String(provenance?.arcAuth?.mode || 'unknown'),
-      versionedGameIds: normalizeVersionedGames(games),
+      versionedGameIds,
+      gameBudgets: deriveGameBudgets(games, {
+        hardCap: config?.maxActions,
+        outerTurnHardCap: config?.maxOuterTurns,
+        policy: actionBudgetPolicy(env),
+      }),
+      trajectoryStarts: sealedTrajectoryStarts,
     },
-    initialState: validateInitialState(initialState),
+    initialState: sealedInitialState,
+    experiment: experimentBinding,
   };
   return sealRunCapsule(definition, { createdAt });
 }
 
-function canonicalToolSchemas(workspaceMode) {
-  const enabled = new Set(effectiveAvoToolNames(workspaceMode));
-  const schemas = AvoArcAgent.prototype.tools.call({})
-    .filter((tool) => enabled.has(tool.name))
-    .map(({ name, label, description, parameters }) => ({ name, label, description, parameters }));
-  if (schemas.length !== enabled.size || schemas.some((tool) => !enabled.has(tool.name))) {
-    throw new Error('effective tool schema set differs from the production tool allowlist');
-  }
-  return schemas;
+function canonicalToolSchemas(workspaceMode, policyProfile) {
+  return effectiveAvoToolContract(workspaceMode, policyProfile);
+}
+
+function initialPromptTemplateSha256(policyProfile) {
+  return sha256(canonicalJson({
+    policyProfile: normalizePolicyProfile(policyProfile),
+    renderer: policyInitialPrompt.toString(),
+  }));
+}
+
+export function productionProviderToolSchemaDigest(workspaceMode = 'files-only', policyProfile) {
+  const piTools = canonicalToolSchemas(workspaceMode, policyProfile)
+    .map((tool) => piToolContract(tool, Type));
+  const providerTools = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
+  return sha256(canonicalJson(providerTools));
 }
 
 export function sealRunCapsule(definition, { createdAt = new Date().toISOString() } = {}) {
@@ -322,7 +433,7 @@ export function sealRunCapsule(definition, { createdAt = new Date().toISOString(
   }
   const capsuleHash = sha256(canonicalJson(definition));
   return deepFreeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     capsuleHash,
     createdAt: String(createdAt),
     definition: structuredClone(definition),
@@ -370,13 +481,32 @@ export function publicRunCapsule(capsule, { runClass, comparable } = {}) {
   });
 }
 
-export function classifyCapsuleResult(resumeDecision, observedOfficialScore) {
+export function classifyCapsuleResult(resumeDecision, scorecardAuthority) {
+  const scoreStatus = String(scorecardAuthority?.scoreStatus || 'rejected');
+  const observedOfficialScore = scorecardAuthority?.officialScore ?? Object.freeze({
+    value: null,
+    origin: 'unavailable',
+    reason: 'scorecard coverage authority is absent',
+  });
   if (resumeDecision?.comparable === true
-      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)) {
+      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)
+      && scoreStatus === 'official') {
     return Object.freeze({
       status: 'complete',
       officialScore: observedOfficialScore,
       unacceptedScoreEvidence: null,
+    });
+  }
+  if (resumeDecision?.comparable === true
+      && ['cold-start', 'warm-start', 'recovered'].includes(resumeDecision.runClass)) {
+    return Object.freeze({
+      status: 'diagnostic-recovered',
+      officialScore: Object.freeze({
+        value: null,
+        origin: 'unavailable',
+        reason: scorecardAuthority?.rejectionReason || 'scorecard execution coverage is not exact',
+      }),
+      unacceptedScoreEvidence: scorecardAuthority?.unacceptedScoreEvidence ?? null,
     });
   }
   if (resumeDecision?.comparable === false && resumeDecision.runClass === 'diagnostic-migrated') {
@@ -438,6 +568,7 @@ export function verifyRunCapsuleExecution({
   capsule,
   python = '.venv/bin/python',
   config = null,
+  workspaceAttestation = null,
   stateBinding = null,
   requireInitialState = false,
   env = process.env,
@@ -461,13 +592,32 @@ export function verifyRunCapsuleExecution({
   if (process.version !== definition.runtime.node) {
     throw new Error('execution Node runtime differs from the sealed run capsule');
   }
-  if (definition.runtime.config.workspaceMode === 'isolated-python') {
-    throw new Error('official execution refuses unattested isolated-python runtime identity');
-  }
   if (config) verifyEffectiveConfig(config, definition.runtime.config);
-  const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
+  validateWorkspaceCapabilityAttestation(workspaceAttestation, { config: config || definition.runtime.config });
+  validateWorkspaceCapabilityAttestation(definition.workspaceCapability?.attestation, {
+    config: definition.runtime.config,
+  });
+  if (workspaceCapabilityDigest(workspaceAttestation) !== definition.workspaceCapability?.sha256
+      || canonicalJson(workspaceAttestation) !== canonicalJson(definition.workspaceCapability.attestation)) {
+    throw new Error('effective workspace capability differs from the sealed run capsule');
+  }
+  const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
+  const policyProfile = normalizePolicyProfile(definition.runtime.config.policyProfile);
+  if (canonicalJson(definition.policyProfile)
+      !== canonicalJson({ requested: policyProfile, effective: policyProfile })) {
+    throw new Error('requested and effective policy profiles differ from the sealed runtime');
+  }
+  const toolSchemas = canonicalToolSchemas(
+    definition.runtime.config.workspaceMode,
+    policyProfile,
+  );
+  const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
+  const providerToolSchemas = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
   const prompt = effectivePiSystemPrompt(
-    AvoArcAgent.prototype.systemPrompt.call({}),
+    AvoArcAgent.prototype.systemPrompt.call({ policyProfile }),
     definition.runtime.config.workspaceMode,
   );
   const observedHarness = {
@@ -475,18 +625,26 @@ export function verifyRunCapsuleExecution({
       systemSha256: sha256(prompt),
       developerPresent: false,
       developerSha256: null,
-      initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      continuationSha256: sha256(CONTINUATION_PROMPT),
+      initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
+      compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
+      providerSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
       enabled: toolSchemas.map((tool) => tool.name),
       executionMode: 'sequential',
     },
     transcript: {
       policySha256: sha256(boundTranscript.toString()),
+      toolResultElisionTemplateSha256: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
+      toolResultTruncationTemplateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
+      thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
+      maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
+      staticContextTokens: estimateStaticPiContextTokens(prompt, piTools),
+      contextEstimator: providerCapabilities.tokenizer.contextEstimator,
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
   };
@@ -496,21 +654,14 @@ export function verifyRunCapsuleExecution({
     throw new Error('effective prompt, tool, or transcript contract differs from the sealed run capsule');
   }
   const providerIdentity = inspectProviderIdentity(definition.runId, config?.provider);
-  const observedModelInterface = {
-    implementationSha256: sha256(createPiSdkLoop.toString()),
-    capabilityStatus: 'declared-unverified',
-    wireApi: 'responses',
-    providerFingerprint: providerIdentity.providerFingerprint,
-    endpointFingerprint: providerIdentity.endpointFingerprint,
-    modelFingerprint: providerIdentity.modelFingerprint,
+  const observedModelInterface = modelInterfaceDefinition({
+    config,
+    providerIdentity,
     reasoningEffort: String(config?.provider?.reasoningEffort || ''),
-    requestedCapabilities: { streaming: true, toolCalling: true },
-    declaredCapabilityManifest: structuredClone(PI_MODEL_CAPABILITY_MANIFEST),
-    samplingParameters: {
-      temperature: 'omitted-provider-default',
-      topP: 'omitted-provider-default',
-    },
-  };
+    providerCapabilities,
+    providerToolSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
+    attestation: definition.modelInterface.attestation,
+  });
   if (canonicalJson(observedModelInterface) !== canonicalJson(definition.modelInterface)) {
     throw new Error('effective provider or model interface differs from the sealed run capsule');
   }
@@ -520,6 +671,7 @@ export function verifyRunCapsuleExecution({
     transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
     providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
     providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
+    actionBudgetPolicy: actionBudgetPolicy(env),
     arcAuthMode: String(env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase(),
   };
   if (observedRuntime.gameConcurrency !== definition.runtime.gameConcurrency
@@ -527,6 +679,7 @@ export function verifyRunCapsuleExecution({
       || observedRuntime.transientTurnRecoveries !== definition.runtime.transientTurnRecoveries
       || observedRuntime.providerStreamTimeoutMs !== definition.runtime.providerStreamTimeoutMs
       || observedRuntime.providerStreamMaxRetries !== definition.runtime.providerStreamMaxRetries
+      || canonicalJson(observedRuntime.actionBudgetPolicy) !== canonicalJson(definition.runtime.actionBudgetPolicy)
       || observedRuntime.arcAuthMode !== definition.task.arcAuthMode) {
     throw new Error('effective execution topology or retry policy differs from the sealed run capsule');
   }
@@ -540,6 +693,7 @@ export function verifyRunCapsuleExecution({
     componentSetSha256: definition.components.setSha256,
     nodeDependencySha256: closure.nodeSha256,
     pythonDependencySha256: closure.pythonSha256,
+    workspaceCapabilitySha256: definition.workspaceCapability.sha256,
   });
 }
 
@@ -548,6 +702,14 @@ export function verifyRunCapsuleGameSet(capsule, games) {
   const observed = normalizeVersionedGames(games);
   if (canonicalJson(observed) !== canonicalJson(capsule.definition.task.versionedGameIds)) {
     throw new Error('effective public game set differs from the sealed run capsule');
+  }
+  const expectedBudgets = deriveGameBudgets(games, {
+    hardCap: capsule.definition.runtime.config.maxActions,
+    outerTurnHardCap: capsule.definition.runtime.config.maxOuterTurns,
+    policy: capsule.definition.runtime.actionBudgetPolicy,
+  });
+  if (canonicalJson(expectedBudgets) !== canonicalJson(capsule.definition.task.gameBudgets)) {
+    throw new Error('effective public game metadata or budgets differ from the sealed run capsule');
   }
   return true;
 }
@@ -601,9 +763,26 @@ function scanDirectoryTree(directory) {
 }
 
 function validateRunCapsule(capsule) {
-  if (capsule?.schemaVersion !== 1 || capsule?.definition?.schema !== RUN_CAPSULE_SCHEMA) {
+  if (capsule?.schemaVersion !== 2 || capsule?.definition?.schema !== RUN_CAPSULE_SCHEMA) {
     throw new Error('run capsule schema is invalid');
   }
+  if (!capsule.definition.policyProfile
+      || typeof capsule.definition.policyProfile !== 'object'
+      || Array.isArray(capsule.definition.policyProfile)) {
+    throw new Error('run capsule policy profile is absent or inconsistent');
+  }
+  const profile = normalizePolicyProfile(capsule.definition.runtime?.config?.policyProfile);
+  if (canonicalJson(capsule.definition.policyProfile)
+      !== canonicalJson({ requested: profile, effective: profile })) {
+    throw new Error('run capsule policy profile is absent or inconsistent');
+  }
+  if (capsule.definition.experiment !== null && capsule.definition.experiment !== undefined) {
+    validateExperimentRunBinding(capsule.definition.experiment);
+  }
+  validateTrajectoryStarts(
+    capsule.definition.task?.trajectoryStarts,
+    capsule.definition.task?.versionedGameIds,
+  );
   const actual = sha256(canonicalJson(capsule.definition));
   if (!/^[a-f0-9]{64}$/.test(String(capsule.capsuleHash || '')) || capsule.capsuleHash !== actual) {
     throw new Error('run capsule hash does not match its definition');
@@ -648,6 +827,90 @@ export function validateRunState(value) {
   return value;
 }
 
+function modelInterfaceDefinition({
+  config,
+  provenance = null,
+  providerIdentity,
+  reasoningEffort,
+  providerCapabilities,
+  providerToolSchemaSha256,
+  attestation = null,
+}) {
+  const manifestSha256 = providerCapabilityDigest(providerCapabilities);
+  const requestedCapabilities = {
+    streaming: true,
+    toolCalling: true,
+    parallelToolCalls: 'provider-default-unspecified',
+    inputModalities: ['text'],
+    reasoningEffort,
+  };
+  let effectiveAttestation = attestation;
+  if (provenance) {
+    const declared = provenance.modelCapabilities;
+    const providerProbe = provenance.providerPreflight;
+    const piProbe = provenance.piStreamPreflight;
+    const probesValid = declared?.capabilityStatus === 'configured-with-bounded-probes'
+      && declared?.manifestSha256 === manifestSha256
+      && declared?.providerToolSchemaSha256 === providerToolSchemaSha256
+      && canonicalJson(declared?.requested) === canonicalJson({ wireApi: 'responses', ...requestedCapabilities })
+      && canonicalJson(declared?.effective) === canonicalJson(providerCapabilities)
+      && Object.values(declared?.probes || {}).every((value) => value === true)
+      && providerProbe?.ok === true
+      && providerProbe?.requestAccepted === true
+      && providerProbe?.attestationVersion >= 3
+      && providerProbe?.capabilityManifestSha256 === manifestSha256
+      && piProbe?.ok === true
+      && piProbe?.capabilityManifestSha256 === manifestSha256
+      && piProbe?.productionToolSchemaSha256 === providerToolSchemaSha256
+      && piProbe?.productionToolSchemaVerified === true
+      && piProbe?.requestedVsEffectiveVerified === true
+      && piProbe?.multiTurnContinuationVerified === true
+      && piProbe?.largeToolResultVerified === true;
+    if (!probesValid) throw new Error('run capsule requires configured and bounded-probed provider capabilities');
+    effectiveAttestation = {
+      providerFreshnessVersion: providerProbe.attestationVersion,
+      providerRequestAccepted: true,
+      piToolProtocolVerified: true,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+      productionToolSchemaSha256: providerToolSchemaSha256,
+      capabilityManifestSha256: manifestSha256,
+    };
+  }
+  if (canonicalJson(effectiveAttestation || {}) !== canonicalJson({
+    providerFreshnessVersion: 3,
+    providerRequestAccepted: true,
+    piToolProtocolVerified: true,
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultVerified: true,
+    productionToolSchemaSha256: providerToolSchemaSha256,
+    capabilityManifestSha256: manifestSha256,
+  })) {
+    throw new Error('provider capability attestation is absent or inconsistent');
+  }
+  return {
+    implementationSha256: sha256(createPiSdkLoop.toString()),
+    capabilityStatus: 'configured-with-bounded-probes',
+    wireApi: 'responses',
+    providerFingerprint: providerIdentity.providerFingerprint,
+    endpointFingerprint: providerIdentity.endpointFingerprint,
+    modelFingerprint: providerIdentity.modelFingerprint,
+    reasoningEffort,
+    requestedCapabilities,
+    capabilityManifestSha256: manifestSha256,
+    effectiveCapabilityManifest: structuredClone(providerCapabilities),
+    attestation: structuredClone(effectiveAttestation),
+    samplingParameters: {
+      temperature: 'omitted-provider-default',
+      topP: 'omitted-provider-default',
+    },
+  };
+}
+
 function normalizeVersionedGames(games) {
   if (!Array.isArray(games) || games.length === 0) throw new Error('run capsule requires a non-empty game set');
   const values = games.map((game) => String(game?.versionedGameId ?? game?.game_id ?? '')).sort();
@@ -656,6 +919,107 @@ function normalizeVersionedGames(games) {
   }
   if (new Set(values).size !== values.length) throw new Error('run capsule game set contains duplicate versioned IDs');
   return values;
+}
+
+function inspectTrajectoryStarts({ memoryDir, initialState, versionedGameIds }) {
+  const gameIds = versionedGameIds.map((versionedGameId) => versionedGameId.split('-')[0]);
+  if (new Set(gameIds).size !== gameIds.length) {
+    throw new Error('run capsule game set contains duplicate short IDs');
+  }
+  let observedMemory = null;
+  if (memoryDir) {
+    observedMemory = hashDirectoryTree(memoryDir);
+    if (canonicalJson(observedMemory) !== canonicalJson(initialState.memory)) {
+      throw new Error('trajectory start memory differs from the sealed initial state');
+    }
+  } else if (!initialState.memory.empty) {
+    throw new Error('non-empty initial memory requires a trajectory start snapshot');
+  }
+  const starts = versionedGameIds.map((versionedGameId, index) => {
+    const gameId = gameIds[index];
+    const trajectoryEvidence = memoryDir
+      ? new EvidenceStore(path.join(memoryDir, 'evidence'), gameId, {
+          authorityRoot: memoryDir,
+        }).load().summary()
+      : summarizeEvidenceEvents([]);
+    if (trajectoryEvidence.highWaterSequence > 0
+        && (trajectoryEvidence.complete !== true
+          || trajectoryEvidence.identitySchema !== EPISODE_OBSERVATION_SCHEMA)) {
+      throw new Error(`trajectory start for ${gameId} is not complete current-schema evidence`);
+    }
+    return { gameId, versionedGameId, trajectoryEvidence };
+  });
+  if (memoryDir
+      && canonicalJson(hashDirectoryTree(memoryDir)) !== canonicalJson(observedMemory)) {
+    throw new Error('trajectory start memory changed while it was inspected');
+  }
+  return validateTrajectoryStarts(starts, versionedGameIds);
+}
+
+function resumeTrajectoryStarts(capsule, { initialState, runId, versionedGameIds }) {
+  validateRunCapsule(capsule);
+  if (capsule.definition.runId !== safeIdentifier(runId, 'run ID')
+      || canonicalJson(capsule.definition.initialState) !== canonicalJson(initialState)
+      || canonicalJson(capsule.definition.task.versionedGameIds) !== canonicalJson(versionedGameIds)) {
+    throw new Error('resume capsule cannot supply this run trajectory start');
+  }
+  return validateTrajectoryStarts(capsule.definition.task.trajectoryStarts, versionedGameIds);
+}
+
+function validateTrajectoryStarts(value, versionedGameIds) {
+  if (!Array.isArray(value) || !Array.isArray(versionedGameIds)
+      || value.length !== versionedGameIds.length) {
+    throw new Error('run capsule trajectory starts are incomplete');
+  }
+  const expected = versionedGameIds.slice().sort();
+  const starts = value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+        || canonicalJson(Object.keys(item).sort())
+          !== canonicalJson(['gameId', 'trajectoryEvidence', 'versionedGameId'])) {
+      throw new Error(`run capsule trajectory start ${index + 1} is malformed`);
+    }
+    const versionedGameId = String(item.versionedGameId || '');
+    const gameId = String(item.gameId || '');
+    const trajectory = item.trajectoryEvidence;
+    const eventCount = trajectory?.eventCount;
+    const highWaterSequence = trajectory?.highWaterSequence;
+    if (versionedGameId !== expected[index]
+        || gameId !== versionedGameId.split('-')[0]
+        || !trajectory || typeof trajectory !== 'object' || Array.isArray(trajectory)
+        || canonicalJson(Object.keys(trajectory).sort()) !== canonicalJson([
+          'complete', 'eventCount', 'firstEvidenceRef', 'highWaterSequence',
+          'identitySchema', 'lastEvidenceRef', 'rootSha256', 'schema',
+        ])
+        || trajectory.schema !== 'avo.trajectory-evidence.v1'
+        || trajectory.complete !== true
+        || !Number.isSafeInteger(eventCount) || eventCount < 0
+        || highWaterSequence !== eventCount
+        || !/^[a-f0-9]{64}$/.test(String(trajectory.rootSha256 || ''))) {
+      throw new Error(`run capsule trajectory start ${index + 1} is malformed`);
+    }
+    if (eventCount === 0) {
+      if (trajectory.identitySchema !== null
+          || trajectory.firstEvidenceRef !== null
+          || trajectory.lastEvidenceRef !== null
+          || trajectory.rootSha256 !== summarizeEvidenceEvents([]).rootSha256) {
+        throw new Error(`run capsule trajectory start ${index + 1} empty boundary is malformed`);
+      }
+    } else if (trajectory.identitySchema !== EPISODE_OBSERVATION_SCHEMA
+        || evidenceRefSequence(trajectory.firstEvidenceRef) !== 1
+        || evidenceRefSequence(trajectory.lastEvidenceRef) !== highWaterSequence) {
+      throw new Error(`run capsule trajectory start ${index + 1} boundary is malformed`);
+    }
+    return structuredClone(item);
+  });
+  if (new Set(starts.map((item) => item.gameId)).size !== starts.length) {
+    throw new Error('run capsule trajectory starts contain duplicate short IDs');
+  }
+  return deepFreeze(starts);
+}
+
+function evidenceRefSequence(value) {
+  const match = /^evidence-([0-9]{6,})-[a-f0-9]{12}$/.exec(String(value || ''));
+  return match ? Number(match[1]) : null;
 }
 
 function inspectProviderIdentity(runId, provider) {
@@ -720,6 +1084,8 @@ function verifyEffectiveConfig(actual, expected) {
     maxActions: positiveInteger(actual?.maxActions, 1000, 'maxActions'),
     maxOuterTurns: positiveInteger(actual?.maxOuterTurns, 1000, 'maxOuterTurns'),
     stallWindow: positiveInteger(actual?.stallWindow, 8, 'stallWindow'),
+    policyProfile: normalizePolicyProfile(actual?.policyProfile),
+    memorySurfaceLimit: boundedInteger(actual?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
     workspaceMode: String(actual?.workspaceMode || 'files-only'),
     workspacePythonTimeoutMs: positiveInteger(actual?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
     workspaceContainerRuntime: String(actual?.workspaceContainerRuntime || 'docker'),

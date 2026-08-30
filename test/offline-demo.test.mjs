@@ -17,6 +17,11 @@ test('portable contract loop wins all levels and writes no provider data', async
   assert.equal(result.won, true);
   assert.equal(result.levelsCompleted, 3);
   assert.ok(result.actions > 0);
+  assert.equal(result.actions, result.gameplayActions + result.resets);
+  assert.equal(result.resets, 0);
+  assert.equal(result.rejectedCommands, 0);
+  assert.equal(result.terminalRejectedCommands, 0);
+  assert.equal(result.postTerminalGameplayActions, 0);
   const memory = fs.readFileSync(path.join(memoryDir, 'test-contract.json'), 'utf8');
   assert.doesNotMatch(memory, /OPENAI_|https?:\/\//);
 });

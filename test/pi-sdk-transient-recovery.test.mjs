@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { providerCapabilities } from './support/provider.mjs';
 
 // Builds a scoped fake Pi SDK whose Agent fails `continue()` with the given
 // error messages (in order) before behaving cleanly.
@@ -12,7 +13,10 @@ async function loadLoopWith(script) {
   const scoped = path.join(root, 'node_modules', '@earendil-works');
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
+  fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
   fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src', 'core'), { recursive: true });
 
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-agent-core', type: 'module', exports: './index.js',
@@ -40,6 +44,7 @@ async function loadLoopWith(script) {
     export const __typeboxShim = true;
     export function toTypeBoxSafe() {}
     export const __took = [];
+    export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
   `);
   // real pi-sdk imports `Type` from pi-ai and Agent from pi-agent-core; the
   // TypeBox conversion lives in pi-ai's namespace in production. Reuse the
@@ -71,7 +76,15 @@ async function loadLoopWith(script) {
   `);
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'api', 'openai-responses.lazy.js'),
     'export const openAIResponsesApi = () => ({});');
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'utils', 'estimate.js'), `
+    export const estimateContextTokens = (context) => ({
+      tokens: Math.ceil(JSON.stringify(context).length / 4),
+    });
+  `);
   fs.copyFileSync(path.resolve(process.cwd(), 'src/loop/pi-sdk.mjs'), path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
+  fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
+  fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
+  fs.copyFileSync('src/core/policy-profile.mjs', path.join(root, 'src', 'core', 'policy-profile.mjs'));
   const captured = root;
   globalThis.__avoPlan = script;
   const mod = await import(pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href);
@@ -84,6 +97,7 @@ const baseConfig = {
     baseUrl: 'https://provider.internal/v1',
     apiKey: 'sk-probe-key-value',
     reasoningEffort: 'max',
+    capabilities: providerCapabilities('max'),
   },
   maxActions: 10,
   maxOuterTurns: 40,
@@ -99,6 +113,13 @@ async function runLoop(steps, stopAfterContinues) {
       tools: [],
       initialPrompt: 'go',
       shouldStop: () => (globalThis.__avoPlan.continues >= globalThis.__avoPlan.stopAfter) || ++guard > 200,
+      runtimeStatus: () => ({
+        state: 'ACTIVE',
+        environmentActions: globalThis.__avoPlan.continues,
+        maxActions: 100,
+        terminalReason: 'none',
+        allowedNext: 'inspect evidence or take one legal gameplay action',
+      }),
     });
     return { result, continues: globalThis.__avoPlan.continues };
   } finally {

@@ -1,0 +1,33 @@
+{
+  "schema": "avo.historical-result-correction.v1",
+  "correctionId": "real-public-20260828-high2-correction-v1",
+  "issuedOn": "2026-08-30",
+  "scope": "interpretation-only",
+  "sourceArtifact": {
+    "file": "real-public-20260828-high2.json",
+    "runId": "real-public-20260828-high2",
+    "bytes": 10928,
+    "sha256": "2551905c21dee56730a0f1a692ee23b3b6e729921252233a55e14604c360c9de"
+  },
+  "classification": {
+    "evidenceClass": "historical-diagnostic",
+    "comparable": false,
+    "official": false,
+    "acceptedOfficialScore": null
+  },
+  "retainedSourceObservations": {
+    "games": 25,
+    "wins": 0,
+    "levelsCompletedReported": 0,
+    "actionsReported": 21128,
+    "scorecardValueObserved": 0.0010988675559354109,
+    "scorecardOriginObserved": "aggregateScorecard.score",
+    "scorecardValueAcceptedAsOfficial": false
+  },
+  "reasonCodes": [
+    "cross-commit-recovery-without-run-capsule",
+    "initial-persistent-state-unattested",
+    "exact-scorecard-execution-coverage-unavailable"
+  ],
+  "interpretation": "The source bytes are preserved as published evidence. Its complete status and aggregateScorecard.score field are historical claims, not an accepted comparable benchmark classification."
+}

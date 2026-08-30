@@ -5,16 +5,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 import {
   buildRunCapsule,
   prepareRunState,
+  productionProviderToolSchemaDigest,
   RUN_CAPSULE_COMPONENT_FILES,
   writeRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
+import {
+  experimentIdentitySha256,
+  sealExperimentPlan,
+} from '../src/benchmark/experiment-protocol.mjs';
+import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
+import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
+import { workspaceAttestationFixture } from './support/run-capsule.mjs';
+import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -31,13 +41,16 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     path.join(root, 'scripts', 'pi-provider-smoke.mjs'),
   );
   fs.writeFileSync(path.join(root, 'src', 'benchmark', 'provider-attestation.mjs'), String.raw`
-    export async function preflightResponsesProvider() {
+    import { providerCapabilityDigest } from '../provider-capabilities.mjs';
+    export async function preflightResponsesProvider(config) {
       return Object.freeze({
         ok: true,
         outputVerified: true,
         challengeVerified: true,
         responseFreshnessVerified: true,
-        attestationVersion: 2,
+        requestAccepted: true,
+        attestationVersion: 3,
+        capabilityManifestSha256: providerCapabilityDigest(config.capabilities),
         responseIdHash: 'a'.repeat(64),
         challengeHash: 'b'.repeat(64),
         responseHash: 'c'.repeat(64),
@@ -77,28 +90,93 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
   const scoped = path.join(root, 'node_modules', '@earendil-works');
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
+  fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-agent-core', version: '0.84.2', type: 'module', exports: './index.js',
   }));
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'index.js'), String.raw`
     import fs from 'node:fs';
     let completedGamePrompts = 0;
+    const promptAttempts = new Map();
     export class Agent {
       constructor(options) {
         this.options = options;
         this.state = { messages: [], errorMessage: undefined };
       }
-      subscribe() { return () => {}; }
+      subscribe(listener) { this.listener = listener; return () => {}; }
       followUp() {}
       async prompt() {
+        await this.options.prepareNextTurnWithContext({
+          message: { content: [{ type: 'toolCall' }] },
+          context: { messages: [] },
+        });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
         const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
-        if (tools.has('diagnostic_ack')) {
-          await call('diagnostic_ack', { nonce: 'PI_STREAM_OK' });
+        const handoff = async (toolResult = '') => this.options.streamFn(
+          this.options.initialState.model,
+          {
+            systemPrompt: this.options.initialState.systemPrompt,
+            messages: toolResult
+              ? [{ role: 'user', content: [{ type: 'text', text: toolResult }] }]
+              : [],
+            tools: this.options.initialState.tools,
+          },
+          { reasoning: this.options.initialState.thinkingLevel },
+        );
+        await handoff();
+        if (this.options.initialState.systemPrompt.includes('protocol diagnostic')) {
+          const observed = await call('observe');
+          const nonce = /continuation_nonce=([^\n]+)/.exec(observed.content[0].text)?.[1];
+          await handoff(observed.content[0].text);
+          await call('finish', { summary: nonce });
           return;
         }
-        await call('memory_read');
+        const strategicTools = [
+          'knowledge_read',
+          'memory_read',
+          'journal_read',
+          'memory_update',
+          'hypothesis_propose',
+          'hypothesis_evaluate',
+        ];
+        const currentProfile = tools.has('knowledge_read');
+        if (currentProfile) {
+          for (const name of strategicTools) {
+            if (!tools.has(name)) throw new Error('current profile omitted strategic tool: ' + name);
+          }
+        } else {
+          for (const name of strategicTools) {
+            if (tools.has(name)) throw new Error('minimal profile exposed strategic tool: ' + name);
+          }
+          if (/memory|hypothesis|journal|knowledge|supervisor/i.test(this.options.initialState.systemPrompt)) {
+            throw new Error('minimal profile injected strategic system guidance');
+          }
+        }
         let frame = (await call('observe')).details.frame;
+        const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
+        promptAttempts.set(frame.gameId, attempt);
+        if (frame.gameId === 'g01-v1') {
+          if (frame.state !== 'GAME_OVER' || frame.availableActions.includes('RESET')) {
+            throw new Error('reset contract fixture must begin GAME_OVER without RESET gameplay affordance');
+          }
+          const terminalAction = await call('act', { action: 'ACTION1', reasoning: 'must be rejected before bridge' });
+          if (terminalAction.details.code !== 'EPISODE_TERMINAL'
+              || terminalAction.details.telemetry?.terminalRejectedCommands !== 1) {
+            throw new Error('GAME_OVER gameplay was not rejected with terminal telemetry');
+          }
+          const reset = await call('reset', { rationale: 'exercise full-reset identity' });
+          if (!reset.details.fullReset || reset.details.episodeId !== 'episode-000002') {
+            throw new Error('controller reset did not return full-reset episode evidence');
+          }
+          frame = reset.details.frame;
+          if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
+        }
+        if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 1) {
+          const reset = await call('reset', { rationale: 'first attempt reset before injected failure' });
+          if (!reset.details.fullReset) throw new Error('first retry fixture reset was not full');
+          this.state.errorMessage = 'contract injected first-attempt failure';
+          return;
+        }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
           const player = find(frame.frame, 1);
@@ -116,6 +194,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         }
       }
     }
+    export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
     function find(grid, value) {
       for (let y = 0; y < grid.length; y += 1) {
         for (let x = 0; x < grid[y].length; x += 1) {
@@ -131,12 +210,20 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     exports: { '.': './index.js', './api/*': './api/*.js' },
   }));
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'index.js'), String.raw`
-    const make = (kind) => (...args) => ({ kind, args });
+    const optional = Symbol('optional');
+    const scalar = (type) => (options = {}) => ({ type, ...options });
     export const Type = {
-      Any: make('Any'), Array: make('Array'), Boolean: make('Boolean'),
-      Integer: make('Integer'), Literal: make('Literal'), Null: make('Null'),
-      Number: make('Number'), Object: make('Object'), Optional: make('Optional'),
-      String: make('String'), Union: make('Union'),
+      Any: (options = {}) => ({ ...options }),
+      Array: (items, options = {}) => ({ type: 'array', items, ...options }),
+      Boolean: scalar('boolean'), Integer: scalar('integer'), Null: scalar('null'),
+      Number: scalar('number'), String: scalar('string'),
+      Literal: (value, options = {}) => ({ const: value, type: typeof value, ...options }),
+      Union: (anyOf, options = {}) => ({ anyOf, ...options }),
+      Optional: (schema) => Object.assign(schema, { [optional]: true }),
+      Object: (properties, options = {}) => {
+        const required = Object.entries(properties).filter(([, value]) => !value[optional]).map(([name]) => name);
+        return { type: 'object', properties, ...(required.length ? { required } : {}), ...options };
+      },
     };
     export const envApiKeyAuth = (...args) => ({ kind: 'env-auth', args });
     export const createProvider = (input) => ({ ...input, getModels: () => input.models });
@@ -148,7 +235,24 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           if (provider?.id !== providerId) return undefined;
           return provider.models.find((model) => model.id === modelId);
         },
-        streamSimple() { return { result: async () => ({}) }; },
+        async streamSimple(model, context, options) {
+          const role = model.reasoning && model.compat?.supportsDeveloperRole !== false ? 'developer' : 'system';
+          const effort = model.reasoning ? model.thinkingLevelMap?.[options.reasoning] ?? options.reasoning : null;
+          await options.onPayload?.({
+            model: model.id,
+            input: [
+              { role, content: context.systemPrompt },
+              ...context.messages.map((message) => ({ role: message.role, content: message.content })),
+            ],
+            stream: true,
+            max_output_tokens: model.maxTokens,
+            ...(effort ? { reasoning: { effort } } : {}),
+            tools: context.tools.map((tool) => ({
+              type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
+            })),
+          }, model);
+          return { result: async () => ({}) };
+        },
       };
     };
   `);
@@ -156,6 +260,19 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     export const openAIResponsesApi = () => ({
       stream: () => ({ result: async () => ({}) }),
       streamSimple: () => ({ result: async () => ({}) }),
+    });
+  `);
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'api', 'openai-responses-shared.js'), String.raw`
+    export const convertResponsesTools = (tools) => tools.map((tool) => ({
+      type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
+    }));
+  `);
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'utils', 'estimate.js'), String.raw`
+    const tokens = (value) => Math.ceil(JSON.stringify(value).length / 4);
+    export const estimateContextTokens = (context) => ({
+      tokens: Math.ceil(String(context.systemPrompt || '').length / 4)
+        + tokens(context.tools || [])
+        + tokens(context.messages || []),
     });
   `);
 
@@ -181,6 +298,7 @@ class GameAction(Enum):
         object.__setattr__(self, "action_data", data)
   `);
   fs.writeFileSync(path.join(fakePy, 'arc_agi.py'), String.raw`
+from datetime import datetime, timezone
 from enum import Enum
 from arcengine import GameAction
 
@@ -198,22 +316,36 @@ class Frame:
         self.frame = env.grid()
         self.state = env.state
         self.levels_completed = env.level
-        self.win_levels = env.win_levels
-        self.guid = f"{env.game_id}-{env.level}-{env.steps}"
-        self.full_reset = False
+        self.win_levels = (
+            0 if env.game_id.startswith("g01-") or env.state == "GAME_OVER"
+            else env.win_levels
+        )
+        self.guid = env.guid
+        self.full_reset = env.full_reset
         self.available_actions = [
-            GameAction.RESET, GameAction.ACTION1, GameAction.ACTION2,
-            GameAction.ACTION3, GameAction.ACTION4,
+            GameAction.ACTION1, GameAction.ACTION2, GameAction.ACTION3, GameAction.ACTION4,
         ]
 
+class Scorecard(dict):
+    open_at = datetime(2026, 8, 30, 0, 0, tzinfo=timezone.utc)
+    last_update = datetime(2026, 8, 30, 0, 1, tzinfo=timezone.utc)
+
 class Env:
-    def __init__(self, game_id, size):
+    def __init__(self, game_id, size, guid):
         self.game_id = game_id
+        self.guid = guid
         self.size = size
         self.win_levels = 2
         self.level = 0
         self.steps = 0
+        self.run_steps = [0]
+        self.run_resets = [0]
+        self.full_reset = False
         self.reset_level()
+        if game_id.startswith("g01-"):
+            self.state = "GAME_OVER"
+        elif game_id == "error-v1":
+            self.state = "ERROR"
 
     def reset_level(self):
         self.player = [0, 0]
@@ -231,10 +363,19 @@ class Env:
         return Frame(self)
 
     def step(self, action, data=None, reasoning=None):
-        self.steps += 1
         if action is GameAction.RESET:
+            self.full_reset = self.steps == 0
+            self.steps += 1
+            self.run_steps[-1] += 1
+            self.run_resets[-1] += 1
+            if self.full_reset:
+                self.run_steps.append(0)
+                self.run_resets.append(0)
             self.reset_level()
             return Frame(self)
+        self.full_reset = False
+        self.steps += 1
+        self.run_steps[-1] += 1
         directions = {
             GameAction.ACTION1: (0, -1), GameAction.ACTION2: (0, 1),
             GameAction.ACTION3: (-1, 0), GameAction.ACTION4: (1, 0),
@@ -252,9 +393,14 @@ class Env:
 
 class Arcade:
     def __init__(self, operation_mode=None, logger=None):
-        self.environments = {}
+        self.environments = []
         self.make_calls = 0
         self.arc_api_key = "mock-test-key"
+        if logger:
+            logger.info("Created new scorecard: raw-card-private-123")
+            logger.info(
+                "Recording to recordings/raw-card-private-123/g01-raw-guid-private-456.jsonl"
+            )
 
     def get_environments(self):
         return [Info(f"g{i:02d}-v1") for i in range(1, 26)]
@@ -262,16 +408,51 @@ class Arcade:
     def make(self, game_id):
         self.make_calls += 1
         short = game_id.split("-")[0]
-        index = int(short[1:])
-        env = Env(short, 3 + index % 3)
-        self.environments[short] = env
+        index = 1 if short == "error" else int(short[1:])
+        env = Env(game_id, 3 + index % 3, f"{game_id}-run-{self.make_calls}")
+        self.environments.append(env)
         return env
 
     def get_scorecard(self):
-        completed = sum(env.level for env in self.environments.values())
-        return {"score": 100.0 if len(self.environments) == 25 and completed == 50 else 0.0,
-                "games": len(self.environments), "levels": completed,
-                "make_calls": self.make_calls}
+        grouped = {}
+        for env in self.environments:
+            grouped.setdefault(env.game_id, []).append(env)
+        completed = sum(attempts[-1].level for attempts in grouped.values())
+        environments = []
+        for game_id, attempts in grouped.items():
+            runs = []
+            for attempt_index, env in enumerate(attempts):
+                for run_index, actions in enumerate(env.run_steps):
+                    is_last = (
+                        attempt_index == len(attempts) - 1
+                        and run_index == len(env.run_steps) - 1
+                    )
+                    runs.append({
+                        "id": game_id,
+                        "guid": env.guid,
+                        "score": 100.0 if is_last and env.state == "WIN" else 0.0,
+                        "levels_completed": env.level if is_last else 0,
+                        "actions": actions,
+                        "resets": env.run_resets[run_index],
+                        "state": env.state if is_last else "PLAYING",
+                        "completed": is_last and env.state == "WIN",
+                    })
+            environments.append({
+                "id": game_id,
+                "levels_completed": max(run["levels_completed"] for run in runs),
+                "level_count": max(env.win_levels for env in attempts),
+                "completed": any(run["completed"] for run in runs),
+                "runs": runs,
+            })
+        return Scorecard({
+            "card_id": "contract-scorecard",
+            "score": 100.0 if len(grouped) == 25 and completed == 50 else 0.0,
+            "total_environments": len(grouped),
+            "total_actions": sum(sum(env.run_steps) for env in self.environments),
+            "total_levels_completed": completed,
+            "total_levels": sum(max(env.win_levels for env in attempts) for attempts in grouped.values()),
+            "environments": environments,
+        })
   `);
 
   // The production child-environment boundary deliberately strips
@@ -321,10 +502,12 @@ process.exit(result.status ?? 1);
       baseUrl: 'http://localhost:1/v1',
       model: 'test-model',
       reasoningEffort: 'max',
+      capabilities: providerCapabilities('max'),
     },
     maxActions: 200,
     maxOuterTurns: 1000,
     stallWindow: 8,
+    policyProfile: 'minimal-v1',
     workspaceMode: 'files-only',
     workspacePythonTimeoutMs: 10_000,
     workspaceContainerRuntime: 'docker',
@@ -336,6 +519,48 @@ process.exit(result.status ?? 1);
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, providerSalt),
     providerModelFingerprint: fingerprint(config.provider.model, providerSalt),
   };
+  const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(
+    config.workspaceMode,
+    config.policyProfile,
+  );
+  const capabilityProvenance = {
+    providerPreflight: {
+      ok: true,
+      outputVerified: true,
+      challengeVerified: true,
+      responseFreshnessVerified: true,
+      requestAccepted: true,
+      attestationVersion: 3,
+      capabilityManifestSha256,
+    },
+    piStreamPreflight: {
+      ok: true,
+      capabilityManifestSha256,
+      productionToolSchemaSha256: providerToolSchemaSha256,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+    },
+    modelCapabilities: {
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256,
+      requested: {
+        wireApi: 'responses', reasoningEffort: 'max', inputModalities: ['text'],
+        streaming: true, toolCalling: true, parallelToolCalls: 'provider-default-unspecified',
+      },
+      effective: config.provider.capabilities,
+      probes: {
+        freshnessRequestAccepted: true,
+        productionPiProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+      },
+    },
+  };
   const capsule = buildRunCapsule({
     root,
     runId: 'contract-run',
@@ -343,6 +568,7 @@ process.exit(result.status ?? 1);
     provenance: {
       wireApi: 'responses',
       ...providerIdentity,
+      ...capabilityProvenance,
       reasoningEffort: 'max',
       gitSha,
       arcAuth: { mode: 'registered' },
@@ -352,9 +578,15 @@ process.exit(result.status ?? 1);
       versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
     })),
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: runState.initialState,
+    memoryDir: runState.memoryDir,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });
+  assert.equal(capsule.definition.task.trajectoryStarts.length, 25);
+  assert.ok(capsule.definition.task.trajectoryStarts.every(
+    (start) => start.trajectoryEvidence.highWaterSequence === 0,
+  ));
   const capsuleFile = path.join(privateDir, 'run-capsule.json');
   writeRunCapsule(capsuleFile, capsule, { root: privateDir });
 
@@ -368,7 +600,9 @@ process.exit(result.status ?? 1);
     OPENAI_API_KEY: 'test-key',
     OPENAI_MODEL: 'test-model',
     OPENAI_REASONING_EFFORT: 'max',
+    ...providerEnvironment(),
     AVO_GAME_CONCURRENCY: '4',
+    AVO_POLICY_PROFILE: 'minimal-v1',
     AVO_MAX_ACTIONS: '200',
     AVO_MEMORY_DIR: runState.memoryDir,
     AVO_WORKSPACE_DIR: runState.workspaceDir,
@@ -378,6 +612,55 @@ process.exit(result.status ?? 1);
     AVO_RUN_CAPSULE_FILE: capsuleFile,
     AVO_RUN_CLASS: 'cold-start',
   };
+
+  const bridgeClientFile = pathToFileURL(path.join(root, 'src', 'arc', 'bridge-client.mjs')).href;
+  const bridgeGuardScript = `
+const { ArcBridgeClient } = await import(${JSON.stringify(bridgeClientFile)});
+const client = new ArcBridgeClient({ python: ${JSON.stringify(fakePython)}, cwd: ${JSON.stringify(root)} });
+try {
+  await client.start();
+  const terminal = await client.open('g01-v1');
+  if (terminal.state !== 'GAME_OVER') throw new Error('bridge fixture did not begin terminal');
+  let rejected = false;
+  try {
+    await client.step('ACTION1', {}, 'stale direct client action');
+  } catch (error) {
+    rejected = /EPISODE_TERMINAL/.test(String(error?.message));
+  }
+  if (!rejected) throw new Error('production Python bridge forwarded post-terminal gameplay');
+  const guardedLifecycle = await client.lifecycle();
+  if (guardedLifecycle.gameplay_actions_forwarded !== 0
+      || guardedLifecycle.post_terminal_gameplay_actions !== 0) {
+    throw new Error('bridge lifecycle telemetry did not reflect the guarded GAME_OVER action');
+  }
+  const reset = await client.reset('recover after guarded stale action');
+  if (reset.state !== 'PLAYING' || reset.full_reset !== true) {
+    throw new Error('bridge reset did not prove zero forwarded terminal steps');
+  }
+  const errorFrame = await client.open('error-v1');
+  if (errorFrame.state !== 'ERROR') throw new Error('bridge ERROR fixture did not begin terminal');
+  rejected = false;
+  try {
+    await client.step('ACTION1', {}, 'stale ERROR action');
+  } catch (error) {
+    rejected = /EPISODE_TERMINAL/.test(String(error?.message));
+  }
+  if (!rejected) throw new Error('production Python bridge forwarded gameplay after ERROR');
+  const errorReset = await client.reset('recover from ERROR');
+  if (errorReset.state !== 'PLAYING' || errorReset.full_reset !== true) {
+    throw new Error('bridge reset did not recover ERROR');
+  }
+} finally {
+  await client.close();
+}
+`;
+  const bridgeGuard = spawnSync(process.execPath, ['--input-type=module', '--eval', bridgeGuardScript], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: childEnv,
+  });
+  assert.equal(bridgeGuard.status, 0, bridgeGuard.stderr || bridgeGuard.stdout);
 
   const withoutCapsule = { ...childEnv, AVO_REQUIRE_REAL_PROVIDER: '1' };
   delete withoutCapsule.AVO_RESUME_DIR;
@@ -390,6 +673,16 @@ process.exit(result.status ?? 1);
   assert.equal(missingCapsule.status, 1, missingCapsule.stderr || missingCapsule.stdout);
   assert.match(missingCapsule.stderr, /requires a capsule-bound resume directory/);
   assert.doesNotMatch(missingCapsule.stdout, /\[1\/25\]/);
+
+  const profileDrift = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { ...childEnv, AVO_POLICY_PROFILE: 'current-v1' },
+  });
+  assert.equal(profileDrift.status, 1, profileDrift.stderr || profileDrift.stdout);
+  assert.match(profileDrift.stderr, /effective execution config differs/);
+  assert.doesNotMatch(profileDrift.stdout, /\[1\/25\]/);
 
   const configFile = path.join(root, 'src', 'config.mjs');
   const originalConfig = fs.readFileSync(configFile);
@@ -415,33 +708,125 @@ process.exit(result.status ?? 1);
   assert.match(subset.stderr, /effective public game set differs from the sealed run capsule/);
   assert.doesNotMatch(subset.stdout, /\[1\/1\]/);
 
-  const result = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const cliFile = path.join(root, 'src', 'cli.mjs');
+  const fastRetryBootstrap = `
+const nativeSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 30000 ? 1 : delay, ...args);
+process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
+await import(${JSON.stringify(pathToFileURL(cliFile).href)});
+  `;
+  const scorecardObservationNotBefore = Date.now();
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
-    env: childEnv,
+    env: { ...childEnv, AVO_TEST_MULTI_ATTEMPT: '1' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
   assert.match(result.stdout, /"wins": 25/);
   assert.match(result.stdout, /"officialScore": 100/);
+  const contextRecords = result.stdout.split('\n')
+    .filter((line) => line.startsWith('[avo-context] '))
+    .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
+  assert.equal(contextRecords.length, 52);
+  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status').length, 26);
+  const providerRecords = contextRecords.filter((record) => record.type === 'avo_provider_request');
+  assert.equal(providerRecords.length, 26);
+  assert.ok(providerRecords.every((record) => (
+    /^[a-f0-9]{64}$/.test(record.capabilityManifestSha256)
+      && record.requested?.reasoningEffort === 'max'
+      && record.effective?.systemPromptRole === 'developer'
+      && record.effective?.toolCount > 0
+      && record.retry?.idempotencyKey === false
+  )));
+  for (const record of contextRecords) {
+    assert.match(record.gameId, /^g\d{2}$/);
+    assert.equal(record.versionedGameId, `${record.gameId}-v1`);
+    assert.ok([1, 2].includes(record.attempt));
+    assert.ok(Number.isInteger(record.contextSequence) && record.contextSequence > 0);
+  }
+  const g02Context = contextRecords.filter((record) => record.gameId === 'g02');
+  assert.deepEqual(g02Context.map((record) => [record.type, record.attempt, record.contextSequence]), [
+    ['avo_runtime_status', 1, 1],
+    ['avo_provider_request', 1, 2],
+    ['avo_runtime_status', 2, 3],
+    ['avo_provider_request', 2, 4],
+  ]);
+  const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
+  assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
+  assert.equal(g02Statuses[1].status.maxOuterTurns, g02Statuses[0].status.maxOuterTurns - 1);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
   const report = JSON.parse(fs.readFileSync(path.join(root, 'runs', reports[0]), 'utf8'));
-  assert.equal(report.aggregateScorecard.games, 25);
-  assert.equal(report.aggregateScorecard.levels, 50);
-  assert.equal(report.aggregateScorecard.make_calls, 25);
+  assert.equal(report.scoreStatus, 'official');
+  assert.equal(report.scorecardCoverage.exact, true);
+  assert.equal(report.scorecardEvidence.length, 1);
+  assert.equal(report.scorecardEvidence[0].gameCount, 25);
+  assert.equal(report.scorecardEvidence[0].executionCount, 28);
+  assert.equal(report.scorecardEvidence[0].totalLevelsCompleted, 50);
+  assert.equal(report.scorecardEvidence[0].totalLevels, 50);
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.config.policyProfile, 'minimal-v1');
+  assert.equal(report.summary.totalLevelsCompleted, 50);
+  assert.equal(report.summary.totalLevels, 50);
+  assert.equal(report.results[0].totalLevels, 2);
+  assert.equal(report.results[0].resets, 1);
+  assert.equal(report.results[0].fullResets, 1);
+  assert.equal(report.results[0].episodeId, 'episode-000002');
+  assert.equal(report.results[0].actions, report.results[0].gameplayActions + report.results[0].resets);
+  assert.equal(report.results[0].rejectedCommands, 1);
+  assert.equal(report.results[0].terminalRejectedCommands, 1);
+  assert.equal(report.results[0].postTerminalGameplayActions, 0);
+  assert.equal(report.results[0].mechanismMetrics.toolFailures, 0);
+  assert.equal(report.results[1].resets, 1);
+  assert.equal(report.results[1].fullResets, 1);
+  assert.equal(report.results[1].episodeId, 'episode-000002');
+  assert.equal(report.results[1].actions, report.results[1].gameplayActions + 1);
+  assert.equal(report.results[1].executions.length, 3);
+  assert.equal(report.summary.totalResets, 2);
+  assert.equal(report.summary.totalTerminalRejectedCommands, 1);
+  assert.equal(report.summary.totalPostTerminalGameplayActions, 0);
+  assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
+  assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) >= scorecardObservationNotBefore);
+  assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) <= Date.parse(report.createdAt));
+  assert.equal(report.aggregateScorecard.score, 100);
   assert.equal(report.summary.allWon, true);
   assert.equal(report.results[0].versionedGameId, 'g01-v1');
+  assert.deepEqual(report.results[0].executions.map((item) => item.executionOccurrence), [0, 1]);
+  assert.match(report.results[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
   assert.equal(report.runCapsuleHash, capsule.capsuleHash);
+  assert.deepEqual(capsule.definition.policyProfile, {
+    requested: 'minimal-v1', effective: 'minimal-v1',
+  });
   assert.equal(report.runClass, 'cold-start');
   const checkpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g01.json',
   ), 'utf8'));
-  assert.equal(checkpoint.schema, 'avo.resume-record.v3');
+  assert.equal(checkpoint.schema, 'avo.resume-record.v4');
   assert.equal(checkpoint.capsuleHash, capsule.capsuleHash);
+  assert.equal(checkpoint.record.totalLevels, null);
+  assert.equal(checkpoint.record.terminalRejectedCommands, 1);
+  assert.equal(checkpoint.record.postTerminalGameplayActions, 0);
+  const scorecardJournal = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'scorecards.json',
+  ), 'utf8'));
+  assert.equal(scorecardJournal.schema, 'avo.session-scorecards.v6');
+  assert.equal(scorecardJournal.entries[0].evidence.schema, 'avo.scorecard-evidence.v3');
+  const retryCheckpoint = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'g02.json',
+  ), 'utf8'));
+  assert.equal(retryCheckpoint.record.resets, 1);
+  assert.equal(retryCheckpoint.record.fullResets, 1);
+  assert.equal(retryCheckpoint.record.episodeId, 'episode-000002');
+  assert.equal(retryCheckpoint.record.terminalRejectedCommands, 0);
+  assert.equal(retryCheckpoint.record.postTerminalGameplayActions, 0);
+  assert.equal(retryCheckpoint.record.executions.length, 3);
+  assert.ok(retryCheckpoint.record.actions <= retryCheckpoint.record.actionBudget.total);
+  assert.ok(retryCheckpoint.record.outerTurns <= retryCheckpoint.record.outerTurnBudget);
   const stateAuthority = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
   ), 'utf8'));
@@ -478,6 +863,7 @@ process.exit(result.status ?? 1);
     provenance: {
       wireApi: 'responses',
       ...providerIdentity,
+      ...capabilityProvenance,
       reasoningEffort: 'max',
       gitSha: migratedGitSha,
       arcAuth: { mode: 'registered' },
@@ -487,9 +873,16 @@ process.exit(result.status ?? 1);
       versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
     })),
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: migratedState.initialState,
+    memoryDir: migratedState.memoryDir,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });
+  const retryTrajectoryStart = migratedCapsule.definition.task.trajectoryStarts.find(
+    (start) => start.gameId === 'g02',
+  );
+  assert.ok(retryTrajectoryStart.trajectoryEvidence.highWaterSequence > 0);
+  assert.equal(retryTrajectoryStart.trajectoryEvidence.complete, true);
   const migratedCapsuleFile = path.join(privateDir, `run-capsule.${migratedCapsule.capsuleHash}.json`);
   writeRunCapsule(migratedCapsuleFile, migratedCapsule, { root: privateDir });
   const migrated = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
@@ -523,7 +916,9 @@ process.exit(result.status ?? 1);
       OPENAI_API_KEY: 'contract-provider-key-1234567890',
       OPENAI_MODEL: 'production-model',
       OPENAI_REASONING_EFFORT: 'max',
+      ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
+      AVO_POLICY_PROFILE: 'minimal-v1',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
     },
   });
@@ -539,8 +934,30 @@ process.exit(result.status ?? 1);
     report: publishedReport,
   });
   assert.equal(publishedReport.status, 'complete');
+  assert.doesNotMatch(
+    JSON.stringify(publishedReport),
+    /raw-card-private-123|raw-guid-private-456/,
+  );
   assert.equal(publishedReport.completeness.actualCount, 25);
+  assert.deepEqual(publishedReport.provenance.runCapsule.policyProfile, {
+    requested: 'minimal-v1', effective: 'minimal-v1',
+  });
+  assert.equal(publishedReport.games[0].resets, 1);
+  assert.equal(publishedReport.games[0].fullResets, 1);
+  assert.equal(publishedReport.games[0].episodeId, 'episode-000002');
+  assert.equal(publishedReport.games[0].terminalRejectedCommands, 1);
+  assert.equal(publishedReport.games[0].postTerminalGameplayActions, 0);
+  assert.equal(
+    publishedReport.games[0].actions,
+    publishedReport.games[0].gameplayActions + publishedReport.games[0].resets,
+  );
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
+  assert.deepEqual(
+    publishedReport.games.map(({ versionedGameId, actionBudget, outerTurnBudget }) => ({
+      versionedGameId, actionBudget, outerTurnBudget,
+    })),
+    publishedReport.provenance.runCapsule.task.gameBudgets,
+  );
   assert.deepEqual(
     publishedReport.provenance.publicVersionedGameIds,
     Array.from({ length: 25 }, (_, index) => `g${String(index + 1).padStart(2, '0')}-v1`),
@@ -549,6 +966,140 @@ process.exit(result.status ?? 1);
     publishedReport.provenance.runCapsule,
     { privateCapsuleEvidence: outerEvidence },
   ).accepted, true);
+
+  const sealed = publishedReport.provenance.runCapsule;
+  const experimentRuntime = {
+    nodeVersion: sealed.runtime.node,
+    npmVersion: sealed.runtime.npm,
+    pythonVersion: sealed.runtime.python,
+    nodeDependencySha256: sealed.nodeDependencySha256,
+    pythonDependencySha256: sealed.pythonDependencySha256,
+    arcRuntime: publishedReport.provenance.arcRuntime,
+    gameConcurrency: sealed.runtime.gameConcurrency,
+    gameAttempts: sealed.runtime.gameAttempts,
+    transientTurnRecoveries: sealed.runtime.transientTurnRecoveries,
+    providerStreamTimeoutMs: sealed.runtime.providerStreamTimeoutMs,
+    providerStreamMaxRetries: sealed.runtime.providerStreamMaxRetries,
+    actionBudgetPolicy: sealed.runtime.actionBudgetPolicy,
+    maxActions: sealed.runtime.config.maxActions,
+    maxOuterTurns: sealed.runtime.config.maxOuterTurns,
+    stallWindow: sealed.runtime.config.stallWindow,
+    memorySurfaceLimit: sealed.runtime.config.memorySurfaceLimit,
+    workspaceMode: sealed.runtime.config.workspaceMode,
+    workspacePythonTimeoutMs: sealed.runtime.config.workspacePythonTimeoutMs,
+    workspaceContainerRuntime: sealed.runtime.config.workspaceContainerRuntime,
+    workspaceContainerImage: sealed.runtime.config.workspaceContainerImage,
+    transcriptRecentToolResults: sealed.transcript.recentToolResults,
+    transcriptMaxMessages: sealed.transcript.maxMessages,
+    transcriptMaxTokens: sealed.transcript.maxTokens,
+    toolResultMaxChars: sealed.transcript.maxToolResultChars,
+    arcAuthMode: sealed.task.arcAuthMode,
+  };
+  const experimentManifest = (versionedGameIds) => ({
+    versionedGameIds,
+    gameBudgets: deriveGameBudgets(versionedGameIds.map((versionedGameId) => ({
+      versionedGameId,
+      baseline_actions: [],
+    })), {
+      hardCap: experimentRuntime.maxActions,
+      outerTurnHardCap: experimentRuntime.maxOuterTurns,
+      policy: experimentRuntime.actionBudgetPolicy,
+    }),
+  });
+  const experimentPlan = sealExperimentPlan({
+    schema: 'avo.benchmark-experiment-plan.v1',
+    experimentId: 'production-profile-contract',
+    createdAt: '2026-08-30T00:02:00.000Z',
+    hypothesis: 'current-v1 changes outcomes relative to minimal-v1 under matched production conditions',
+    manifests: {
+      tuning: experimentManifest(['g01-v1', 'g02-v1', 'g03-v1']),
+      evaluation: experimentManifest(['g04-v1', 'g05-v1', 'g06-v1']),
+    },
+    arms: {
+      baseline: { policyProfile: 'minimal-v1' },
+      intervention: { policyProfile: 'current-v1' },
+    },
+    changedVariable: 'policyProfile',
+    execution: { repetitions: 1 },
+    conditions: {
+      gitCommit: sealed.gitCommit,
+      provider: {
+        wireApi: 'responses',
+        endpointSha256: experimentIdentitySha256('endpoint', 'https://provider.invalid/v1'),
+        modelSha256: experimentIdentitySha256('model', 'production-model'),
+        reasoningEffort: 'max',
+        capabilities: sealed.modelInterface.effectiveCapabilityManifest,
+        capabilityManifestSha256: sealed.modelInterface.capabilityManifestSha256,
+      },
+      runtime: experimentRuntime,
+      initialState: {
+        mode: sealed.initialState.mode,
+        memory: sealed.initialState.memory,
+        workspace: sealed.initialState.workspace,
+      },
+    },
+  });
+  const experimentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-experiment-'));
+  const experimentFile = path.join(experimentRoot, 'plan.json');
+  fs.writeFileSync(experimentFile, JSON.stringify(experimentPlan));
+  const experimentReports = [];
+  for (const arm of ['baseline', 'intervention']) {
+    const experimentRunId = `experiment-tuning-${arm}`;
+    const experimentRun = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        AVO_DISABLE_DOTENV: '1',
+        AVO_REAL_RUN_ID: experimentRunId,
+        AVO_ARC_AUTH_MODE: 'registered',
+        ARC_API_KEY: 'contract-arc-key',
+        ARC_PYTHON: fakePython,
+        OPENAI_BASE_URL: 'https://provider.invalid/v1',
+        OPENAI_API_KEY: 'contract-provider-key-1234567890',
+        OPENAI_MODEL: 'production-model',
+        OPENAI_REASONING_EFFORT: 'max',
+        ...providerEnvironment(),
+        AVO_MAX_ACTIONS: '200',
+        AVO_BENCHMARK_TIMEOUT_MS: '60000',
+        AVO_EXPERIMENT_PLAN_FILE: experimentFile,
+        AVO_EXPERIMENT_PHASE: 'tuning',
+        AVO_EXPERIMENT_ARM: arm,
+        AVO_EXPERIMENT_REPETITION: '1',
+      },
+    });
+    assert.equal(experimentRun.status, 0, experimentRun.stderr || experimentRun.stdout);
+    const report = JSON.parse(fs.readFileSync(
+      path.join(root, 'runs', 'public', `${experimentRunId}.json`),
+      'utf8',
+    ));
+    assert.equal(report.status, 'complete');
+    assert.equal(report.completeness.actualCount, 3);
+    assert.equal(report.experiment.arm, arm);
+    assert.equal(report.experiment.policyProfile, arm === 'baseline' ? 'minimal-v1' : 'current-v1');
+    assert.equal(Object.hasOwn(report.experiment, 'providerEndpointSha256'), false);
+    assert.equal(Object.hasOwn(report.experiment, 'providerModelSha256'), false);
+    assert.equal(report.aggregates.mechanismMetrics.toolFailures, 0);
+    assert.equal(report.aggregates.mechanismMetrics.workspaceFailures, 0);
+    assert.deepEqual(
+      report.games.map(({ versionedGameId, actionBudget, outerTurnBudget }) => ({
+        versionedGameId, actionBudget, outerTurnBudget,
+      })),
+      experimentPlan.manifests.tuning.gameBudgets,
+    );
+    const experimentEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report });
+    assert.match(
+      experimentEvidence.value.definition.experiment.providerEndpointSha256,
+      /^[a-f0-9]{64}$/,
+    );
+    experimentReports.push(report);
+  }
+  assert.deepEqual(
+    experimentReports.map((report) => report.provenance.runCapsule.policyProfile.effective),
+    ['minimal-v1', 'current-v1'],
+  );
+  fs.rmSync(experimentRoot, { recursive: true, force: true });
 
   const configFileAfterSuccess = path.join(root, 'src', 'config.mjs');
   const cleanConfig = fs.readFileSync(configFileAfterSuccess);
@@ -567,7 +1118,9 @@ process.exit(result.status ?? 1);
       OPENAI_API_KEY: 'contract-provider-key-1234567890',
       OPENAI_MODEL: 'production-model',
       OPENAI_REASONING_EFFORT: 'max',
+      ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
+      AVO_POLICY_PROFILE: 'minimal-v1',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
       AVO_DEBUG: 'contract-mutate-after-child',
     },
@@ -580,5 +1133,9 @@ process.exit(result.status ?? 1);
   ));
   assert.equal(rejectedReport.status, 'failed');
   assert.equal(rejectedReport.failedStage, 'artifact-discovery');
+  assert.doesNotMatch(
+    JSON.stringify(rejectedReport),
+    /raw-card-private-123|raw-guid-private-456/,
+  );
   fs.writeFileSync(configFileAfterSuccess, cleanConfig);
 });

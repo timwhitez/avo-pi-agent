@@ -51,7 +51,11 @@ for line in sys.stdin:
             steps[handle] = steps.get(handle, 0) + 1
             response = {"ok": True, "frame": frame(handle)}
     elif command == "scorecard":
-        response = {"ok": True, "scorecard": {"score": len(open_environments)}}
+        response = {
+            "ok": True,
+            "scorecard": {"score": len(open_environments)},
+            "scorecard_session": {"started_at": "2026-08-30T00:00:00Z", "observed_at": "2026-08-30T00:01:00Z"},
+        }
     elif command == "close":
         print(json.dumps({"ok": True}), flush=True)
         break
@@ -90,6 +94,7 @@ for line in sys.stdin:
     const legacyFrame = await client.observe();
     assert.equal(legacyFrame.game_id, 'legacy-game', 'handle-less commands still use the default environment');
     assert.equal((await gameA.scorecard()).score, 3, 'scorecard covers every open environment');
+    assert.equal((await client.scorecardEvidence()).scorecard_session.observed_at, '2026-08-30T00:01:00Z');
     await gameA.close();
     await gameB.close();
   } finally {

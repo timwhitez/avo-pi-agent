@@ -126,27 +126,35 @@ export function writeJsonAtomic(file, value, {
   const temporary = temporaryPath(target);
   const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag();
   let fd;
+  let committed = false;
   try {
     fd = fs.openSync(temporary, flags, 0o600);
     writeAll(fd, payload);
+    fs.fchmodSync(fd, 0o600);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     if (exclusive) {
       fs.linkSync(temporary, target);
+      committed = true;
       fs.unlinkSync(temporary);
     } else {
       fs.renameSync(temporary, target);
+      committed = true;
     }
-    fs.chmodSync(target, 0o600);
     fsyncDirectory(parent);
   } catch (error) {
     if (fd !== undefined) {
       try { fs.closeSync(fd); } catch {}
     }
     try { fs.unlinkSync(temporary); } catch {}
+    if (committed) throw committedAtomicWriteError(error);
     throw error;
   }
+}
+
+export function wasAtomicWriteCommitted(error) {
+  return error?.code === 'ATOMIC_WRITE_POST_COMMIT' && error?.atomicWriteCommitted === true;
 }
 
 export function assertSafeDirectory(directory, root) {
@@ -257,4 +265,11 @@ function fsyncDirectory(directory) {
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+function committedAtomicWriteError(cause) {
+  return Object.assign(
+    new Error('atomic JSON replacement committed before persistence confirmation completed', { cause }),
+    { code: 'ATOMIC_WRITE_POST_COMMIT', atomicWriteCommitted: true },
+  );
 }

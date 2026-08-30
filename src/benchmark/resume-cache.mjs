@@ -5,15 +5,21 @@ import path from 'node:path';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { canonicalJson, validateRunState } from './run-capsule.mjs';
-import { normalizeGameRecord } from './report-records.mjs';
+import { normalizeGameRecord, validateProductionLoops } from './report-records.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
+import { evaluateScorecardCoverage, validateScorecardEvidence } from './scorecard-evidence.mjs';
 
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_RECORDS = 64;
-const RESUME_RECORD_SCHEMA = 'avo.resume-record.v3';
+const RESUME_RECORD_SCHEMA = 'avo.resume-record.v4';
+const LEGACY_RESUME_RECORD_SCHEMA = 'avo.resume-record.v3';
 const RESUME_STATE_SCHEMA = 'avo.resume-state.v1';
-const SESSION_SCORECARD_SCHEMA = 'avo.session-scorecard.v3';
+const SESSION_SCORECARDS_SCHEMA = 'avo.session-scorecards.v6';
+const LEGACY_SESSION_SCORECARDS_SCHEMA = 'avo.session-scorecards.v5';
 const STATE_FILE = 'resume-state.json';
+const SCORECARDS_FILE = 'scorecards.json';
+const LEGACY_SCORECARD_FILE = 'scorecard.json';
+const MAX_SCORECARDS = 64;
 
 /**
  * Durable per-game checkpoint cache for interrupted benchmark runs.
@@ -73,6 +79,7 @@ export function saveResumedRecord(resumeDir, gameId, result, {
   if (normalized.gameId !== safeId || normalized.loop !== 'pi-sdk') {
     throw new Error('resume checkpoint result identity or production loop is invalid');
   }
+  validateProductionLoops([normalized], 1);
   const file = path.join(resumeDir, `${safeId}.json`);
   writeJsonAtomic(file, {
     schema: RESUME_RECORD_SCHEMA,
@@ -93,8 +100,8 @@ export function saveResumedRecord(resumeDir, gameId, result, {
  * the run's official score; the latest saved one is the real evidence.
  */
 export function saveSessionScorecard(resumeDir, {
-  replayedGames,
-  scorecard,
+  evidence,
+  records,
   capsuleHash,
   allowedCapsuleHashes = [],
   stateBinding,
@@ -104,52 +111,98 @@ export function saveSessionScorecard(resumeDir, {
   const boundCapsuleHash = requireCapsuleHash(capsuleHash);
   const acceptedCapsules = acceptedCapsuleSet(boundCapsuleHash, allowedCapsuleHashes);
   const wrappers = readRecordWrappers(resumeDir, acceptedCapsules);
-  const stateAuthority = wrappers.length > 0
-    ? verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers)
-    : null;
-  const file = path.join(resumeDir, 'scorecard.json');
+  const normalizedRecords = (Array.isArray(records) ? records : []).map((record, index) => (
+    normalizeGameRecord(record, `session scorecard record ${index}`)
+  ));
+  for (const record of normalizedRecords) {
+    const checkpoint = wrappers.find(({ record: candidate }) => candidate.gameId === record.gameId)?.record;
+    if (!checkpoint && record.error) continue;
+    if (!checkpoint || canonicalJson(recordBinding(checkpoint)) !== canonicalJson(recordBinding(record))) {
+      throw new Error(`session scorecard record differs from checkpoint ${record.gameId}`);
+    }
+  }
+  const normalizedEvidence = validateScorecardEvidence(evidence);
+  const authority = evaluateScorecardCoverage([normalizedEvidence], normalizedRecords);
+  const file = path.join(resumeDir, SCORECARDS_FILE);
+  const journal = readScorecardJournal(resumeDir, acceptedCapsules, { allowMissing: true });
+  const duplicate = journal.entries.find((entry) => (
+    entry.evidence.sessionIdSha256 === normalizedEvidence.sessionIdSha256
+  ));
+  if (duplicate) {
+    if (canonicalJson(duplicate.evidence) === canonicalJson(normalizedEvidence)) return file;
+    throw new Error('session scorecard journal contains a conflicting session identity');
+  }
+  if (journal.entries.length >= MAX_SCORECARDS) throw new Error(`session scorecard journal exceeds ${MAX_SCORECARDS} entries`);
   writeJsonAtomic(file, {
-    schema: SESSION_SCORECARD_SCHEMA,
-    capsuleHash: boundCapsuleHash,
-    savedAt: new Date().toISOString(),
-    replayedGames: Number(replayedGames) || 0,
-    stateBinding,
-    checkpointSetSha256: stateAuthority?.checkpointSetSha256 ?? null,
-    scorecard: scorecard ?? null,
+    schema: SESSION_SCORECARDS_SCHEMA,
+    entries: [...journal.entries, {
+      capsuleHash: boundCapsuleHash,
+      stateBindingSha256: stateBinding.sha256,
+      captureStatus: authority.scoreStatus,
+      captureRejectionReason: authority.rejectionReason,
+      evidence: normalizedEvidence,
+    }],
   }, { root: resumeDir });
   return file;
 }
 
-export function loadLatestSessionScorecard(resumeDir, {
+export function loadSessionScorecards(resumeDir, {
   capsuleHash,
   allowedCapsuleHashes = [],
   stateBinding,
+  requireStateMatch = true,
 } = {}) {
-  if (!resumeDir) return null;
+  if (!resumeDir) return Object.freeze([]);
   validateRunState(stateBinding);
   const acceptedCapsules = acceptedCapsuleSet(capsuleHash, allowedCapsuleHashes);
-  const file = path.join(resumeDir, 'scorecard.json');
-  if (!fs.existsSync(file)) return null;
+  const wrappers = readRecordWrappers(resumeDir, acceptedCapsules);
+  if (wrappers.length > 0 && requireStateMatch) {
+    verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers);
+  }
+  const journal = readScorecardJournal(resumeDir, acceptedCapsules, { allowMissing: true });
+  return Object.freeze(journal.entries.map((entry) => entry.evidence));
+}
+
+function readScorecardJournal(resumeDir, acceptedCapsules, { allowMissing = false } = {}) {
+  const legacyFile = path.join(resumeDir, LEGACY_SCORECARD_FILE);
+  if (fs.existsSync(legacyFile)) throw new Error('legacy resume scorecard evidence cannot establish exact execution coverage');
+  const file = path.join(resumeDir, SCORECARDS_FILE);
+  if (!fs.existsSync(file)) {
+    if (allowMissing) return { schema: SESSION_SCORECARDS_SCHEMA, entries: [] };
+    throw new Error('session scorecard journal is missing');
+  }
   const value = readJsonFileEvidence(file, {
     root: resumeDir,
     maxBytes: MAX_RECORD_BYTES,
-    purpose: 'resume scorecard checkpoint',
+    purpose: 'session scorecard journal',
   }).value;
-  if (value?.schema !== SESSION_SCORECARD_SCHEMA
-      || !acceptedCapsules.has(value?.capsuleHash)
-      || typeof value?.savedAt !== 'string'
-      || !Number.isInteger(value?.replayedGames)
-      || canonicalJson(value?.stateBinding) !== canonicalJson(stateBinding)) {
-    throw new Error('resume scorecard checkpoint is malformed');
+  if (![SESSION_SCORECARDS_SCHEMA, LEGACY_SESSION_SCORECARDS_SCHEMA].includes(value?.schema)
+      || !Array.isArray(value?.entries)
+      || value.entries.length > MAX_SCORECARDS) {
+    throw new Error('session scorecard journal is malformed');
   }
-  const wrappers = readRecordWrappers(resumeDir, acceptedCapsules);
-  if (wrappers.length > 0) {
-    const authority = verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers);
-    if (value.checkpointSetSha256 !== authority.checkpointSetSha256) {
-      throw new Error('resume scorecard checkpoint is not bound to the current checkpoint set');
+  const entries = value.entries.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+        || !acceptedCapsules.has(entry.capsuleHash)
+        || !/^[a-f0-9]{64}$/.test(String(entry.stateBindingSha256 || ''))
+        || !['official', 'rejected'].includes(entry.captureStatus)
+        || !(entry.captureRejectionReason === null || typeof entry.captureRejectionReason === 'string')) {
+      throw new Error('session scorecard journal entry is malformed or belongs to another capsule');
     }
+    return Object.freeze({
+      capsuleHash: entry.capsuleHash,
+      stateBindingSha256: entry.stateBindingSha256,
+      captureStatus: String(entry.captureStatus || 'rejected'),
+      captureRejectionReason: entry.captureRejectionReason === null
+        ? null
+        : String(entry.captureRejectionReason || 'capture coverage unavailable'),
+      evidence: validateScorecardEvidence(entry.evidence),
+    });
+  });
+  if (new Set(entries.map((entry) => entry.evidence.sessionIdSha256)).size !== entries.length) {
+    throw new Error('session scorecard journal contains duplicate sessions');
   }
-  return value;
+  return { schema: SESSION_SCORECARDS_SCHEMA, entries };
 }
 
 function writeStateAuthority(resumeDir, { capsuleHash, allowedCapsuleHashes, stateBinding }) {
@@ -194,7 +247,7 @@ function verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrapper
 function readRecordWrappers(resumeDir, acceptedCapsules) {
   const entries = fs.readdirSync(resumeDir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json')
-      && !['scorecard.json', STATE_FILE].includes(entry.name))
+      && ![LEGACY_SCORECARD_FILE, SCORECARDS_FILE, STATE_FILE].includes(entry.name))
     .slice(0, MAX_RECORDS + 1);
   if (entries.length > MAX_RECORDS) throw new Error(`resume checkpoint set exceeds ${MAX_RECORDS} records`);
   return entries.map((entry) => {
@@ -209,7 +262,8 @@ function readRecordWrappers(resumeDir, acceptedCapsules) {
     } catch (error) {
       throw new Error(`resume checkpoint ${entry.name} is not valid JSON`, { cause: error });
     }
-    if (value?.schema !== RESUME_RECORD_SCHEMA || !value?.record) {
+    if (![RESUME_RECORD_SCHEMA, LEGACY_RESUME_RECORD_SCHEMA].includes(value?.schema)
+        || !value?.record) {
       throw new Error(`resume checkpoint ${entry.name} is not bound to a run capsule`);
     }
     if (!acceptedCapsules.has(value.capsuleHash)) {
@@ -234,6 +288,39 @@ function checkpointRefs(wrappers) {
       record: value.record,
     })),
   })).sort((left, right) => left.file.localeCompare(right.file));
+}
+
+function recordBinding(record) {
+  return {
+    gameId: record.gameId,
+    versionedGameId: record.versionedGameId,
+    state: record.state,
+    levelsCompleted: record.levelsCompleted,
+    totalLevels: record.totalLevels,
+    actions: record.actions,
+    outerTurns: record.outerTurns,
+    gameplayActions: record.gameplayActions,
+    resets: record.resets,
+    rejectedCommands: record.rejectedCommands,
+    terminalRejectedCommands: record.terminalRejectedCommands,
+    postTerminalGameplayActions: record.postTerminalGameplayActions,
+    fullResets: record.fullResets,
+    actionSequences: record.actionSequences,
+    sequenceActionsRequested: record.sequenceActionsRequested,
+    sequenceActionsExecuted: record.sequenceActionsExecuted,
+    sequenceActionsSkipped: record.sequenceActionsSkipped,
+    sequenceCancellations: record.sequenceCancellations,
+    memoryClaimsProposed: record.memoryClaimsProposed,
+    memoryClaimsConfirmed: record.memoryClaimsConfirmed,
+    memoryClaimsCorrected: record.memoryClaimsCorrected,
+    memoryClaimsSurfaced: record.memoryClaimsSurfaced,
+    episodeId: record.episodeId,
+    won: record.won,
+    error: record.error,
+    loop: record.loop,
+    executions: record.executions,
+    trajectoryEvidence: record.trajectoryEvidence,
+  };
 }
 
 function sha256(value) {

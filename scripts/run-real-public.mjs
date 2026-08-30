@@ -14,18 +14,30 @@ import {
 } from '../src/benchmark/provenance.mjs';
 import { runProcess } from '../src/benchmark/process-runner.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
+import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
+import {
+  assertExperimentArcRuntime,
+  assertExperimentCapsule,
+  assertExperimentEnvironment,
+  loadExperimentRunFromEnvironment,
+  selectExperimentGames,
+} from '../src/benchmark/experiment-protocol.mjs';
 import {
   aggregateGameMetrics,
   copyRegularFileExclusive,
-  extractOfficialScore,
   findNewJsonReports,
   hashFile,
+  normalizeGameRecord,
   selectRunReport,
   snapshotJsonFiles,
   validateCompleteGameSet,
   validateProductionLoops,
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
+import {
+  evaluateScorecardCoverage,
+  reconcileExactScorecardProgress,
+} from '../src/benchmark/scorecard-evidence.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
 import {
   assertRunStateMatchesInitial,
@@ -34,6 +46,7 @@ import {
   classifyCapsuleResult,
   classifyResume,
   inspectRunState,
+  inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
   readRunCapsule,
@@ -48,6 +61,9 @@ loadLocalEnv();
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
+
+const experimentRun = loadExperimentRunFromEnvironment(process.env);
+if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
 
 const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
 const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
@@ -86,6 +102,12 @@ const stage = { value: 'configuration' };
 try {
   provider = requireRealProviderEnvironment();
   const explicitSecrets = [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean);
+  const config = getRuntimeConfig();
+  assertExperimentEnvironment(experimentRun, {
+    provider,
+    config,
+    git: inspectGitCheckout(root),
+  });
   const runState = prepareRunState({
     root,
     privateDir,
@@ -108,7 +130,9 @@ try {
       assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
     }
   }
-  const config = getRuntimeConfig();
+  stage.value = 'workspace-preflight';
+  console.log('[real-run] attesting the initialized workspace capability');
+  const workspaceAttestation = await attestWorkspaceCapability(config);
 
   stage.value = 'provider-preflight';
   console.log('[real-run] validating a non-mock Responses request');
@@ -122,12 +146,14 @@ try {
   console.log('[real-run] validating official arc-agi runtime');
   const python = process.env.ARC_PYTHON || '.venv/bin/python';
   const arcRuntime = await inspectOfficialArcRuntime({ python, cwd: root });
+  assertExperimentArcRuntime(experimentRun, arcRuntime);
 
   stage.value = 'public-game-discovery';
   console.log('[real-run] freezing the dynamically discovered public game set');
   process.env.AVO_ARC_AUTH_MODE = process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto';
   if (process.env.AVO_ARC_AUTH_MODE === 'anonymous-auto') process.env.ARC_API_KEY = '';
-  const games = await discoverPublicGames({ python, cwd: root });
+  const discoveredGames = await discoverPublicGames({ python, cwd: root });
+  const games = selectExperimentGames(experimentRun, discoveredGames);
   const gitSha = await currentGitSha(root);
   const provenance = buildProvenance({
     provider,
@@ -147,8 +173,15 @@ try {
     arcRuntime,
     games,
     config,
+    workspaceAttestation,
     initialState: runState.initialState,
+    memoryDir: runState.memoryDir,
+    resumeCapsule: resumeContext && String(process.env.AVO_RESUME_MODE || 'recovered') !== 'migrated'
+      ? resumeContext.originalCapsule
+      : null,
+    experiment: experimentRun?.binding ?? null,
   });
+  assertExperimentCapsule(experimentRun, capsule);
   const resumeDecision = resumeContext
     ? classifyResume(resumeContext.originalCapsule, capsule, process.env.AVO_RESUME_MODE || 'recovered')
     : Object.freeze({ runClass: runState.initialState.mode, comparable: true, sourceCapsuleHash: null });
@@ -158,6 +191,7 @@ try {
     capsule,
     python,
     config,
+    workspaceAttestation,
     stateBinding: runState.currentState,
     requireInitialState: !resumeContext || resumeDecision.runClass === 'diagnostic-migrated',
   });
@@ -191,7 +225,10 @@ try {
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
   const timeoutMs = benchmarkTimeout();
-  const child = await runProcess(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const childArgs = experimentRun
+    ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
+    : ['src/cli.mjs', 'run-public', '--all'];
+  const child = await runProcess(process.execPath, childArgs, {
     cwd: root,
     env: buildAgentChildEnvironment({
       source: process.env,
@@ -255,7 +292,13 @@ try {
   if (finalCapsule.capsuleHash !== capsule.capsuleHash) {
     throw new Error('active run capsule changed after execution');
   }
-  verifyRunCapsuleExecution({ root, capsule: finalCapsule, python, config });
+  verifyRunCapsuleExecution({
+    root,
+    capsule: finalCapsule,
+    python,
+    config,
+    workspaceAttestation,
+  });
   const finalState = inspectRunState({
     memoryDir: runState.memoryDir,
     workspaceDir: runState.workspaceDir,
@@ -269,9 +312,22 @@ try {
   if (finalCheckpoints.size !== selected.records.length) {
     throw new Error('production report game set differs from the final capsule-bound checkpoint set');
   }
+  let checkpointTotalsEnriched = false;
   for (const record of selected.records) {
     const checkpoint = finalCheckpoints.get(record.gameId);
-    if (!checkpoint || canonicalJson(normalizeCheckpointRecord(checkpoint)) !== canonicalJson(normalizeCheckpointRecord(record))) {
+    if (!checkpoint) {
+      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+    }
+    const normalizedCheckpoint = normalizeCheckpointRecord(checkpoint);
+    const normalizedRecord = normalizeCheckpointRecord(record);
+    if (normalizedCheckpoint.totalLevels !== normalizedRecord.totalLevels) {
+      if (normalizedCheckpoint.totalLevels !== null) {
+        throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+      }
+      checkpointTotalsEnriched = true;
+    }
+    if (canonicalJson(checkpointBinding(normalizedCheckpoint))
+        !== canonicalJson(checkpointBinding(normalizedRecord))) {
       throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
     }
   }
@@ -290,15 +346,41 @@ try {
   }
 
   stage.value = 'production-loop-attestation';
-  const loopAttestation = validateProductionLoops(selected.records, games.length);
+  const loopAttestation = validateProductionLoops(selected.records, games.length, {
+    allowUnavailableControllerTelemetry: resumeDecision.runClass === 'diagnostic-migrated',
+    allowLegacyLevelMetadata: resumeDecision.runClass === 'diagnostic-migrated',
+    allowUnavailableTrajectoryEvidence: resumeDecision.runClass === 'diagnostic-migrated',
+  });
 
   stage.value = 'game-completeness';
   const completeness = validateCompleteGameSet(games, selected.records);
 
-  stage.value = 'official-score-origin';
-  const observedOfficialScore = extractOfficialScore(selected.report);
+  stage.value = 'scorecard-execution-coverage';
+  const scorecardAuthority = evaluateScorecardCoverage(
+    selected.report?.scorecardEvidence,
+    selected.records,
+  );
+  if (checkpointTotalsEnriched && !scorecardAuthority.coverage.exact) {
+    throw new Error('production report enriches checkpoint level metadata without exact scorecard evidence');
+  }
+  if (scorecardAuthority.coverage.exact) {
+    stage.value = 'scorecard-progress-reconciliation';
+    const reconciled = reconcileExactScorecardProgress(
+      scorecardAuthority.scorecards,
+      selected.records,
+    );
+    const progress = (record) => ({
+      versionedGameId: record.versionedGameId,
+      levelsCompleted: record.levelsCompleted,
+      totalLevels: record.totalLevels,
+      won: record.won,
+    });
+    if (canonicalJson(reconciled.map(progress)) !== canonicalJson(selected.records.map(progress))) {
+      throw new Error('production report omits authoritative scorecard level metadata');
+    }
+  }
   const aggregates = aggregateGameMetrics(selected.records);
-  const resultClassification = classifyCapsuleResult(resumeDecision, observedOfficialScore);
+  const resultClassification = classifyCapsuleResult(resumeDecision, scorecardAuthority);
   const { status: acceptedStatus, officialScore } = resultClassification;
 
   const privateManifest = {
@@ -307,12 +389,17 @@ try {
     status: acceptedStatus,
     loopAttestation,
     completeness,
+    scoreStatus: scorecardAuthority.scoreStatus,
+    scoreRejectionReason: scorecardAuthority.rejectionReason,
+    scorecardCoverage: scorecardAuthority.coverage,
+    scorecardEvidence: scorecardAuthority.scorecards,
     officialScore,
     ...(resultClassification.unacceptedScoreEvidence
       ? { unacceptedScoreEvidence: resultClassification.unacceptedScoreEvidence }
       : {}),
     aggregates,
     games: selected.records,
+    experiment: experimentRun?.binding ?? null,
     artifacts: {
       rawRunReport: {
         file: path.basename(rawRunReport),
@@ -330,26 +417,33 @@ try {
 
   stage.value = 'redaction-acceptance';
   const publicReport = redact({
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     status: acceptedStatus,
     completedAt: privateManifest.completedAt,
     provenance,
     loopAttestation,
     completeness,
+    scoreStatus: scorecardAuthority.scoreStatus,
+    scoreRejectionReason: scorecardAuthority.rejectionReason,
+    scorecardCoverage: scorecardAuthority.coverage,
+    scorecardEvidence: scorecardAuthority.scorecards,
     officialScore,
     aggregates,
     games: selected.records,
+    experiment: provenance.runCapsule?.experiment
+      ? structuredClone(provenance.runCapsule.experiment)
+      : null,
     privateArtifactHashes: privateManifest.artifacts,
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(publicReport, null, 2)}\n`;
   assertNoPrivateMaterial(serialized, { explicitSecrets });
   writeJsonAtomic(publicFile, publicReport, { root: publicDir, exclusive: true });
 
-  if (resumeDecision.comparable) {
+  if (acceptedStatus === 'complete') {
     console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
   } else {
-    console.log('[real-run] DIAGNOSTIC-MIGRATED complete; official score withheld because the capsule changed');
+    console.log(`[real-run] ${acceptedStatus.toUpperCase()} complete; official score withheld: ${officialScore.reason}`);
     process.exitCode = 2;
   }
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
@@ -359,11 +453,12 @@ try {
     ? [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean)
     : [process.env.OPENAI_BASE_URL, process.env.OPENAI_API_KEY, process.env.OPENAI_MODEL, process.env.ARC_API_KEY].filter(Boolean);
   const failure = redact({
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     status: 'failed',
     failedStage: stage.value,
     failedAt: new Date().toISOString(),
+    experiment: publicExperimentBinding(experimentRun?.binding),
     error: redactText(error instanceof Error ? error.message : String(error), { explicitSecrets }),
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(failure, null, 2)}\n`;
@@ -385,26 +480,33 @@ function benchmarkTimeout() {
 }
 
 function normalizeCheckpointRecord(value) {
-  const versionedGameId = String(
-    value?.versionedGameId || value?.versioned_game_id || value?.gameId || value?.game_id || '',
-  );
-  return {
-    gameId: versionedGameId.split('-')[0],
-    versionedGameId,
-    state: String(value?.state || '').toUpperCase(),
-    levelsCompleted: Number(value?.levelsCompleted ?? value?.levels_completed ?? 0),
-    winLevels: Number(value?.winLevels ?? value?.win_levels ?? 0),
-    actions: Number(value?.actions ?? value?.actionCount ?? value?.action_count ?? 0),
-    won: value?.won === true,
-    error: value?.error || null,
-    loop: value?.loop || null,
-  };
+  return normalizeGameRecord(value, 'checkpoint comparison');
+}
+
+function checkpointBinding(record) {
+  const {
+    totalLevels: _totalLevels,
+    legacyLevelMetadata: _legacyLevelMetadata,
+    levelMetadata: _levelMetadata,
+    ...bound
+  } = record;
+  return bound;
 }
 
 function safeRunId(value) {
   const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
   if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
   return result;
+}
+
+function publicExperimentBinding(value) {
+  if (!value) return null;
+  const {
+    providerEndpointSha256: _providerEndpointSha256,
+    providerModelSha256: _providerModelSha256,
+    ...published
+  } = value;
+  return published;
 }
 
 function persistRunCapsule({ privateDir, capsule, resumeContext }) {
@@ -453,13 +555,13 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
   const manifestFile = path.join(privateDir, 'manifest.private.json');
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    if (manifest.status === 'complete' || manifest.status === 'diagnostic-migrated') {
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(manifest.status)) {
       throw new Error(`cannot resume ${runId}: the run already completed`);
     }
   }
   if (fs.existsSync(publicFile)) {
     const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
-    if (prior.status === 'complete' || prior.status === 'diagnostic-migrated') {
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(prior.status)) {
       throw new Error(`cannot resume ${runId}: a complete public report already exists`);
     }
   }

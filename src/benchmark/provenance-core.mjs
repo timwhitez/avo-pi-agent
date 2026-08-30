@@ -4,6 +4,10 @@ import {
   buildArcChildEnvironment,
   buildUtilityChildEnvironment,
 } from '../local/child-environment.mjs';
+import {
+  providerCapabilitiesFromEnvironment,
+  providerCapabilityDigest,
+} from '../provider-capabilities.mjs';
 import { fingerprint } from './redaction.mjs';
 import { runProcess } from './process-runner.mjs';
 
@@ -16,11 +20,12 @@ export const DEFAULT_PROVENANCE_STDERR_MAX_BYTES = 1024 * 1024;
 const MAX_PROVENANCE_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export function requireRealProviderEnvironment(env = process.env) {
+  const reasoningEffort = String(env.OPENAI_REASONING_EFFORT || 'max').trim().toLowerCase();
   const config = {
     baseUrl: String(env.OPENAI_BASE_URL || '').replace(/\/$/, ''),
     apiKey: String(env.OPENAI_API_KEY || ''),
     model: String(env.OPENAI_MODEL || ''),
-    reasoningEffort: String(env.OPENAI_REASONING_EFFORT || 'max'),
+    reasoningEffort,
   };
   const missing = Object.entries(config)
     .filter(([key, value]) => key !== 'reasoningEffort' && !value)
@@ -34,7 +39,10 @@ export function requireRealProviderEnvironment(env = process.env) {
   if (env.AVO_LOOP === 'portable' || env.AVO_MOCK_PROVIDER === '1' || env.NODE_ENV === 'test') {
     throw new Error('mock/portable runtime is rejected for a real public benchmark');
   }
-  return config;
+  return {
+    ...config,
+    capabilities: providerCapabilitiesFromEnvironment(env, { reasoningEffort }),
+  };
 }
 
 export async function inspectOfficialArcRuntime({ python = '.venv/bin/python', cwd = process.cwd() } = {}) {
@@ -173,6 +181,7 @@ export async function discoverPublicGames({ python = '.venv/bin/python', cwd = p
       gameId: full.split('-')[0],
       versionedGameId: full,
       title: envInfo.title ?? null,
+      baseline_actions: envInfo.baseline_actions ?? null,
     };
   });
   if (games.length === 0) throw new Error('official runtime returned no public games');
@@ -201,6 +210,16 @@ export async function discoverPublicGames({ python = '.venv/bin/python', cwd = p
 export function buildProvenance({ provider, providerPreflight, piStreamPreflight = null, arcRuntime, games, runId, gitSha = null }) {
   const salt = crypto.createHash('sha256').update(String(runId)).digest('hex');
   const publicVersionedGameIds = games.map((game) => game.versionedGameId).sort();
+  const capabilityManifestSha256 = providerCapabilityDigest(provider.capabilities);
+  if (providerPreflight?.capabilityManifestSha256 !== capabilityManifestSha256) {
+    throw new Error('freshness preflight capability manifest differs from provider configuration');
+  }
+  if (piStreamPreflight?.capabilityManifestSha256 !== capabilityManifestSha256) {
+    throw new Error('Pi stream preflight capability manifest differs from provider configuration');
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(piStreamPreflight?.productionToolSchemaSha256 || ''))) {
+    throw new Error('Pi stream preflight production tool schema digest is absent');
+  }
   return {
     runId,
     gitSha,
@@ -215,6 +234,28 @@ export function buildProvenance({ provider, providerPreflight, piStreamPreflight
     providerModelFingerprint: fingerprint(provider.model, salt),
     providerPreflight,
     piStreamPreflight,
+    modelCapabilities: {
+      schemaVersion: 1,
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256: piStreamPreflight.productionToolSchemaSha256,
+      requested: {
+        wireApi: 'responses',
+        reasoningEffort: provider.reasoningEffort,
+        inputModalities: ['text'],
+        streaming: true,
+        toolCalling: true,
+        parallelToolCalls: 'provider-default-unspecified',
+      },
+      effective: structuredClone(provider.capabilities),
+      probes: {
+        freshnessRequestAccepted: providerPreflight?.ok === true,
+        productionPiProtocolVerified: piStreamPreflight?.ok === true,
+        productionToolSchemaVerified: piStreamPreflight?.productionToolSchemaVerified === true,
+        multiTurnContinuationVerified: piStreamPreflight?.multiTurnContinuationVerified === true,
+        largeToolResultVerified: piStreamPreflight?.largeToolResultVerified === true,
+      },
+    },
     arcRuntime,
     arcAuth: games.arcAuth || {
       mode: 'unknown',

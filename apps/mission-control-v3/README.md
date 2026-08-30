@@ -9,7 +9,7 @@ Private CopilotKit-based mission control for the production AVO × Pi ARC-AGI-3 
 - cursor-based reconnectable lifecycle events;
 - exact ARC grid rendering when a recorded frame is available;
 - synchronized trajectory seek and replay;
-- persistent memory, proposals, failed attempts, committed lineage, supervisor interventions, and detector findings;
+- persistent memory, hypothesis proposals and evidence outcomes, supervisor interventions, and detector findings;
 - baseline versus post-fix comparison;
 - CopilotKit readable state and typed actions for every lifecycle operation.
 

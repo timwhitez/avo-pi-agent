@@ -10,7 +10,9 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
 } from './support/run-capsule.mjs';
+import { providerCapabilities } from './support/provider.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
 const provider = {
@@ -18,6 +20,7 @@ const provider = {
   apiKey: 'runtime-only-value',
   model: 'production-model',
   reasoningEffort: 'max',
+  capabilities: providerCapabilities('max'),
 };
 
 function response(payload) {
@@ -27,6 +30,7 @@ function response(payload) {
 test('canonical review tip contains replay-resistant provider proof and null-safe metrics together', async () => {
   const runId = 'round-1';
   const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({ runId });
+  const scorecard = scorecardCoverageFixture({ score: 0 });
   await assert.rejects(
     () => preflightResponsesProvider(provider, {
       nonce: challenge,
@@ -44,6 +48,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
     privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
+      ...scorecard,
       runId,
       status: 'complete',
       completeness: {
@@ -54,7 +59,6 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
         versionedGameIds: ['g1-v1'],
       },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
-      officialScore: { value: 0, origin: 'aggregateScorecard.score' },
       privateArtifactHashes: {
         runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
       },
@@ -63,19 +67,7 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
         runCapsule: publicRunCapsuleFixture({}, { runId }),
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: {
-          ok: true,
-          outputVerified: true,
-          challengeVerified: true,
-          responseFreshnessVerified: true,
-          attestationVersion: 2,
-          responseIdHash: 'a'.repeat(64),
-          challengeHash: 'b'.repeat(64),
-          responseHash: 'c'.repeat(64),
-          proofHash: 'd'.repeat(64),
-        },
       },
-      games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
     },
     analysis: {
       runId,

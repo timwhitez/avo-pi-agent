@@ -9,6 +9,7 @@ const DEFAULT_MAX_EVENT_BYTES = 128 * 1024;
 const DEFAULT_MAX_EVENTS = 100_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 const SEQUENCE_CHECKPOINT_RECORD = 'avo.evidence.sequence-checkpoint.v1';
+export const TRAJECTORY_EVIDENCE_SCHEMA = 'avo.trajectory-evidence.v1';
 
 export class EvidenceStore {
   constructor(root, gameId, options = {}) {
@@ -26,6 +27,7 @@ export class EvidenceStore {
     this.loaded = false;
     this.fileIdentity = null;
     this.checkpointSeen = false;
+    this.historyComplete = true;
   }
 
   load() {
@@ -34,6 +36,7 @@ export class EvidenceStore {
     this.loaded = false;
     this.fileIdentity = null;
     this.checkpointSeen = false;
+    this.historyComplete = true;
     if (!inspectEvidenceRoot(this.authorityRoot, this.root)) {
       this.loaded = true;
       return this;
@@ -122,6 +125,13 @@ export class EvidenceStore {
     return this.events.find((event) => event.id === id) ?? null;
   }
 
+  summary() {
+    return summarizeEvidenceEvents(this.events, {
+      highWaterSequence: this.sequence,
+      historyComplete: this.historyComplete,
+    });
+  }
+
   compact({ protectedIds = [], retainRecent = 2000 } = {}) {
     if (!this.loaded) throw new Error('evidence store must be loaded before compaction');
     const protectedSet = new Set(protectedIds.map(String));
@@ -133,6 +143,7 @@ export class EvidenceStore {
     if (keep.size === this.events.length) return { removed: 0, retained: this.events.length };
     const retained = this.events.filter((event) => keep.has(event.id));
     const removed = this.events.length - retained.length;
+    if (removed > 0) this.historyComplete = false;
     const highWaterSequence = this.sequence;
     const retainedHighWater = retained.reduce((max, event) => Math.max(max, event.sequence), 0);
     const records = retainedHighWater < highWaterSequence
@@ -154,6 +165,7 @@ export class EvidenceStore {
     if (!Number.isSafeInteger(event.sequence) || event.sequence <= this.sequence) {
       throw new Error(`evidence line ${lineNumber} has non-monotonic sequence`);
     }
+    if (event.sequence !== this.sequence + 1) this.historyComplete = false;
     const { id, digest, ...core } = event;
     const expectedDigest = digestFor(core);
     const expectedId = `evidence-${String(event.sequence).padStart(6, '0')}-${expectedDigest.slice(0, 12)}`;
@@ -175,6 +187,7 @@ export class EvidenceStore {
     }
     this.sequence = record.sequence;
     this.checkpointSeen = true;
+    this.historyComplete = false;
   }
 
   #readLines(before, onLine) {
@@ -265,6 +278,31 @@ export class EvidenceStore {
       lock.release();
     }
   }
+}
+
+export function summarizeEvidenceEvents(events, {
+  highWaterSequence = events.at(-1)?.sequence ?? 0,
+  historyComplete = true,
+} = {}) {
+  const refs = events.map((event) => ({
+    sequence: event.sequence,
+    id: event.id,
+    digest: event.digest,
+  }));
+  const identitySchemas = [...new Set(events.map((event) => event.identitySchema ?? null))];
+  const identitySchema = identitySchemas.length === 1 ? identitySchemas[0] : null;
+  return Object.freeze({
+    schema: TRAJECTORY_EVIDENCE_SCHEMA,
+    identitySchema,
+    complete: historyComplete
+      && events.length === highWaterSequence
+      && (events.length === 0 || identitySchema !== null),
+    eventCount: events.length,
+    highWaterSequence,
+    firstEvidenceRef: events[0]?.id ?? null,
+    lastEvidenceRef: events.at(-1)?.id ?? null,
+    rootSha256: digestFor({ schema: TRAJECTORY_EVIDENCE_SCHEMA, refs }),
+  });
 }
 
 function assertEvidenceLineBytes(line, lineNumber, maxEventBytes, terminatorBytes) {

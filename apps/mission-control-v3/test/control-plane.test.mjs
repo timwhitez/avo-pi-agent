@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { providerStatus, sanitizeEvent, sanitizeRun, validateStartOptions } from '../lib/control-plane.mjs';
+import { ingestProcessLine } from '../lib/control-plane-base.mjs';
 
 test('validates diagnostic and competition lifecycle options', () => {
   assert.deepEqual(validateStartOptions({
@@ -69,6 +70,30 @@ test('provider status exposes only configuration state and a session-salted fing
     restore('OPENAI_API_KEY', previous.key);
     restore('OPENAI_MODEL', previous.model);
   }
+});
+
+test('production output parser preserves unknown total level metadata', () => {
+  const run = {
+    id: 'run_test',
+    cursor: 0,
+    events: [],
+    currentGame: null,
+    actionBudget: 10,
+    progress: { gameIndex: 1, gameTotal: 1, actions: 0, levelsCompleted: 0, totalLevels: null },
+  };
+
+  ingestProcessLine(run, 'g01: state=GAME_OVER levels=1/? actions=2/10', false);
+
+  assert.equal(run.currentGame, 'g01');
+  assert.deepEqual(run.progress, {
+    gameIndex: 1,
+    gameTotal: 1,
+    actions: 2,
+    levelsCompleted: 1,
+    totalLevels: null,
+  });
+  assert.equal(run.events[0].type, 'game.finished');
+  assert.equal(run.events[0].payload.totalLevels, null);
 });
 
 function restore(name, value) {

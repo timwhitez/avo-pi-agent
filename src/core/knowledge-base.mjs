@@ -1,21 +1,21 @@
 const ENTRIES = [
   {
-    id: 'avo-operator',
+    id: 'avo-reference-boundary',
     kind: 'method',
     source: 'https://arxiv.org/abs/2603.24517',
-    text: 'AVO makes the agent the complete variation operator: it may consult the full scored lineage and domain knowledge, decide diagnostic actions, invoke external evaluation, diagnose failures, revise, and commit only evaluator-approved candidates.',
+    text: 'The public AVO architecture evaluates and installs behavior-changing candidates. This harness does not implement that mechanism; direct environment interaction remains the policy.',
   },
   {
-    id: 'avo-lineage',
-    kind: 'method',
-    source: 'https://arxiv.org/abs/2603.24517',
-    text: 'The evaluated instantiation is single-lineage continuous evolution. Failed intermediate attempts remain in the internal trajectory and do not enter committed lineage. A committed candidate must pass correctness and match or improve the best objective score.',
+    id: 'hypothesis-journal-boundary',
+    kind: 'project',
+    source: 'project adaptation',
+    text: 'The optional hypothesis journal checks structured predictions against exact later evidence. Confirmation records prediction agreement only: it does not install a policy, alter tools or prompts, rank solutions, or prove objective improvement.',
   },
   {
     id: 'avo-supervisor',
     kind: 'method',
     source: 'https://arxiv.org/abs/2603.24517',
-    text: 'Self-supervision is conditional: detect stagnation or unproductive cycles, review the overall trajectory, and steer toward several fresh candidate directions while leaving the main agent autonomous.',
+    text: 'Self-supervision is conditional: detect stagnation or unproductive cycles, review the overall trajectory, and steer toward several fresh experiment directions while leaving the main agent autonomous.',
   },
   {
     id: 'arc-objective',
@@ -27,13 +27,13 @@ const ENTRIES = [
     id: 'arc-actions',
     kind: 'arc',
     source: 'https://docs.arcprize.org/toolkit/arc_agi',
-    text: 'Only actions exposed by the current frame are legal. ACTION6 may require coordinates. A level transition is progress but not necessarily game completion; state WIN is the terminal success signal.',
+    text: 'Gameplay actions must be exposed by the current active frame. GAME_OVER and ERROR end the episode, so the next choice is controller RESET or finish, never another gameplay step. RESET may be available even when absent from gameplay affordances; trust the returned full_reset flag. ACTION6 may require coordinates. levelsCompleted is monotonic progress, totalLevels is stable task metadata or null when unknown, and state WIN is terminal success.',
   },
   {
     id: 'arc-competition',
     kind: 'arc',
     source: 'https://docs.arcprize.org/toolkit/competition_mode',
-    text: 'Competition mode scores all available environments, permits only level resets, allows make once per environment, permits one scorecard, and does not expose an inflight scorecard.',
+    text: 'Competition mode scores all available environments, constrains environment construction and scorecard access, and uses the toolkit RESET controller semantics. A RESET may be full; the returned frame and official scorecard remain authoritative.',
   },
   {
     id: 'arc-experiment',
@@ -45,7 +45,7 @@ const ENTRIES = [
     id: 'arc-stall',
     kind: 'heuristic',
     source: 'project adaptation',
-    text: 'On a plateau, compare the last distinct transitions, identify untested legal actions or coordinate regions, falsify stale object/goal assumptions, and reset only with a materially different plan.',
+    text: 'On a plateau, compare the last distinct transitions, identify untested legal gameplay actions or coordinate regions, falsify stale object/goal assumptions, and call the reset controller only with a materially different plan.',
   },
 ];
 

@@ -19,20 +19,45 @@ import os
 import re
 import sys
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 _ANONYMOUS_KEY_LOG = re.compile(r"(Got anonymous API key:\s*).+", re.IGNORECASE)
+_ARC_IDENTIFIER_LOG = re.compile(
+    r"((?<!\.)\b(?:guid|scorecard(?:_id)?|card_id)\b[\"']?"
+    r"\s*[:=]\s*[\"']?)"
+    r"([^\"',;\s}/]+)",
+    re.IGNORECASE,
+)
+_ARC_GUID_WORD_LOG = re.compile(
+    r"(\bguid\s+)([^\"',;\s}/]+)", re.IGNORECASE
+)
+_SCORECARD_API_PATH_LOG = re.compile(
+    r"(/api/scorecard/)[^/?#\s;\"']+", re.IGNORECASE
+)
+_RECORDING_PATH_LOG = re.compile(r"(\brecordings?/)[^\s\"']+", re.IGNORECASE)
 _SUPPORTED_AUTH_MODES = {"anonymous-auto", "registered"}
 
 
+def redact_arc_private_material(value: Any) -> str:
+    """Remove ARC credentials and raw scorecard/run identities from text."""
+
+    message = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", str(value))
+    message = _SCORECARD_API_PATH_LOG.sub(r"\1<redacted>", message)
+    message = _RECORDING_PATH_LOG.sub(r"\1<redacted>", message)
+    message = _ARC_IDENTIFIER_LOG.sub(r"\1<redacted>", message)
+    return _ARC_GUID_WORD_LOG.sub(r"\1<redacted>", message)
+
+
 class _RedactArcSecrets(logging.Filter):
-    """Remove server-issued ARC credentials from official SDK log records."""
+    """Remove server-issued ARC credentials and run IDs from SDK log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if _ANONYMOUS_KEY_LOG.search(message):
-            record.msg = _ANONYMOUS_KEY_LOG.sub(r"\1<redacted>", message)
+        original = record.getMessage()
+        message = redact_arc_private_material(original)
+        if message != original:
+            record.msg = message
             record.args = ()
         return True
 
@@ -112,7 +137,10 @@ def arc_auth_metadata(arcade: Any, mode: str) -> dict[str, Any]:
 
 
 def fail(message: str) -> None:
-    print(json.dumps({"ok": False, "error": message}), flush=True)
+    print(
+        json.dumps({"ok": False, "error": redact_arc_private_material(message)}),
+        flush=True,
+    )
 
 
 def jsonable(value: Any) -> Any:
@@ -135,13 +163,24 @@ def jsonable(value: Any) -> Any:
     return str(value)
 
 
+def total_levels_or_none(value: Any) -> int | None:
+    for name in ("total_levels", "level_count", "win_levels"):
+        candidate = getattr(value, name, None)
+        if candidate is None or candidate == 0:
+            continue
+        if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+        return candidate
+    return None
+
+
 def serialize_frame(raw: Any) -> dict[str, Any]:
     return {
         "game_id": getattr(raw, "game_id", None),
         "frame": jsonable(getattr(raw, "frame", [])),
         "state": jsonable(getattr(raw, "state", "UNKNOWN")),
         "levels_completed": int(getattr(raw, "levels_completed", 0) or 0),
-        "win_levels": int(getattr(raw, "win_levels", 0) or 0),
+        "total_levels": total_levels_or_none(raw),
         "guid": getattr(raw, "guid", None),
         "full_reset": bool(getattr(raw, "full_reset", False)),
         "available_actions": jsonable(getattr(raw, "available_actions", [])),
@@ -155,6 +194,7 @@ def serialize_environment_info(item: Any) -> dict[str, Any]:
         "default_fps": getattr(item, "default_fps", None),
         "baseline_actions": jsonable(getattr(item, "baseline_actions", None)),
         "level_tags": jsonable(getattr(item, "level_tags", None)),
+        "total_levels": total_levels_or_none(item),
     }
 
 
@@ -162,17 +202,46 @@ def environment_list(arcade: Any) -> list[dict[str, Any]]:
     return [serialize_environment_info(item) for item in arcade.get_environments()]
 
 
-def resolve_environment(request: dict, open_environments: dict):
+def resolve_environment_key(request: dict, open_environments: dict) -> str:
     handle = str(request.get("handle") or "").strip()
     if handle:
-        entry = open_environments.get(handle)
-        if entry is None:
+        if handle not in open_environments:
             raise ValueError(f"No environment is open for handle: {handle}")
-        return entry[0]
-    entry = open_environments.get("default")
-    if entry is None:
+        return handle
+    if "default" not in open_environments:
         raise ValueError("No game is open")
-    return entry[0]
+    return "default"
+
+
+def resolve_environment(request: dict, open_environments: dict):
+    return open_environments[resolve_environment_key(request, open_environments)][0]
+
+
+def is_episode_terminal(state: Any) -> bool:
+    return str(state or "").strip().upper() in {"WIN", "GAME_OVER", "ERROR"}
+
+
+def new_lifecycle(state: Any) -> dict[str, Any]:
+    return {
+        "state": str(state or "UNKNOWN"),
+        "gameplay_actions_forwarded": 0,
+        "post_terminal_gameplay_actions": 0,
+    }
+
+
+def forward_gameplay(
+    target: Any,
+    action: Any,
+    data: dict,
+    reasoning: dict | None,
+    lifecycle: dict[str, Any],
+):
+    """Instrument the single production seam immediately before env.step."""
+
+    lifecycle["gameplay_actions_forwarded"] += 1
+    if is_episode_terminal(lifecycle.get("state")):
+        lifecycle["post_terminal_gameplay_actions"] += 1
+    return target.step(action, data=data, reasoning=reasoning)
 
 
 def resolve_action(GameAction: Any, name: str) -> Any:
@@ -223,6 +292,7 @@ def main() -> int:
             logger=build_arc_logger(),
         )
         auth = arc_auth_metadata(arcade, auth_mode)
+        session_started_at = datetime.now(timezone.utc).isoformat()
         if not auth["keyAcquired"]:
             raise RuntimeError(
                 "official ARC toolkit did not acquire an API key for the selected auth mode"
@@ -240,6 +310,7 @@ def main() -> int:
             )
             return 0
         open_environments: dict[str, tuple[Any, str]] = {}
+        environment_lifecycles: dict[str, dict[str, Any]] = {}
         current_game_id = None
         if args.game:
             initial_env = arcade.make(args.game)
@@ -247,6 +318,9 @@ def main() -> int:
                 fail(f"Could not create ARC environment: {args.game}")
                 return 3
             open_environments["default"] = (initial_env, args.game)
+            environment_lifecycles["default"] = new_lifecycle(
+                serialize_frame(initial_env.observation_space)["state"]
+            )
             current_game_id = args.game
     except Exception as exc:
         fail(f"ARC initialization failed: {type(exc).__name__}: {exc}")
@@ -277,18 +351,29 @@ def main() -> int:
                 # host runs games concurrently through handles. Handle-less
                 # opens keep the single-environment contract via "default".
                 open_environments[handle or "default"] = (env, requested_game)
+                frame = serialize_frame(env.observation_space)
+                environment_lifecycles[handle or "default"] = new_lifecycle(frame["state"])
                 current_game_id = requested_game
                 response = {
                     "ok": True,
                     "game_id": requested_game,
                     "handle": handle or None,
-                    "frame": serialize_frame(env.observation_space),
+                    "frame": frame,
                 }
             elif command == "observe":
+                key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
-                response = {"ok": True, "frame": serialize_frame(target.observation_space)}
+                frame = serialize_frame(target.observation_space)
+                environment_lifecycles[key]["state"] = str(frame["state"])
+                response = {"ok": True, "frame": frame}
             elif command in ("step", "reset"):
+                key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
+                lifecycle = environment_lifecycles[key]
+                if command == "step" and is_episode_terminal(lifecycle.get("state")):
+                    raise ValueError(
+                        "EPISODE_TERMINAL: gameplay step rejected; use reset or finish"
+                    )
                 action_name = "RESET" if command == "reset" else request.get("action")
                 action = resolve_action(GameAction, action_name)
                 data = request.get("data") or {}
@@ -297,13 +382,42 @@ def main() -> int:
                 reasoning = request.get("reasoning")
                 if reasoning is not None and not isinstance(reasoning, dict):
                     reasoning = {"text": str(reasoning)}
-                raw = target.step(action, data=data, reasoning=reasoning)
-                response = {"ok": True, "frame": serialize_frame(raw)}
+                raw = (
+                    forward_gameplay(target, action, data, reasoning, lifecycle)
+                    if command == "step"
+                    else target.step(action, data=data, reasoning=reasoning)
+                )
+                frame = serialize_frame(raw)
+                lifecycle["state"] = str(frame["state"])
+                response = {"ok": True, "frame": frame}
+            elif command == "lifecycle":
+                key = resolve_environment_key(request, open_environments)
+                lifecycle = environment_lifecycles[key]
+                response = {
+                    "ok": True,
+                    "lifecycle": {
+                        "state": lifecycle["state"],
+                        "gameplay_actions_forwarded": lifecycle[
+                            "gameplay_actions_forwarded"
+                        ],
+                        "post_terminal_gameplay_actions": lifecycle[
+                            "post_terminal_gameplay_actions"
+                        ],
+                    },
+                }
             elif command == "scorecard":
+                scorecard = arcade.get_scorecard()
+                scorecard_observed_at = datetime.now(timezone.utc)
                 response = {
                     "ok": True,
                     "arc_auth": auth,
-                    "scorecard": jsonable(arcade.get_scorecard()),
+                    "scorecard": jsonable(scorecard),
+                    "scorecard_session": {
+                        "started_at": jsonable(
+                            getattr(scorecard, "open_at", session_started_at)
+                        ),
+                        "observed_at": jsonable(scorecard_observed_at),
+                    },
                 }
             elif command == "close":
                 print(json.dumps({"ok": True}), flush=True)

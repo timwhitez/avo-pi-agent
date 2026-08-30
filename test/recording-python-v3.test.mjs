@@ -28,9 +28,33 @@ test('composed recorder closes its protocol pipe and records durable-state marke
     fs.writeFileSync(path.join(memory, 'ls20.json'), JSON.stringify({
       gameId: 'ls20',
       actionSemantics: { ACTION1: 'probe' },
-      proposals: [{ id: 'proposal-1' }],
-      attempts: [{ id: 'attempt-1', proposalId: 'proposal-1' }],
-      committed: [{ id: 'candidate-1' }],
+      hypothesisProposals: [{ id: 'proposal-1' }],
+      hypothesisEvaluations: [
+        {
+          id: 'evaluation-1', proposalId: 'proposal-1', outcome: 'confirmed',
+          evaluation: {
+            outcome: 'confirmed', evidenceBoundaryValid: true,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-000001-aaaaaaaaaaaa' }], missingEvidenceRefs: [],
+          },
+        },
+        {
+          id: 'attempt-legacy', proposalId: 'proposal-legacy',
+          evaluation: {
+            correctness: true,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-not-exact' }], missingEvidenceRefs: [],
+          },
+        },
+        {
+          id: 'attempt-contradictory', proposalId: 'proposal-contradictory',
+          evaluation: {
+            correctness: false,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-000002-bbbbbbbbbbbb' }], missingEvidenceRefs: [],
+          },
+        },
+      ],
       notes: ['private durable note'],
     }));
     const input = `${JSON.stringify({ op: 'step', game_id: 'ls20', action: 'ACTION1' })}\n`;
@@ -51,14 +75,16 @@ test('composed recorder closes its protocol pipe and records durable-state marke
     const records = fs.readFileSync(path.join(trace, 'memory-events.jsonl'), 'utf8')
       .split(/\r?\n/).filter(Boolean).map(JSON.parse);
     const snapshot = records.find((record) => record.kind === 'memory.snapshot');
-    const lineage = records.find((record) => record.kind === 'lineage.snapshot');
+    const journal = records.find((record) => record.kind === 'hypothesis_journal.snapshot');
     assert.ok(snapshot);
-    assert.ok(lineage);
+    assert.ok(journal);
     assert.equal(snapshot.action_semantics_count, 1);
     assert.equal(snapshot.note_count, 1);
-    assert.equal(lineage.proposal_count, 1);
-    assert.equal(lineage.attempt_count, 1);
-    assert.equal(lineage.committed_count, 1);
+    assert.equal(journal.proposal_count, 1);
+    assert.equal(journal.evaluation_count, 3);
+    assert.equal(journal.confirmed_count, 1);
+    assert.equal(journal.contradicted_count, 0);
+    assert.equal(journal.inconclusive_count, 2);
     assert.equal(JSON.stringify(records).includes('private durable note'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

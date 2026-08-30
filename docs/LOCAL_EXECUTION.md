@@ -82,7 +82,10 @@ AVO_CHILD_ALLOW_PROXY=1
 
 Containerized workspace execution has its own stricter boundary: no network,
 read-only container root, dropped capabilities, no new privileges, resource
-limits, an unprivileged UID, and one writable per-game workspace mount. The
+limits, an explicit numeric host UID/GID, and one writable per-game workspace
+mount. Run the harness as a non-root account when the container itself must use
+a non-root UID. Production startup also requires a local immutable image ID and
+passes the same-path isolation preflight before ARC starts. The
 child-environment allowlist is defense in depth and does not replace OS or
 container isolation.
 

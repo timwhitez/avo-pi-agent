@@ -10,7 +10,7 @@ export function projectPublicRunCapsule(capsule, {
   const definition = capsule.definition;
   const actualClass = String(runClass || definition.initialState.mode);
   const published = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: definition.runId,
     capsuleHash: capsule.capsuleHash,
     capsuleEvidenceSha256: requiredSha(capsuleEvidenceSha256),
@@ -21,8 +21,10 @@ export function projectPublicRunCapsule(capsule, {
     gitClean: definition.git.clean === true,
     components: definition.components.files,
     componentSetSha256: definition.components.setSha256,
+    policyProfile: definition.policyProfile,
     prompts: definition.prompts,
     toolSchemaSha256: definition.tools.schemaSha256,
+    providerToolSchemaSha256: definition.tools.providerSchemaSha256,
     nodeDependencySha256: definition.runtime.dependencies.nodeSha256,
     nodeDependencies: definition.runtime.dependencies.nodeTree || null,
     pythonDependencySha256: definition.runtime.dependencies.pythonSha256,
@@ -32,6 +34,7 @@ export function projectPublicRunCapsule(capsule, {
     initialStateSha256: sha256(canonicalJson(definition.initialState)),
     initialState: definition.initialState,
     enabledTools: definition.tools.enabled,
+    workspaceCapability: definition.workspaceCapability,
     transcript: definition.transcript,
     runtime: {
       node: definition.runtime.node,
@@ -46,9 +49,11 @@ export function projectPublicRunCapsule(capsule, {
       scorecardBinding: definition.runtime.scorecardBinding,
       providerStreamTimeoutMs: definition.runtime.providerStreamTimeoutMs,
       providerStreamMaxRetries: definition.runtime.providerStreamMaxRetries,
+      actionBudgetPolicy: definition.runtime.actionBudgetPolicy,
       config: definition.runtime.config,
     },
     task: definition.task,
+    experiment: publicExperimentBinding(definition.experiment),
     modelCapabilityStatus: definition.modelInterface.capabilityStatus,
     modelInterface: {
       implementationSha256: definition.modelInterface.implementationSha256,
@@ -56,7 +61,9 @@ export function projectPublicRunCapsule(capsule, {
       wireApi: definition.modelInterface.wireApi,
       reasoningEffort: definition.modelInterface.reasoningEffort,
       requestedCapabilities: definition.modelInterface.requestedCapabilities,
-      declaredCapabilityManifest: definition.modelInterface.declaredCapabilityManifest,
+      capabilityManifestSha256: definition.modelInterface.capabilityManifestSha256,
+      effectiveCapabilityManifest: definition.modelInterface.effectiveCapabilityManifest,
+      attestation: definition.modelInterface.attestation,
       samplingParameters: definition.modelInterface.samplingParameters,
     },
   };
@@ -64,6 +71,16 @@ export function projectPublicRunCapsule(capsule, {
     ...published,
     commitmentSha256: sha256(canonicalJson(published)),
   });
+}
+
+function publicExperimentBinding(value) {
+  if (!value) return null;
+  const {
+    providerEndpointSha256: _providerEndpointSha256,
+    providerModelSha256: _providerModelSha256,
+    ...published
+  } = value;
+  return published;
 }
 
 function requiredSha(value) {

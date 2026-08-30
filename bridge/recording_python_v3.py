@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compose the exact ARC recorder with a private memory/lineage watcher.
+"""Compose the exact ARC recorder with a private durable-memory watcher.
 
 This executable delegates protocol handling to recording_python_v2.py, while a
 background watcher records bounded, hash-based durable-state changes. Raw memory
@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -31,6 +32,7 @@ _lock = threading.Lock()
 _stop = threading.Event()
 _sequence = 0
 _seen: dict[str, str] = {}
+EVIDENCE_ID = re.compile(r"evidence-[0-9]{6,}-[a-f0-9]{12}")
 
 
 def utc_now() -> str:
@@ -59,20 +61,81 @@ def pick_dict(value: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {}
 
 
-def lineage_projection(memory: dict[str, Any]) -> dict[str, Any]:
-    lineage = pick_dict(memory, "lineage", "evolution")
-    proposals = pick_list(memory, "proposals") or pick_list(lineage, "proposals")
-    attempts = pick_list(memory, "attempts", "evaluatedAttempts") or pick_list(lineage, "attempts", "evaluatedAttempts")
-    committed = pick_list(memory, "committed", "committedLineage") or pick_list(lineage, "committed", "committedLineage")
-    supervisors = pick_list(memory, "supervisorInterventions", "supervisor_interventions") or pick_list(lineage, "supervisorInterventions", "supervisor_interventions")
+def evaluation_outcome(record: Any) -> str:
+    if not isinstance(record, dict):
+        return "inconclusive"
+    evaluation = record.get("evaluation") if isinstance(record.get("evaluation"), dict) else {}
+    record_outcome = record.get("outcome")
+    evaluation_outcome_value = evaluation.get("outcome")
+    if record_outcome and evaluation_outcome_value and record_outcome != evaluation_outcome_value:
+        return "inconclusive"
+    declared = record_outcome or evaluation_outcome_value
+    if evaluation.get("evaluator") == "system-expiry-v1":
+        return "expired" if declared in {None, "expired"} else "inconclusive"
+    if declared == "expired":
+        return "expired"
+    if evaluation.get("correctness") is False:
+        return "inconclusive"
+    if (
+        evaluation.get("proposalId") is not None
+        and evaluation.get("proposalId") != record.get("proposalId")
+    ):
+        return "inconclusive"
+    checks = evaluation.get("predictionChecks")
+    evidence = evaluation.get("evidence")
+    missing = evaluation.get("missingEvidenceRefs")
+    exact_evidence = (
+        isinstance(evidence, list)
+        and bool(evidence)
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and EVIDENCE_ID.fullmatch(item["id"])
+            for item in evidence
+        )
+    )
+    if not isinstance(checks, dict) or not exact_evidence or not isinstance(missing, list) or missing:
+        return "inconclusive"
+    total = checks.get("totalClaims")
+    matched = checks.get("matchedClaims")
+    unmatched = checks.get("unmatchedPredictions")
+    if (
+        isinstance(total, bool)
+        or not isinstance(total, int)
+        or total < 1
+        or isinstance(matched, bool)
+        or not isinstance(matched, int)
+        or matched < 0
+        or matched > total
+        or not isinstance(unmatched, list)
+        or unmatched
+    ):
+        return "inconclusive"
+    if (
+        declared in {"confirmed", "contradicted"} or "evidenceBoundaryValid" in evaluation
+    ) and evaluation.get("evidenceBoundaryValid") is not True:
+        return "inconclusive"
+    derived = "confirmed" if matched == total else "contradicted"
+    return derived if declared in {None, derived} else "inconclusive"
+
+
+def hypothesis_journal_projection(memory: dict[str, Any]) -> dict[str, Any]:
+    journal = pick_dict(memory, "hypothesisJournal")
+    legacy = pick_dict(memory, "lineage", "evolution")
+    proposals = pick_list(memory, "hypothesisProposals") or pick_list(journal, "proposals") or pick_list(memory, "candidateProposals", "proposals") or pick_list(legacy, "proposals")
+    evaluations = pick_list(memory, "hypothesisEvaluations") or pick_list(journal, "evaluations") or pick_list(memory, "candidateAttempts", "attempts") or pick_list(legacy, "attempts")
+    outcomes = [evaluation_outcome(record) for record in evaluations]
+    supervisors = pick_list(memory, "supervisorInterventions", "supervisor_interventions") or pick_list(journal, "supervisorInterventions", "supervisor_interventions") or pick_list(legacy, "supervisorInterventions", "supervisor_interventions")
     return {
         "proposal_count": len(proposals),
-        "attempt_count": len(attempts),
-        "committed_count": len(committed),
+        "evaluation_count": len(evaluations),
+        "confirmed_count": outcomes.count("confirmed"),
+        "contradicted_count": outcomes.count("contradicted"),
+        "inconclusive_count": outcomes.count("inconclusive"),
+        "expired_count": outcomes.count("expired"),
         "supervisor_count": len(supervisors),
         "latest_proposal_sha256": canonical_hash(proposals[-1]) if proposals else None,
-        "latest_attempt_sha256": canonical_hash(attempts[-1]) if attempts else None,
-        "latest_committed_sha256": canonical_hash(committed[-1]) if committed else None,
+        "latest_evaluation_sha256": canonical_hash(evaluations[-1]) if evaluations else None,
         "latest_supervisor_sha256": canonical_hash(supervisors[-1]) if supervisors else None,
     }
 
@@ -102,7 +165,7 @@ def memory_projection(memory: dict[str, Any], game_id: str) -> dict[str, Any]:
         "proven_strategies_sha256": canonical_hash(strategies),
         "note_count": len(notes),
         "notes_sha256": canonical_hash(notes),
-        **lineage_projection(memory),
+        **hypothesis_journal_projection(memory),
     }
 
 
@@ -148,9 +211,9 @@ def scan_memory() -> None:
                 "previous_file_sha256": prior,
                 "file_sha256": digest,
             })
-            append("lineage.snapshot", {
+            append("hypothesis_journal.snapshot", {
                 "game_id": game_id,
-                **lineage_projection(memory),
+                **hypothesis_journal_projection(memory),
             })
         except Exception as error:
             append("memory.watch_error", {

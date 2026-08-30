@@ -6,6 +6,7 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
 } from './support/run-capsule.mjs';
 
 function fixture() {
@@ -15,11 +16,13 @@ function fixture() {
     runId: roundId,
     versionedGameIds,
   });
+  const scorecard = scorecardCoverageFixture({ versionedGameIds, score: 0 });
   return {
     roundId,
     privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
+      ...scorecard,
       runId: roundId,
       status: 'complete',
       completeness: {
@@ -30,7 +33,6 @@ function fixture() {
         versionedGameIds,
       },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
-      officialScore: { value: 0, origin: 'aggregateScorecard.score' },
       privateArtifactHashes: {
         runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
       },
@@ -39,22 +41,7 @@ function fixture() {
         runCapsule: publicRunCapsuleFixture({}, { runId: roundId, versionedGameIds }),
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: {
-          ok: true,
-          outputVerified: true,
-          challengeVerified: true,
-          responseFreshnessVerified: true,
-          attestationVersion: 2,
-          responseIdHash: 'a'.repeat(64),
-          challengeHash: 'b'.repeat(64),
-          responseHash: 'c'.repeat(64),
-          proofHash: 'd'.repeat(64),
-        },
       },
-      games: versionedGameIds.map((versionedGameId) => ({
-        gameId: versionedGameId.split('-')[0],
-        versionedGameId,
-      })),
     },
     analysis: {
       runId: roundId,
@@ -133,7 +120,7 @@ test('preserves genuine numeric zero while rejecting false as a zero substitute'
   assert.equal(accepted.clean, true);
   assert.equal(accepted.findingCount, 0);
   assert.equal(accepted.openFindingCount, 0);
-  assert.deepEqual(accepted.officialScore, { value: 0, origin: 'aggregateScorecard.score' });
+  assert.deepEqual(accepted.officialScore, { value: 0, origin: 'scorecardEvidence.score' });
 
   const invalid = fixture();
   invalid.analysis.acceptance.findingCount = false;

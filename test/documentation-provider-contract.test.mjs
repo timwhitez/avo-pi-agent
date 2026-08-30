@@ -4,6 +4,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
+import { POLICY_PROFILE_NAMES } from '../src/core/policy-profile.mjs';
+
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(testDir, '..');
 
@@ -13,14 +16,20 @@ function read(relativePath) {
 
 test('active real-run runbook uses exactly the Provider variables consumed by runtime', () => {
   const runbook = read('docs/REAL_PUBLIC_RUNBOOK.md');
-  const config = read('src/config.mjs');
-  const provenance = read('src/benchmark/provenance-core.mjs');
+  const config = `${read('src/config.mjs')}\n${read('src/provider-capabilities.mjs')}`;
+  const provenance = `${read('src/benchmark/provenance-core.mjs')}\n${read('src/provider-capabilities.mjs')}`;
 
   const supported = [
     'OPENAI_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
     'OPENAI_REASONING_EFFORT',
+    'OPENAI_CONTEXT_WINDOW',
+    'OPENAI_MAX_OUTPUT_TOKENS',
+    'OPENAI_INPUT_MODALITIES',
+    'OPENAI_REASONING_EFFORTS',
+    'OPENAI_SUPPORTS_DEVELOPER_ROLE',
+    'OPENAI_CACHE_RETENTION',
   ];
   const unsupported = [
     'AVO_PROVIDER_BASE_URL',
@@ -51,4 +60,36 @@ test('validation documents label combined-worktree evidence as historical and no
     assert.match(document, /not\s+(?:current\s+)?exact-tip validation/i);
     assert.match(document, /no accepted official/i);
   }
+});
+
+test('README tool inventory is generated from the sealed production profiles', () => {
+  const readme = read('README.md');
+  const workspaceModes = ['disabled', 'files-only', 'isolated-python'];
+  const rows = POLICY_PROFILE_NAMES.flatMap((profile) => workspaceModes.map((mode) => {
+    const names = effectiveAvoToolNames(mode, profile);
+    return `| \`${profile}\` | \`${mode}\` | ${names.length} | ${names.map((name) => `\`${name}\``).join(', ')} |`;
+  }));
+  const inventory = [
+    '<!-- effective-tool-inventory:start -->',
+    '| Profile | Workspace mode | Count | Ordered tools |',
+    '| --- | --- | ---: | --- |',
+    ...rows,
+    '<!-- effective-tool-inventory:end -->',
+  ].join('\n');
+
+  assert.ok(readme.includes(inventory), 'README tool inventory must match production exactly');
+  assert.match(readme, /\[`issues\.md`\]\(issues\.md\)/);
+  assert.equal(fs.existsSync(path.join(root, 'issues.md')), true, 'README audit link must resolve');
+  const ledger = read('issues.md');
+  assert.match(ledger, /^# Benchmark and Harness Audit:/m);
+  assert.match(ledger, /^## Live remediation ledger$/m);
+  assert.match(ledger, /Issues audited: \*\*18\/18\*\*\. \*\*0 remain open\.\*\*/);
+  assert.match(ledger, /final integration boundary/);
+  assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
+  assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
+  assert.match(ledger, /\| #180 \|[^\n]+#201\]/);
+  assert.doesNotMatch(ledger, /Open Draft PRs:/);
+  assert.doesNotMatch(ledger, /the Draft PR remains unmerged|both Drafts unmerged|with Drafts unmerged|exact-head approval remains required/);
+  assert.match(ledger, /Public benchmark: \*\*not run\*\*/);
+  assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });

@@ -11,6 +11,8 @@ import {
   privateRunCapsuleEvidenceFixture,
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
+  scorecardCoverageFixture,
+  trajectoryEvidenceFixture,
 } from '../../../test/support/run-capsule.mjs';
 
 const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
@@ -18,7 +20,37 @@ const runId = 'test-run';
 
 function authoritative(overrides = {}) {
   const capsuleProvenance = runCapsuleProvenanceFixture({ runId });
+  const scorecard = scorecardCoverageFixture({ score: 0 });
+  const games = scorecard.games.map((game) => ({
+    ...game,
+    state: 'GAME_OVER',
+    levelsCompleted: 0,
+    totalLevels: 1,
+    actions: 1,
+    gameplayActions: 1,
+    resets: 0,
+    rejectedCommands: 0,
+    terminalRejectedCommands: 0,
+    postTerminalGameplayActions: 0,
+    fullResets: 0,
+    actionSequences: 0,
+    sequenceActionsRequested: 0,
+    sequenceActionsExecuted: 0,
+    sequenceActionsSkipped: 0,
+    sequenceCancellations: 0,
+    memoryClaimsProposed: 0,
+    memoryClaimsConfirmed: 0,
+    memoryClaimsCorrected: 0,
+    memoryClaimsSurfaced: 0,
+    episodeId: 'episode-000001',
+    won: false,
+    loop: 'pi-sdk',
+    trajectoryEvidence: trajectoryEvidenceFixture(),
+  }));
   return {
+    ...scorecard,
+    schemaVersion: 2,
+    games,
     runId,
     status: 'complete',
     completeness: {
@@ -28,13 +60,42 @@ function authoritative(overrides = {}) {
       gameIds: ['g1'],
       versionedGameIds: ['g1-v1'],
     },
-    loopAttestation: { complete: true, loop: 'pi-sdk' },
-    officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+    loopAttestation: {
+      complete: true,
+      attestedCount: 1,
+      loop: 'pi-sdk',
+      controllerTelemetry: 'complete',
+      terminalLifecycleTelemetry: 'complete',
+      actionSequenceTelemetry: 'complete',
+      memoryClaimTelemetry: 'complete',
+      levelMetadata: 'totalLevels-v2',
+      trajectoryEvidence: 'content-addressed-v1',
+    },
     privateArtifactHashes: {
       runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
     },
-    aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
-    games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
+    aggregates: {
+      games: 1,
+      wins: 0,
+      levelsCompleted: 0,
+      totalLevels: 1,
+      actions: 1,
+      gameplayActions: 1,
+      resets: 0,
+      rejectedCommands: 0,
+      terminalRejectedCommands: 0,
+      postTerminalGameplayActions: 0,
+      fullResets: 0,
+      actionSequences: 0,
+      sequenceActionsRequested: 0,
+      sequenceActionsExecuted: 0,
+      sequenceActionsSkipped: 0,
+      sequenceCancellations: 0,
+      memoryClaimsProposed: 0,
+      memoryClaimsConfirmed: 0,
+      memoryClaimsCorrected: 0,
+      memoryClaimsSurfaced: 0,
+    },
     provenance: {
       ...capsuleProvenance,
       runCapsule: publicRunCapsuleFixture(),
@@ -91,6 +152,63 @@ test('complete but non-authoritative competition report is rejected', () => {
   assert.equal(summary.authorityState, 'rejected');
   assert.equal(summary.officialScore, null);
   assert.equal(summary.reportedScore, 0.7);
+});
+
+test('competition authority rejects reports without exact scorecard execution coverage', () => {
+  const report = authoritative();
+  delete report.scorecardEvidence;
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
+  assert.equal(authority.accepted, false);
+  assert.ok(authority.reasons.some((reason) => /scorecard evidence is missing/i.test(reason)));
+});
+
+test('competition authority derives lifecycle, progress, and aggregates from production records', () => {
+  const cases = [
+    {
+      mutate(report) { delete report.games[0].totalLevels; },
+      reason: /explicit totalLevels metadata/,
+    },
+    {
+      mutate(report) {
+        delete report.games[0].totalLevels;
+        report.games[0].winLevels = 1;
+      },
+      reason: /explicit totalLevels metadata/,
+    },
+    {
+      mutate(report) { report.games[0].levelsCompleted = 1; },
+      reason: /levelsCompleted differs from exact scorecard evidence/,
+    },
+    {
+      mutate(report) { report.aggregates.totalLevels = 999; },
+      reason: /aggregate totalLevels differs from game records/,
+    },
+    {
+      mutate(report) { delete report.loopAttestation.levelMetadata; },
+      reason: /levelMetadata attestation differs from game records/,
+    },
+    {
+      mutate(report) {
+        const legacy = structuredClone(report.scorecardEvidence[0]);
+        legacy.schema = 'avo.scorecard-evidence.v2';
+        delete legacy.totalLevelsCompleted;
+        delete legacy.totalLevels;
+        delete legacy.games[0].levelsCompleted;
+        delete legacy.games[0].totalLevels;
+        delete legacy.games[0].won;
+        report.scorecardEvidence = [legacy];
+      },
+      reason: /current scorecard evidence schema/,
+    },
+  ];
+
+  for (const { mutate, reason } of cases) {
+    const report = authoritative();
+    mutate(report);
+    const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
+    assert.equal(authority.accepted, false);
+    assert.match(authority.reasons.join(' '), reason);
+  }
 });
 
 test('public report hashes cannot replace actual private capsule evidence', () => {

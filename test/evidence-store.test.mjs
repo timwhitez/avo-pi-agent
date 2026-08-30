@@ -39,6 +39,23 @@ test('detects corruption instead of silently trusting persisted evidence', () =>
   }
 });
 
+test('trajectory summary never upgrades legacy records to the current identity schema', () => {
+  const dir = root();
+  try {
+    const store = new EvidenceStore(dir, 'game-legacy').load();
+    store.append({ type: 'observation', actionIndex: 0 });
+    store.append({
+      type: 'observation',
+      actionIndex: 1,
+      identitySchema: 'avo.episode-observation.v1',
+    });
+    assert.equal(store.summary().identitySchema, null);
+    assert.equal(store.summary().complete, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('compaction retains protected evidence and a bounded recent tail', () => {
   const dir = root();
   try {

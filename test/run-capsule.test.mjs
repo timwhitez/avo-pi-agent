@@ -13,11 +13,13 @@ import {
   assertRunStateMatchesInitial,
   hashDirectoryTree,
   inspectDependencyClosure,
+  productionProviderToolSchemaDigest,
   inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
   readRunCapsule,
   RUN_CAPSULE_COMPONENT_FILES,
+  sealRunCapsule,
   verifyRunCapsuleGameSet,
   verifyRunCapsuleExecution,
   writeRunCapsule,
@@ -25,6 +27,9 @@ import {
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
+import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
+import { providerCapabilities } from './support/provider.mjs';
+import { workspaceAttestationFixture } from './support/run-capsule.mjs';
 
 function temporaryRoot(prefix = 'avo-capsule-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -65,10 +70,13 @@ function runtimeConfig(overrides = {}) {
       baseUrl: 'https://provider.invalid/v1',
       model: 'model-a',
       reasoningEffort: 'high',
+      capabilities: providerCapabilities('high'),
     },
     maxActions: 1000,
     maxOuterTurns: 1000,
     stallWindow: 8,
+    policyProfile: 'current-v1',
+    memorySurfaceLimit: 4,
     workspaceMode: 'files-only',
     workspacePythonTimeoutMs: 10_000,
     workspaceContainerRuntime: 'docker',
@@ -79,15 +87,59 @@ function runtimeConfig(overrides = {}) {
 
 function providerProvenance(runId, config) {
   const salt = crypto.createHash('sha256').update(runId).digest('hex');
+  const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(
+    config.workspaceMode,
+    config.policyProfile,
+  );
   return {
     providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
     providerModelFingerprint: fingerprint(config.provider.model, salt),
+    providerPreflight: {
+      ok: true,
+      outputVerified: true,
+      challengeVerified: true,
+      responseFreshnessVerified: true,
+      requestAccepted: true,
+      attestationVersion: 3,
+      capabilityManifestSha256,
+    },
+    piStreamPreflight: {
+      ok: true,
+      capabilityManifestSha256,
+      productionToolSchemaSha256: providerToolSchemaSha256,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+    },
+    modelCapabilities: {
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256,
+      requested: {
+        wireApi: 'responses',
+        reasoningEffort: config.provider.reasoningEffort,
+        inputModalities: ['text'],
+        streaming: true,
+        toolCalling: true,
+        parallelToolCalls: 'provider-default-unspecified',
+      },
+      effective: config.provider.capabilities,
+      probes: {
+        freshnessRequestAccepted: true,
+        productionPiProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+      },
+    },
   };
 }
 
 function capsule(overrides = {}) {
-  const config = runtimeConfig();
+  const config = overrides.config || runtimeConfig();
   return buildRunCapsule({
     root: process.cwd(),
     runId: 'run-x',
@@ -101,6 +153,7 @@ function capsule(overrides = {}) {
     arcRuntime: { officialPackageAttested: true, arcAgiVersion: '0.9.9' },
     games: [{ gameId: 'ls20', versionedGameId: 'ls20-00000000' }],
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: initialState(),
     env: {},
     git: {
@@ -119,12 +172,66 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.equal(canonicalJson({ z: 1, a: { y: 2, b: 3 } }), '{"a":{"b":3,"y":2},"z":1}');
   const baseline = capsule();
   const transcript = capsule({ env: { AVO_TRANSCRIPT_MAX_MESSAGES: '80' } });
+  const tokenBound = capsule({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '90000' } });
+  const memoryOff = capsule({ config: runtimeConfig({ memorySurfaceLimit: 0 }) });
+  const minimal = capsule({ config: runtimeConfig({ policyProfile: 'minimal-v1' }) });
   const warm = capsule({
     initialState: initialState({ mode: 'warm-start', snapshotName: 'snapshot-a' }),
   });
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(tokenBound.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(memoryOff.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(minimal.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
+  assert.equal(tokenBound.definition.transcript.maxTokens, 90_000);
+  assert.equal(memoryOff.definition.runtime.config.memorySurfaceLimit, 0);
+  assert.deepEqual(minimal.definition.policyProfile, {
+    requested: 'minimal-v1',
+    effective: 'minimal-v1',
+  });
+  assert.equal(minimal.definition.runtime.config.policyProfile, 'minimal-v1');
+  assert.notEqual(minimal.definition.prompts.systemSha256, baseline.definition.prompts.systemSha256);
+  assert.notEqual(
+    minimal.definition.prompts.initialTemplateSha256,
+    baseline.definition.prompts.initialTemplateSha256,
+  );
+  assert.notEqual(
+    minimal.definition.prompts.runtimeStatusTemplateSha256,
+    baseline.definition.prompts.runtimeStatusTemplateSha256,
+  );
+  assert.notEqual(minimal.definition.tools.schemaSha256, baseline.definition.tools.schemaSha256);
+  assert.equal(minimal.definition.tools.enabled.includes('memory_read'), false);
+  assert.equal(minimal.definition.tools.enabled.includes('hypothesis_propose'), false);
+  assert.match(baseline.definition.prompts.runtimeStatusTemplateSha256, /^[a-f0-9]{64}$/);
+  assert.match(baseline.definition.prompts.compactionNoticeTemplateSha256, /^[a-f0-9]{64}$/);
+  assert.match(baseline.definition.transcript.toolResultElisionTemplateSha256, /^[a-f0-9]{64}$/);
+  assert.match(baseline.definition.transcript.toolResultTruncationTemplateSha256, /^[a-f0-9]{64}$/);
+  assert.match(baseline.definition.transcript.thinkingElisionPolicySha256, /^[a-f0-9]{64}$/);
+  assert.ok(baseline.definition.transcript.staticContextTokens > 0);
+  assert.equal(
+    baseline.definition.transcript.contextEstimator,
+    '@earendil-works/pi-ai@0.84.2 estimateContextTokens',
+  );
+  assert.match(baseline.definition.tools.providerSchemaSha256, /^[a-f0-9]{64}$/);
+  assert.equal(
+    baseline.definition.modelInterface.attestation.productionToolSchemaSha256,
+    baseline.definition.tools.providerSchemaSha256,
+  );
+  assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
+  for (const file of [
+    'src/core/durable-avo-agent.mjs',
+    'src/core/durable-memory.mjs',
+    'src/core/evidence-store.mjs',
+    'src/core/evaluator.mjs',
+    'src/core/hypothesis-journal.mjs',
+    'src/core/memory.mjs',
+    'src/core/observation.mjs',
+    'src/core/policy-profile.mjs',
+    'src/core/supervisor.mjs',
+  ]) {
+    assert.ok(RUN_CAPSULE_COMPONENT_FILES.includes(file), `${file} is outside the run capsule`);
+  }
 });
 
 test('cold starts create empty run-owned state while warm starts name and hash input state', () => {
@@ -161,6 +268,21 @@ test('cold starts create empty run-owned state while warm starts name and hash i
   assert.ok(warm.memoryDir.startsWith(path.join(root, 'runs', 'private', 'run-y')));
   fs.writeFileSync(path.join(memoryDir, 'state.json'), '{"level":2}\n');
   assert.equal(fs.readFileSync(path.join(warm.memoryDir, 'state.json'), 'utf8'), '{"level":1}\n');
+});
+
+test('same-capsule recovery reuses its sealed trajectory starts', () => {
+  const original = capsule();
+  const memoryDir = temporaryRoot();
+  try {
+    fs.writeFileSync(path.join(memoryDir, 'current-run-evidence.json'), '{}\n');
+    const recovered = capsule({
+      memoryDir,
+      resumeCapsule: original,
+    });
+    assert.equal(recovered.capsuleHash, original.capsuleHash);
+  } finally {
+    fs.rmSync(memoryDir, { recursive: true, force: true });
+  }
 });
 
 test('resume rejects symlinked state ancestry and migrated capsules seal the actual start state', () => {
@@ -253,6 +375,7 @@ test('execution verification rejects code and effective runtime drift after seal
     capsule: value,
     python: 'python',
     config: runtimeConfig(),
+    workspaceAttestation: value.definition.workspaceCapability.attestation,
     env: {},
     git: value.definition.git,
     dependencies: value.definition.runtime.dependencies,
@@ -266,6 +389,39 @@ test('execution verification rejects code and effective runtime drift after seal
       }),
     }),
     /provider or model interface differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      config: runtimeConfig({ memorySurfaceLimit: 0 }),
+    }),
+    /effective execution config differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      config: runtimeConfig({ policyProfile: 'minimal-v1' }),
+    }),
+    /effective execution config differs/,
+  );
+  const promptDrift = sealRunCapsule({
+    ...structuredClone(value.definition),
+    prompts: { ...value.definition.prompts, systemSha256: 'f'.repeat(64) },
+  });
+  assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, capsule: promptDrift }),
+    /prompt, tool, or transcript contract differs/,
+  );
+  const toolDrift = sealRunCapsule({
+    ...structuredClone(value.definition),
+    tools: {
+      ...value.definition.tools,
+      enabled: value.definition.tools.enabled.slice(1),
+    },
+  });
+  assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, capsule: toolDrift }),
+    /prompt, tool, or transcript contract differs/,
   );
   assert.throws(
     () => verifyRunCapsuleExecution({
@@ -330,8 +486,18 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
   assert.equal(published.capsuleHash, value.capsuleHash);
   assert.equal(published.comparable, true);
+  assert.deepEqual(published.policyProfile, {
+    requested: 'current-v1', effective: 'current-v1',
+  });
+  assert.equal(published.modelCapabilityStatus, 'configured-with-bounded-probes');
+  assert.equal(published.modelInterface.effectiveCapabilityManifest.limits.contextWindowTokens, 128_000);
+  assert.equal(published.modelInterface.effectiveCapabilityManifest.visualObservation.enabled, false);
+  assert.equal(published.providerToolSchemaSha256, published.modelInterface.attestation.productionToolSchemaSha256);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
+  const missingProfile = structuredClone(published);
+  delete missingProfile.policyProfile;
+  assert.equal(evaluatePublicRunCapsule(missingProfile, { privateCapsuleEvidence }).accepted, false);
   const changedComponent = structuredClone(published);
   changedComponent.components['src/cli.mjs'] = 'f'.repeat(64);
   assert.equal(evaluatePublicRunCapsule(changedComponent, { privateCapsuleEvidence }).accepted, false);
@@ -418,15 +584,39 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.throws(() => readRunCapsule(file, { root: privateDir }), /hash does not match/);
 });
 
-test('official capsules reject isolated Python until runtime and image identity are attested', () => {
-  const baseline = capsule();
+test('official capsules bind an attested immutable isolated-Python image', () => {
+  const config = runtimeConfig({ workspaceMode: 'isolated-python' });
+  const value = capsule({ config });
+  assert.equal(value.definition.workspaceCapability.attestation.requested.containerImage, 'python:3.12-slim');
+  assert.match(value.definition.workspaceCapability.attestation.effective.container.imageId, /^sha256:[a-f0-9]{64}$/);
+  assert.ok(value.definition.tools.enabled.includes('workspace_python'));
+  const root = temporaryRoot('avo-isolated-capsule-');
+  const privateDir = path.join(root, 'runs', 'private', 'run-x');
+  fs.mkdirSync(privateDir, { recursive: true });
+  writeRunCapsule(path.join(privateDir, 'run-capsule.json'), value, { root: privateDir });
+  const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
+  const privateCapsuleEvidence = readPrivateRunCapsuleEvidence({
+    repositoryRoot: root,
+    report: {
+      runId: 'run-x',
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: published.capsuleEvidenceSha256 },
+      },
+    },
+  });
+  assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
+  fs.rmSync(root, { recursive: true, force: true });
   assert.throws(() => capsule({
-    config: runtimeConfig({ workspaceMode: 'isolated-python' }),
-  }), /refuses isolated-python/);
+    config,
+    workspaceAttestation: null,
+  }), /workspace capability attestation/);
 });
 
 test('migrated diagnostics cannot publish an official score', () => {
-  const observed = { value: 0.75, origin: 'aggregateScorecard.score' };
+  const observed = {
+    scoreStatus: 'official',
+    officialScore: { value: 0.75, origin: 'scorecardEvidence.score' },
+  };
   const result = classifyCapsuleResult({
     runClass: 'diagnostic-migrated',
     comparable: false,
@@ -434,5 +624,19 @@ test('migrated diagnostics cannot publish an official score', () => {
   assert.equal(result.status, 'diagnostic-migrated');
   assert.equal(result.officialScore.value, null);
   assert.equal(result.officialScore.origin, 'unavailable');
-  assert.deepEqual(result.unacceptedScoreEvidence, observed);
+  assert.deepEqual(result.unacceptedScoreEvidence, observed.officialScore);
+});
+
+test('mixed-session recovery remains diagnostic with its rejected score evidence', () => {
+  const scorecardAuthority = {
+    scoreStatus: 'rejected',
+    rejectionReason: 'published executions span multiple scorecard sessions',
+    officialScore: { value: null, origin: 'unavailable' },
+    unacceptedScoreEvidence: [{ score: 0.1 }, { score: 0.2 }],
+  };
+  const result = classifyCapsuleResult({ runClass: 'recovered', comparable: true }, scorecardAuthority);
+  assert.equal(result.status, 'diagnostic-recovered');
+  assert.equal(result.officialScore.value, null);
+  assert.match(result.officialScore.reason, /multiple scorecard sessions/);
+  assert.deepEqual(result.unacceptedScoreEvidence, scorecardAuthority.unacceptedScoreEvidence);
 });

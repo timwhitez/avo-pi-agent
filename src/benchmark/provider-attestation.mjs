@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
 
+import {
+  assertProviderCapabilities,
+  providerCapabilityDigest,
+} from '../provider-capabilities.mjs';
+
 const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{16,256}$/;
 const RESPONSE_PREFIX = 'REAL_PROVIDER_OK:';
 export const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -37,6 +42,12 @@ export async function preflightResponsesProvider(config, {
   const responseLimit = normalizeResponseLimit(maxResponseBytes);
   const challenge = validateChallenge(nonce);
   const expected = `${RESPONSE_PREFIX}${challenge}`;
+  const capabilities = assertProviderCapabilities(config.capabilities);
+  const mappedReasoningEffort = capabilities.reasoning.thinkingLevelMap[config.reasoningEffort];
+  if (mappedReasoningEffort === null || mappedReasoningEffort === undefined) {
+    throw new Error('provider attestation reasoning effort contradicts the capability manifest');
+  }
+  const requestedMaxOutputTokens = Math.min(128, capabilities.limits.maxOutputTokens);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -62,8 +73,10 @@ export async function preflightResponsesProvider(config, {
             ].join('\n'),
           }],
         }],
-        reasoning: { effort: config.reasoningEffort },
-        max_output_tokens: 128,
+        ...(capabilities.reasoning.supported
+          ? { reasoning: { effort: mappedReasoningEffort } }
+          : {}),
+        max_output_tokens: requestedMaxOutputTokens,
       }),
       signal: controller.signal,
     });
@@ -103,7 +116,12 @@ export async function preflightResponsesProvider(config, {
     outputVerified: true,
     challengeVerified: true,
     responseFreshnessVerified: true,
-    attestationVersion: 2,
+    attestationVersion: 3,
+    capabilityManifestSha256: providerCapabilityDigest(capabilities),
+    requestedReasoningEffort: config.reasoningEffort,
+    effectiveReasoningEffort: capabilities.reasoning.supported ? mappedReasoningEffort : null,
+    requestedMaxOutputTokens,
+    requestAccepted: true,
     responseIdHash: sha256(responseId),
     challengeHash: sha256(challenge),
     responseHash: sha256(outputText),

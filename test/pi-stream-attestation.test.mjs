@@ -4,28 +4,66 @@ import fs from 'node:fs';
 
 import { validatePiStreamAttestation } from '../src/benchmark/pi-stream-attestation.mjs';
 
-test('Pi stream attestation requires one successful production SDK tool call', () => {
+test('Pi stream attestation requires production schemas, continuation, and a large tool result', () => {
   assert.deepEqual(validatePiStreamAttestation({
     ok: true,
     loopKind: 'pi-sdk',
-    toolCalls: 1,
+    toolCalls: 2,
     errorPresent: false,
+    productionToolCount: 14,
+    providerRequestCount: 2,
+    capabilityManifestSha256: 'a'.repeat(64),
+    productionToolSchemaSha256: 'b'.repeat(64),
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultChars: 16_384,
+    largeToolResultVerified: true,
+    largeToolResultTruncated: false,
     outerTurns: 1,
     elapsedMs: 20,
   }), {
     ok: true,
     loopKind: 'pi-sdk',
     toolProtocolVerified: true,
-    toolCalls: 1,
+    toolCalls: 2,
+    productionToolCount: 14,
+    providerRequestCount: 2,
+    capabilityManifestSha256: 'a'.repeat(64),
+    productionToolSchemaSha256: 'b'.repeat(64),
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultChars: 16_384,
+    largeToolResultVerified: true,
+    largeToolResultTruncated: false,
     outerTurns: 1,
     elapsedMs: 20,
   });
   for (const payload of [
     null,
-    { ok: false, loopKind: 'pi-sdk', toolCalls: 1, errorPresent: false },
-    { ok: true, loopKind: 'portable', toolCalls: 1, errorPresent: false },
+    { ok: false, loopKind: 'pi-sdk', toolCalls: 2, errorPresent: false },
+    { ok: true, loopKind: 'portable', toolCalls: 2, errorPresent: false },
     { ok: true, loopKind: 'pi-sdk', toolCalls: 0, errorPresent: false },
-    { ok: true, loopKind: 'pi-sdk', toolCalls: 1, errorPresent: true },
+    { ok: true, loopKind: 'pi-sdk', toolCalls: 2, errorPresent: true },
+    {
+      ok: true,
+      loopKind: 'pi-sdk',
+      toolCalls: 2,
+      errorPresent: false,
+      productionToolCount: 14,
+      providerRequestCount: 2,
+      capabilityManifestSha256: 'a'.repeat(64),
+      productionToolSchemaSha256: 'b'.repeat(64),
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultChars: 16_384,
+      largeToolResultVerified: true,
+      largeToolResultTruncated: true,
+      outerTurns: 1,
+      elapsedMs: 20,
+    },
   ]) assert.throws(() => validatePiStreamAttestation(payload), /Pi stream attestation/);
 });
 

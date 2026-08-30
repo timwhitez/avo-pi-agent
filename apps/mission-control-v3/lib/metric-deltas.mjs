@@ -5,6 +5,7 @@ export const SUMMARY_DELTA_FIELDS = Object.freeze([
   'diagnosticScore',
   'games',
   'wins',
+  'levelsCompleted',
   'totalLevels',
   'totalActions',
   'openFindings',

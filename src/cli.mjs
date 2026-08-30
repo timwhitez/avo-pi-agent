@@ -4,10 +4,12 @@ import path from 'node:path';
 import { loadLocalEnv, getRuntimeConfig, publicConfigSummary } from './config.mjs';
 import { ArcBridgeClient } from './arc/bridge-client.mjs';
 import { deriveActionBudget, deriveOuterTurnBudget } from './arc/action-budget.mjs';
-import { loadLatestSessionScorecard, loadResumedRecords, resolveResumeDirectory, saveResumedRecord, saveSessionScorecard } from './benchmark/resume-cache.mjs';
+import { loadResumedRecords, loadSessionScorecards, resolveResumeDirectory, saveResumedRecord, saveSessionScorecard } from './benchmark/resume-cache.mjs';
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
+import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
+import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
   assertRunStateMatchesInitial,
   inspectRunState,
@@ -20,6 +22,13 @@ import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
+import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
+import {
+  evaluateScorecardCoverage,
+  hashExecutionId,
+  normalizeScorecardSnapshot,
+  reconcileExactScorecardProgress,
+} from './benchmark/scorecard-evidence.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
 
@@ -48,37 +57,14 @@ function parseSelection(args) {
 
 async function providerCheck() {
   const config = getRuntimeConfig();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const response = await fetch(`${config.provider.baseUrl}/responses`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        authorization: `Bearer ${config.provider.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: config.provider.model,
-        input: 'Reply with exactly: OK',
-        reasoning: { effort: config.provider.reasoningEffort },
-        max_output_tokens: 16,
-        stream: false,
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Responses API returned HTTP ${response.status}: ${text.slice(0, 500)}`);
-    const payload = JSON.parse(text);
-    console.log(JSON.stringify({
-      ok: true,
-      status: response.status,
-      responseIdPresent: Boolean(payload.id),
-      outputPresent: Boolean(payload.output || payload.output_text),
-      config: publicConfigSummary(config),
-    }, null, 2));
-  } finally {
-    clearTimeout(timer);
-  }
+  const attestation = await preflightResponsesProvider(config.provider);
+  console.log(JSON.stringify({
+    ok: true,
+    requestAttested: attestation.ok,
+    capabilityManifestSha256: attestation.capabilityManifestSha256,
+    usage: attestation.usage,
+    config: publicConfigSummary(config),
+  }, null, 2));
 }
 
 async function offlineDemo(args) {
@@ -89,13 +75,13 @@ async function offlineDemo(args) {
   const results = [];
   for (const [index, environment] of environments.entries()) {
     const loop = createPortablePiLoop({ maxSteps: config.maxActions });
-    const agent = configureWorkspace(new AvoArcAgent({
+    const agent = new AvoArcAgent({
       gameId: environment.gameId,
       environment,
       loop,
       config,
       logger: quietLogger,
-    }), config);
+    });
     const result = await agent.run();
     results.push(result);
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
@@ -114,18 +100,21 @@ async function listPublic() {
 
 async function runPublic(args) {
   const config = getRuntimeConfig();
+  let workspaceAttestation = null;
   const selection = parseSelection(args);
   const results = [];
   let replayedGames = 0;
+  const replayedGameIds = new Set();
   const environment = new ArcBridgeClient({ python: config.python });
   const progress = createProgressStatusReporter();
-  let aggregateScorecard = null;
+  let sessionScorecards = [];
   let selected = [];
   let runError = null;
   let resumeDir = null;
   let runCapsuleHash = null;
   let runClass = null;
   let runCapsule = null;
+  let runCapsuleBudgets = null;
   let sourceCapsuleHashes = [];
   let resumedRecords = new Map();
 
@@ -135,6 +124,7 @@ async function runPublic(args) {
   if (process.env.AVO_REQUIRE_REAL_PROVIDER === '1' && !resumeDir) {
     throw new Error('real-provider public execution requires a capsule-bound resume directory');
   }
+  workspaceAttestation = await attestWorkspaceCapability(config);
   if (resumeDir) {
     runCapsuleHash = requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH);
     runClass = requiredRunClass(process.env.AVO_RUN_CLASS);
@@ -153,6 +143,7 @@ async function runPublic(args) {
       capsule: runCapsule,
       python: config.python,
       config,
+      workspaceAttestation,
       stateBinding,
       requireInitialState: runClass !== 'recovered',
     });
@@ -166,6 +157,9 @@ async function runPublic(args) {
       assertRunStateMatchesInitial(stateBinding, runCapsule.definition.initialState);
     }
   }
+  if (workspaceAttestation.effective.container?.imageId) {
+    config.workspaceContainerImage = workspaceAttestation.effective.container.imageId;
+  }
 
   try {
     await environment.start();
@@ -175,7 +169,13 @@ async function runPublic(args) {
       return selection.all || selection.games.includes(short) || selection.games.includes(env.game_id);
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
-    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, selected);
+    if (runCapsule) {
+      verifyRunCapsuleGameSet(runCapsule, selected);
+      runCapsuleBudgets = new Map(runCapsule.definition.task.gameBudgets.map((budget) => [
+        budget.versionedGameId,
+        budget,
+      ]));
+    }
 
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
@@ -192,59 +192,114 @@ async function runPublic(args) {
         return;
       }
       replayedGames += 1;
-      const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
+      replayedGameIds.add(gameId);
+      const frozenBudget = runCapsuleBudgets?.get(versionedGameId);
+      const actionBudget = frozenBudget?.actionBudget
+        ?? deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
         maxActions: actionBudget.total,
-        maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
+        maxOuterTurns: frozenBudget?.outerTurnBudget
+          ?? deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
       };
       let observedActions = 0;
       let observedLevels = 0;
-      let observedWinLevels = Number(info.level_count || 0);
-      const loop = await createPiSdkLoop(gameConfig, {
-        onEvent(event) {
-          if (event.type !== 'tool_execution_end') return;
-          process.stdout.write('.');
-          if (event.toolName !== 'act') return;
-          observedActions += 1;
-          const frame = event.result?.details?.frame || {};
-          observedLevels = Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels);
-          observedWinLevels = Number(frame.winLevels ?? frame.win_levels ?? observedWinLevels);
-          progress.gameProgress({
-            index: ordinal,
-            total: selected.length,
+      let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
+      let activeAttempt = null;
+      let contextSequence = 0;
+      const onLoopEvent = (event) => {
+        if (event.type === 'avo_runtime_status'
+            || event.type === 'avo_context_compaction'
+            || event.type === 'avo_provider_request') {
+          process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject({
+            ...event,
             gameId,
-            actions: observedActions,
-            levelsCompleted: observedLevels,
-            winLevels: observedWinLevels,
-            state: String(frame.state || 'PLAYING'),
-          });
-        },
-      });
+            versionedGameId,
+            attempt: activeAttempt,
+            contextSequence: ++contextSequence,
+          }))}\n`);
+          return;
+        }
+        if (event.type !== 'tool_execution_end') return;
+        process.stdout.write('.');
+        if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
+        observedActions += 1;
+        const frame = event.result?.details?.frame || {};
+        observedLevels = Math.max(
+          observedLevels,
+          Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels),
+        );
+        observedTotalLevels ??= positiveCountOrNull(
+          frame.totalLevels ?? frame.total_levels,
+        );
+        progress.gameProgress({
+          index: ordinal,
+          total: selected.length,
+          gameId,
+          actions: observedActions,
+          levelsCompleted: observedLevels,
+          totalLevels: observedTotalLevels,
+          state: String(frame.state || 'PLAYING'),
+        });
+      };
       console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
+        const executions = [];
+        const executionOccurrences = new Map();
+        const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          activeAttempt = attempt;
+          const consumed = attemptResults.length
+            ? aggregateAttemptTelemetry(attemptResults)
+            : { actions: 0, outerTurns: 0 };
+          const remainingActions = actionBudget.total - consumed.actions;
+          const remainingOuterTurns = gameConfig.maxOuterTurns - consumed.outerTurns;
+          if (remainingActions < 1 || remainingOuterTurns < 1) break;
+          const attemptConfig = {
+            ...gameConfig,
+            maxActions: remainingActions,
+            maxOuterTurns: remainingOuterTurns,
+          };
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
-          const agent = configureWorkspace(new AvoArcAgent({
+          const loop = await createPiSdkLoop(attemptConfig, { onEvent: onLoopEvent });
+          const agent = new AvoArcAgent({
             gameId,
             environment: env,
             loop,
-            config: gameConfig,
+            config: attemptConfig,
             captureScorecard: false,
-          }), gameConfig);
+          });
+          const agentResult = await agent.run();
+          attemptResults.push(agentResult);
+          const executionGuids = agent.scorecardExecutionGuids();
+          if (executionGuids.length === 0) {
+            throw new Error(`${versionedGameId} produced no scorecard execution identity`);
+          }
+          for (const guid of executionGuids) {
+            const executionIdSha256 = hashExecutionId(guid, `${versionedGameId} execution GUID`);
+            const executionOccurrence = executionOccurrences.get(executionIdSha256) ?? 0;
+            executionOccurrences.set(executionIdSha256, executionOccurrence + 1);
+            executions.push({ versionedGameId, executionIdSha256, executionOccurrence });
+          }
+          const attemptTelemetry = aggregateAttemptTelemetry(attemptResults);
           result = {
-            ...await agent.run(),
+            ...agentResult,
+            ...attemptTelemetry,
+            ...aggregateAttemptProgress(attemptResults),
             versionedGameId,
+            executions: executions.slice(),
             actionBudget,
             outerTurnBudget: gameConfig.maxOuterTurns,
           };
           if (!result.error || isWinState(result.state)) break;
           // A transient provider fault must not sacrifice the whole game:
           // durable memory persists across attempts, so a retry re-grounds.
-          if (attempt < maxAttempts) {
+          if (attempt < maxAttempts
+              && result.actions < actionBudget.total
+              && result.outerTurns < gameConfig.maxOuterTurns) {
             const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
             console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(result.error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
             await sleep(delayMs);
@@ -259,7 +314,7 @@ async function runPublic(args) {
           stateBinding: currentStateBinding(config),
         });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
-        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
+        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.totalLevels ?? '?'} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
         progress.gameFinished({
           index: ordinal,
@@ -268,7 +323,7 @@ async function runPublic(args) {
           result: {
             state: 'ERROR',
             levelsCompleted: observedLevels,
-            winLevels: observedWinLevels,
+            totalLevels: observedTotalLevels,
             actions: observedActions,
             error: true,
           },
@@ -311,26 +366,32 @@ async function runPublic(args) {
   } catch (error) {
     runError = error;
   } finally {
-    aggregateScorecard = await environment.scorecard().catch(() => null);
-    if (resumeDir && replayedGames > 0) {
-      // The session actually played games: its scorecard is the latest real
-      // score evidence for this run.
-      saveSessionScorecard(resumeDir, {
-        replayedGames,
-        scorecard: aggregateScorecard,
-        capsuleHash: runCapsuleHash,
-        allowedCapsuleHashes: sourceCapsuleHashes,
-        stateBinding: currentStateBinding(config),
-      });
-    } else if (resumeDir && replayedGames === 0) {
-      // Every game came from checkpoints; a fresh empty session's scorecard
-      // must not masquerade as the run's official score.
-      const saved = loadLatestSessionScorecard(resumeDir, {
-        capsuleHash: runCapsuleHash,
-        allowedCapsuleHashes: sourceCapsuleHashes,
-        stateBinding: currentStateBinding(config),
-      });
-      if (saved?.scorecard) aggregateScorecard = saved.scorecard;
+    try {
+      if (replayedGames > 0) {
+        const evidence = normalizeScorecardSnapshot(await environment.scorecardEvidence());
+        const replayedRecords = results.filter((result) => result && replayedGameIds.has(result.gameId));
+        if (resumeDir) {
+          saveSessionScorecard(resumeDir, {
+            evidence,
+            records: replayedRecords,
+            capsuleHash: runCapsuleHash,
+            allowedCapsuleHashes: sourceCapsuleHashes,
+            stateBinding: currentStateBinding(config),
+          });
+        } else {
+          sessionScorecards = [evidence];
+        }
+      }
+      if (resumeDir) {
+        sessionScorecards = loadSessionScorecards(resumeDir, {
+          capsuleHash: runCapsuleHash,
+          allowedCapsuleHashes: sourceCapsuleHashes,
+          stateBinding: currentStateBinding(config),
+          requireStateMatch: runClass !== 'diagnostic-migrated',
+        });
+      }
+    } catch (error) {
+      runError ??= error;
     }
     await environment.close();
     await progress.flush();
@@ -338,7 +399,7 @@ async function runPublic(args) {
 
   const completed = results.filter(Boolean);
   const report = makeReport('official-public-environments', completed, config, {
-    aggregateScorecard,
+    scorecards: sessionScorecards,
     expectedGames: selected.length,
     runError,
   });
@@ -346,6 +407,7 @@ async function runPublic(args) {
   report.runClass = runClass;
   if (resumeDir) {
     report.scorecardCoverage = {
+      ...report.scorecardCoverage,
       replayedGames,
       checkpointedGames: Math.max(0, completed.length - replayedGames),
     };
@@ -361,14 +423,6 @@ async function runPublic(args) {
   // game coverage and official score origin are validated by the outer runner.
 }
 
-function configureWorkspace(agent, config) {
-  agent.workspace.mode = config.workspaceMode || 'files-only';
-  agent.workspace.timeoutMs = config.workspacePythonTimeoutMs || 10_000;
-  agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
-  agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
-  return agent;
-}
-
 function currentStateBinding(config) {
   return inspectRunState({
     memoryDir: config.memoryDir,
@@ -376,12 +430,16 @@ function currentStateBinding(config) {
   });
 }
 
-function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
-  const wins = results.filter((r) => r.won).length;
-  const safeResults = redactRuntimeObject(results);
-  const safeScorecard = redactRuntimeObject(aggregateScorecard);
+function makeReport(kind, results, config, { scorecards = [], expectedGames = results.length, runError = null } = {}) {
+  let safeResults = redactRuntimeObject(results);
+  let scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
+  if (scoreAuthority.coverage.exact) {
+    safeResults = reconcileExactScorecardProgress(scoreAuthority.scorecards, safeResults);
+    scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
+  }
+  const wins = safeResults.filter((result) => result.won).length;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: process.env.AVO_REAL_RUN_ID || null,
     kind,
     createdAt: new Date().toISOString(),
@@ -392,26 +450,50 @@ function makeReport(kind, results, config, { aggregateScorecard = null, expected
       games: safeResults.length,
       wins,
       winRate: safeResults.length ? wins / safeResults.length : 0,
-      totalLevels: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
+      totalLevelsCompleted: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
+      totalLevels: sumReportedCount(safeResults, 'totalLevels'),
       totalActions: safeResults.reduce((sum, r) => sum + r.actions, 0),
+      totalGameplayActions: sumReportedCount(safeResults, 'gameplayActions'),
+      totalResets: sumReportedCount(safeResults, 'resets'),
+      totalRejectedCommands: sumReportedCount(safeResults, 'rejectedCommands'),
+      totalTerminalRejectedCommands: sumReportedCount(safeResults, 'terminalRejectedCommands'),
+      totalPostTerminalGameplayActions: sumReportedCount(safeResults, 'postTerminalGameplayActions'),
+      totalFullResets: sumReportedCount(safeResults, 'fullResets'),
+      totalActionSequences: sumReportedCount(safeResults, 'actionSequences'),
+      totalSequenceActionsRequested: sumReportedCount(safeResults, 'sequenceActionsRequested'),
+      totalSequenceActionsExecuted: sumReportedCount(safeResults, 'sequenceActionsExecuted'),
+      totalSequenceActionsSkipped: sumReportedCount(safeResults, 'sequenceActionsSkipped'),
+      totalSequenceCancellations: sumReportedCount(safeResults, 'sequenceCancellations'),
+      totalMemoryClaimsProposed: sumReportedCount(safeResults, 'memoryClaimsProposed'),
+      totalMemoryClaimsConfirmed: sumReportedCount(safeResults, 'memoryClaimsConfirmed'),
+      totalMemoryClaimsCorrected: sumReportedCount(safeResults, 'memoryClaimsCorrected'),
+      totalMemoryClaimsSurfaced: sumReportedCount(safeResults, 'memoryClaimsSurfaced'),
       allWon: !runError && expectedGames > 0 && safeResults.length === expectedGames && wins === expectedGames,
-      officialScore: extractOfficialScore(safeScorecard),
+      officialScore: scoreAuthority.officialScore.value,
     },
-    aggregateScorecard: safeScorecard,
+    scoreStatus: scoreAuthority.scoreStatus,
+    scoreRejectionReason: scoreAuthority.rejectionReason,
+    scorecardCoverage: scoreAuthority.coverage,
+    scorecardEvidence: redactRuntimeObject(scoreAuthority.scorecards),
+    officialScore: scoreAuthority.officialScore,
+    ...(scoreAuthority.unacceptedScoreEvidence
+      ? { unacceptedScoreEvidence: scoreAuthority.unacceptedScoreEvidence }
+      : {}),
+    aggregateScorecard: scoreAuthority.scoreStatus === 'official'
+      ? { score: scoreAuthority.officialScore.value }
+      : null,
     results: safeResults,
   };
 }
 
-function extractOfficialScore(scorecard) {
-  if (!scorecard || typeof scorecard !== 'object') return null;
-  const candidates = [
-    scorecard.score,
-    scorecard.total_score,
-    scorecard.totalScore,
-    scorecard.aggregate_score,
-    scorecard.aggregateScore,
-  ];
-  return candidates.find((value) => typeof value === 'number' && Number.isFinite(value)) ?? null;
+function sumReportedCount(results, field) {
+  return results.every((result) => Number.isInteger(result?.[field]) && result[field] >= 0)
+    ? results.reduce((sum, result) => sum + result[field], 0)
+    : null;
+}
+
+function positiveCountOrNull(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function requiredCapsuleHash(value) {

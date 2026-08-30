@@ -13,9 +13,11 @@ export class OfflineDemoEnvironment {
     this.gameId = id;
     this.size = size;
     this.seed = seed;
-    this.winLevels = 3;
+    this.totalLevels = 3;
     this.level = 0;
     this.steps = 0;
+    this.gameplayActionsForwarded = 0;
+    this.postTerminalGameplayActions = 0;
     this.resetLevel();
   }
 
@@ -34,10 +36,10 @@ export class OfflineDemoEnvironment {
       frame: grid,
       state: this.state,
       levels_completed: this.level,
-      win_levels: this.winLevels,
+      total_levels: this.totalLevels,
       guid: `${this.gameId}-${this.level}-${this.steps}`,
       full_reset: false,
-      available_actions: ['RESET', ...Object.keys(DIRECTIONS)],
+      available_actions: Object.keys(DIRECTIONS),
     };
   }
 
@@ -45,13 +47,17 @@ export class OfflineDemoEnvironment {
   async observe() { return this.frame(); }
 
   async reset() {
+    this.steps += 1;
     this.resetLevel();
     return this.frame();
   }
 
   async step(action) {
+    this.gameplayActionsForwarded += 1;
+    if (['WIN', 'GAME_OVER', 'ERROR'].includes(this.state)) {
+      this.postTerminalGameplayActions += 1;
+    }
     this.steps += 1;
-    if (action === 'RESET') return this.reset();
     const delta = DIRECTIONS[action];
     if (!delta) throw new Error(`unsupported offline action: ${action}`);
     const x = Math.max(0, Math.min(this.size - 1, this.player[0] + delta[0]));
@@ -59,7 +65,7 @@ export class OfflineDemoEnvironment {
     this.player = [x, y];
     if (x === this.goal[0] && y === this.goal[1]) {
       this.level += 1;
-      if (this.level >= this.winLevels) this.state = 'WIN';
+      if (this.level >= this.totalLevels) this.state = 'WIN';
       else this.resetLevel();
     }
     return this.frame();
@@ -67,6 +73,13 @@ export class OfflineDemoEnvironment {
 
   async scorecard() {
     return { kind: 'offline-contract-demo', levels_completed: this.level, actions: this.steps };
+  }
+
+  async lifecycle() {
+    return {
+      gameplay_actions_forwarded: this.gameplayActionsForwarded,
+      post_terminal_gameplay_actions: this.postTerminalGameplayActions,
+    };
   }
 
   async close() {}

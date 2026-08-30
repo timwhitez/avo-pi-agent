@@ -123,6 +123,27 @@ test('requires a complete score-bearing competition report before parsing', () =
   }
 });
 
+test('retains mixed-session recovery as non-official diagnostic evidence', () => {
+  const root = tempRoot('avo-mc-recovered-');
+  try {
+    const file = path.join(root, 'run-1.json');
+    const recovered = {
+      runId: 'run-1',
+      status: 'diagnostic-recovered',
+      completeness: { complete: true },
+      scoreStatus: 'rejected',
+      scoreRejectionReason: 'published executions span multiple scorecard sessions',
+      officialScore: { value: null, origin: 'unavailable' },
+    };
+    fs.writeFileSync(file, JSON.stringify(recovered));
+    assert.equal(loadExactRunReport(contract(root, 'run-1', 'competition')).status, 'diagnostic-recovered');
+    fs.writeFileSync(file, JSON.stringify({ ...recovered, officialScore: { value: 0.1, origin: 'scorecardEvidence.score' } }));
+    assert.throws(() => loadExactRunReport(contract(root, 'run-1', 'competition')), /cannot carry/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('signals the whole POSIX process group', () => {
   const calls = [];
   signalProcessTree({ pid: 42 }, 'SIGTERM', {

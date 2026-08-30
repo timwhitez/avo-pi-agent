@@ -16,6 +16,12 @@ const provider = {
   OPENAI_API_KEY: 'provider-secret',
   OPENAI_MODEL: 'model-id',
   OPENAI_REASONING_EFFORT: 'max',
+  OPENAI_CONTEXT_WINDOW: '128000',
+  OPENAI_MAX_OUTPUT_TOKENS: '16000',
+  OPENAI_INPUT_MODALITIES: 'text',
+  OPENAI_REASONING_EFFORTS: 'high,max',
+  OPENAI_SUPPORTS_DEVELOPER_ROLE: '1',
+  OPENAI_CACHE_RETENTION: 'none',
 };
 
 function hostileSource() {
@@ -27,10 +33,15 @@ function hostileSource() {
     ARC_API_KEY: 'registered-key-that-must-be-cleared',
     ARC_PYTHON: '.venv/bin/python',
     AVO_MAX_ACTIONS: '1000',
+    AVO_BASELINE_ACTION_MULTIPLIER: '2',
+    AVO_FALLBACK_ACTIONS: '80',
     AVO_RUN_CAPSULE_HASH: 'a'.repeat(64),
     AVO_RUN_CLASS: 'cold-start',
     AVO_GAME_ATTEMPTS: '3',
     AVO_TRANSCRIPT_MAX_MESSAGES: '160',
+    AVO_TRANSCRIPT_MAX_TOKENS: '120000',
+    AVO_MEMORY_SURFACE_LIMIT: '0',
+    AVO_POLICY_PROFILE: 'minimal-v1',
     AVO_MISSION_CONTROL_ACCESS_TOKEN: 'control-secret',
     GITHUB_TOKEN: 'github-secret',
     AWS_SECRET_ACCESS_KEY: 'cloud-secret',
@@ -49,6 +60,8 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   const env = buildAgentChildEnvironment({ source: hostileSource() });
   assert.equal(env.OPENAI_API_KEY, provider.OPENAI_API_KEY);
   assert.equal(env.OPENAI_MODEL, provider.OPENAI_MODEL);
+  assert.equal(env.OPENAI_CONTEXT_WINDOW, provider.OPENAI_CONTEXT_WINDOW);
+  assert.equal(env.OPENAI_MAX_OUTPUT_TOKENS, provider.OPENAI_MAX_OUTPUT_TOKENS);
   assert.equal(env.ARC_API_KEY, '');
   assert.equal(env.AVO_ARC_AUTH_MODE, 'anonymous-auto');
   assert.equal(env.AVO_DISABLE_DOTENV, '1');
@@ -56,7 +69,12 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   assert.equal(env.AVO_RUN_CAPSULE_HASH, 'a'.repeat(64));
   assert.equal(env.AVO_RUN_CLASS, 'cold-start');
   assert.equal(env.AVO_GAME_ATTEMPTS, '3');
+  assert.equal(env.AVO_BASELINE_ACTION_MULTIPLIER, '2');
+  assert.equal(env.AVO_FALLBACK_ACTIONS, '80');
   assert.equal(env.AVO_TRANSCRIPT_MAX_MESSAGES, '160');
+  assert.equal(env.AVO_TRANSCRIPT_MAX_TOKENS, '120000');
+  assert.equal(env.AVO_MEMORY_SURFACE_LIMIT, '0');
+  assert.equal(env.AVO_POLICY_PROFILE, 'minimal-v1');
   for (const key of [
     'AVO_MISSION_CONTROL_ACCESS_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY',
     'NPM_TOKEN', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PYTHONPATH', 'LD_PRELOAD',

@@ -27,24 +27,32 @@ export class StallSupervisor {
   }
 
   status({ legalActions = [], memory = null, knowledgeHints = [] } = {}) {
-    const tail = this.events.slice(-this.windowSize);
+    const latestEpisodeId = this.events.at(-1)?.episodeId ?? null;
+    const episodeEvents = latestEpisodeId === null
+      ? this.events
+      : this.events.filter((event) => event.episodeId === latestEpisodeId);
+    const tail = episodeEvents.slice(-this.windowSize);
     if (tail.length < this.windowSize) return idleStatus();
 
-    const hashes = [...new Set(tail.map((event) => event.afterHash || event.frameHash).filter(Boolean))].sort();
+    const hashes = [...new Set(tail.map((event) => (
+      event.observationContentHash || event.afterHash || event.frameHash
+    )).filter(Boolean))].sort();
     const levels = [...new Set(tail.map((event) => Number(event.levelsCompleted || 0)))].sort((a, b) => a - b);
-    const actions = tail.map((event) => event.action).filter(Boolean);
+    const transitions = tail.map((event) => (
+      event.transitionId || (event.action ? `legacy-action:${event.action}` : null)
+    )).filter(Boolean);
     const repeatedState = hashes.length <= 2 && levels.length === 1;
-    const cycle = detectCycle(actions);
+    const cycle = detectCycle(transitions);
     const noProgress = tail.every((event) => Number(event.levelDelta || 0) <= 0);
     if ((!repeatedState && !cycle) || !noProgress) {
       this.resolveActiveEpisode(tail.at(-1), 'pattern-cleared');
       return idleStatus();
     }
 
-    const reason = repeatedState ? 'repeated-state plateau' : `repeating action cycle (period ${cycle})`;
+    const reason = repeatedState ? 'repeated-state plateau' : `repeating transition cycle (period ${cycle})`;
     const pattern = repeatedState
       ? `states=${hashes.join('|')};level=${levels[0]}`
-      : `cycle=${actions.slice(0, cycle).join('|')};period=${cycle};level=${levels.at(-1)}`;
+      : `cycle=${transitions.slice(0, cycle).join('|')};period=${cycle};level=${levels.at(-1)}`;
     const key = `${repeatedState ? 'state' : 'cycle'}:${pattern}`;
     const evidenceRefs = tail.map((event) => event.id).filter(Boolean);
 
@@ -70,6 +78,7 @@ export class StallSupervisor {
         legalActions,
         memory,
         knowledgeHints,
+        history: episodeEvents,
         escalation: false,
       });
     }
@@ -88,6 +97,7 @@ export class StallSupervisor {
         legalActions,
         memory,
         knowledgeHints,
+        history: episodeEvents,
         escalation: true,
       });
     }
@@ -109,11 +119,11 @@ export class StallSupervisor {
     };
   }
 
-  createIntervention({ episode, tail, legalActions, memory, knowledgeHints, escalation }) {
+  createIntervention({ episode, tail, legalActions, memory, knowledgeHints, history, escalation }) {
     const recentActions = new Set(tail.map((event) => event.action));
     const untried = legalActions.filter((action) => action !== 'RESET' && !recentActions.has(action));
     const unknownSemantics = legalActions.filter((action) => action !== 'RESET' && !memory?.actionSemantics?.[action]);
-    const lastDistinct = findLastDistinct(this.events);
+    const lastDistinct = findLastDistinct(history);
     const directions = [
       {
         id: 'contrast-transition',
@@ -139,7 +149,7 @@ export class StallSupervisor {
       {
         id: 'planned-reset',
         rationale: 'A reset is useful only when it creates a new controlled experiment rather than replaying the failed branch.',
-        nextExperiment: 'Use RESET only after recording the failed hypothesis and specifying a materially different opening sequence.',
+        nextExperiment: 'Call the reset controller only after recording the failed hypothesis and specifying a materially different opening sequence.',
       },
     ];
     if (escalation) {
@@ -218,10 +228,10 @@ function detectCycle(actions) {
 function findLastDistinct(events) {
   const latest = events.at(-1);
   if (!latest) return null;
-  const latestHash = latest.afterHash || latest.frameHash;
+  const latestHash = latest.observationContentHash || latest.afterHash || latest.frameHash;
   for (let index = events.length - 2; index >= 0; index -= 1) {
     const event = events[index];
-    if ((event.afterHash || event.frameHash) !== latestHash) return event;
+    if ((event.observationContentHash || event.afterHash || event.frameHash) !== latestHash) return event;
   }
   return null;
 }

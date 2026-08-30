@@ -41,16 +41,39 @@ export function validatePiStreamAttestation(payload) {
   if (
     payload.ok !== true
     || payload.loopKind !== 'pi-sdk'
-    || payload.toolCalls !== 1
+    || payload.toolCalls !== 2
     || payload.errorPresent !== false
+    || payload.productionToolSchemaVerified !== true
+    || payload.requestedVsEffectiveVerified !== true
+    || payload.multiTurnContinuationVerified !== true
+    || payload.largeToolResultVerified !== true
+    || payload.largeToolResultTruncated !== false
+    || !isSha256(payload.capabilityManifestSha256)
+    || !isSha256(payload.productionToolSchemaSha256)
+    || !Number.isSafeInteger(payload.productionToolCount)
+    || payload.productionToolCount < 1
+    || !Number.isSafeInteger(payload.providerRequestCount)
+    || payload.providerRequestCount < 2
+    || !Number.isSafeInteger(payload.largeToolResultChars)
+    || payload.largeToolResultChars < 8_192
   ) {
-    throw new Error('Pi stream attestation did not complete one production SDK tool call');
+    throw new Error('Pi stream attestation did not complete the production SDK capability contract');
   }
   return Object.freeze({
     ok: true,
     loopKind: 'pi-sdk',
     toolProtocolVerified: true,
-    toolCalls: 1,
+    toolCalls: 2,
+    productionToolCount: positiveInteger(payload.productionToolCount),
+    providerRequestCount: positiveInteger(payload.providerRequestCount),
+    capabilityManifestSha256: payload.capabilityManifestSha256,
+    productionToolSchemaSha256: payload.productionToolSchemaSha256,
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultChars: positiveInteger(payload.largeToolResultChars),
+    largeToolResultVerified: true,
+    largeToolResultTruncated: false,
     outerTurns: nonNegativeInteger(payload.outerTurns),
     elapsedMs: nonNegativeInteger(payload.elapsedMs),
   });
@@ -68,6 +91,14 @@ function configuredTimeout(value) {
 
 function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function positiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function isSha256(value) {
+  return /^[a-f0-9]{64}$/.test(String(value || ''));
 }
 
 function safeClass(value) {
