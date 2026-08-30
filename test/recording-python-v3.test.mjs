@@ -29,7 +29,24 @@ test('composed recorder closes its protocol pipe and records durable-state marke
       gameId: 'ls20',
       actionSemantics: { ACTION1: 'probe' },
       hypothesisProposals: [{ id: 'proposal-1' }],
-      hypothesisEvaluations: [{ id: 'evaluation-1', proposalId: 'proposal-1', outcome: 'confirmed' }],
+      hypothesisEvaluations: [
+        {
+          id: 'evaluation-1', proposalId: 'proposal-1', outcome: 'confirmed',
+          evaluation: {
+            outcome: 'confirmed', evidenceBoundaryValid: true,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-000001-aaaaaaaaaaaa' }], missingEvidenceRefs: [],
+          },
+        },
+        {
+          id: 'attempt-legacy', proposalId: 'proposal-legacy',
+          evaluation: {
+            correctness: true,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-not-exact' }], missingEvidenceRefs: [],
+          },
+        },
+      ],
       notes: ['private durable note'],
     }));
     const input = `${JSON.stringify({ op: 'step', game_id: 'ls20', action: 'ACTION1' })}\n`;
@@ -56,9 +73,10 @@ test('composed recorder closes its protocol pipe and records durable-state marke
     assert.equal(snapshot.action_semantics_count, 1);
     assert.equal(snapshot.note_count, 1);
     assert.equal(journal.proposal_count, 1);
-    assert.equal(journal.evaluation_count, 1);
+    assert.equal(journal.evaluation_count, 2);
     assert.equal(journal.confirmed_count, 1);
     assert.equal(journal.contradicted_count, 0);
+    assert.equal(journal.inconclusive_count, 1);
     assert.equal(JSON.stringify(records).includes('private durable note'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

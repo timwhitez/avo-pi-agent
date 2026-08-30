@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as CopilotCore from '@copilotkit/react-core';
 import * as CopilotUI from '@copilotkit/react-ui';
+import { extractHypothesisJournal } from '../lib/hypothesis-journal-view.mjs';
 
 const CopilotProvider = CopilotCore.CopilotKit || (({ children }) => children);
 const CopilotSidebar = CopilotUI.CopilotSidebar || (({ children }) => children);
@@ -488,52 +489,6 @@ function normalizeFindings(value) {
   if (Array.isArray(value.findings)) return value.findings;
   if (Array.isArray(value.openFindings)) return value.openFindings;
   return [];
-}
-
-function extractHypothesisJournal(memory) {
-  return memory.map((entry) => ({
-    gameId: entry.gameId,
-    proposals: (entry.value?.hypothesisProposals || entry.value?.candidateProposals
-      || entry.value?.lineage?.proposals || []).map(hypothesisProposalView),
-    evaluations: (entry.value?.hypothesisEvaluations || entry.value?.candidateAttempts
-      || entry.value?.lineage?.attempts || entry.value?.committedLineage || []).map(hypothesisEvaluationView),
-  }));
-}
-
-function hypothesisProposalView(record) {
-  if (!record?.candidate) return record;
-  return {
-    id: record.id,
-    gameId: record.gameId,
-    ...record.candidate,
-    baseline: record.baseline,
-    createdAt: record.createdAt,
-    migrationNote: 'Legacy proposal; no behavior artifact was installed.',
-  };
-}
-
-function hypothesisEvaluationView(record) {
-  if (record?.outcome) return record;
-  const evaluation = record?.evaluation || {};
-  const checks = evaluation.predictionChecks || {};
-  const outcome = evaluation.evaluator === 'system-expiry-v1'
-    ? 'expired'
-    : checks.totalClaims > 0 && checks.unmatchedPredictions?.length === 0
-      ? checks.matchedClaims === checks.totalClaims ? 'confirmed' : 'contradicted'
-      : evaluation.correctness === true ? 'confirmed' : 'inconclusive';
-  return {
-    id: record?.id,
-    proposalId: record?.proposalId,
-    gameId: record?.gameId,
-    hypothesis: record?.candidate?.hypothesis,
-    plan: record?.candidate?.plan,
-    predictions: record?.candidate?.predictions,
-    outcome,
-    evidence: evaluation.evidence || [],
-    predictionChecks: checks,
-    reasons: [...(evaluation.reasons || []), 'Legacy labels removed: this record did not install behavior.'],
-    evaluatedAt: evaluation.evaluatedAt || record?.evaluatedAt,
-  };
 }
 
 function extractSupervisor(memory, events) {

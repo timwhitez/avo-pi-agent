@@ -29,7 +29,14 @@ test('EOF-safe full-evidence recorder preserves streaming and exits cleanly', (t
       gameId: 'ls20',
       actionSemantics: { ACTION1: 'probe' },
       hypothesisProposals: [{ id: 'p-1' }],
-      hypothesisEvaluations: [{ id: 'e-1', proposalId: 'p-1', outcome: 'confirmed' }],
+      hypothesisEvaluations: [{
+        id: 'e-1', proposalId: 'p-1', outcome: 'confirmed',
+        evaluation: {
+          outcome: 'confirmed', evidenceBoundaryValid: true,
+          predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+          evidence: [{ id: 'evidence-000001-aaaaaaaaaaaa' }], missingEvidenceRefs: [],
+        },
+      }],
       supervisorInterventions: [{ evidenceRefs: ['e-1'], directions: [{ nextExperiment: 'different probe' }] }],
       notes: ['private text must remain outside marker streams'],
     }));
