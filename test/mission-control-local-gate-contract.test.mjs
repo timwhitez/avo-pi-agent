@@ -39,6 +39,7 @@ test('validator uses npm ci, executes discovered tests, builds, and never falls 
   assert.match(source, /GITHUB_ACTIONS[\s\S]*refuses GitHub Actions/);
   assert.match(source, /'ci'/);
   assert.doesNotMatch(source, /npm install/);
+  assert.match(source, /'audit'[\s\S]*'--omit=dev'[\s\S]*'--audit-level=moderate'/);
   assert.match(source, /\['--test', \.\.\.before\.testFiles\]/);
   assert.match(source, /\['run', 'build', '--ignore-scripts'\]/);
   assert.match(source, /buildMissionControlChildEnvironment\(process\.env\)/);
@@ -53,10 +54,14 @@ test('standalone tracing stays rooted at the app when the repository has its own
 test('local execution documentation states the current fail-closed boundary', () => {
   const document = read('docs/LOCAL_EXECUTION.md');
   assert.match(document, /Mission Control local gate/);
-  assert.match(document, /2026-08-26/);
+  assert.match(document, /2026-08-30/);
   assert.match(document, /Next\.js 15\.5\.21/);
+  assert.match(document, /Next\.js 16\.3\.3 for the 16\.x line/);
   assert.match(document, /React\/React DOM[\s\S]*19\.1\.9/);
-  assert.match(document, /intentionally adds the enforcement before selecting[\s\S]*final compatible package set and lockfile/i);
-  assert.match(document, /fail during contract\s+preflight/i);
+  assert.match(document, /CopilotKit 1\.69\.3/);
+  assert.match(document, /Next\.js 16\.3\.3/);
+  assert.match(document, /Google Vertex adapter is overridden to 4\.0\.193/);
+  assert.match(document, /production-dependency audit/);
+  assert.match(document, /standalone production build must pass/i);
   assert.match(document, /No GitHub Actions fallback/);
 });

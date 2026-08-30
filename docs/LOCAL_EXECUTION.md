@@ -120,19 +120,20 @@ The contract requires:
 - unchanged manifest, lock, and test corpus after install, tests, and build;
 - a valid `.next/BUILD_ID` and standalone server artifact.
 
-As of **2026-08-26**, the enforced public security floors are Next.js 15.5.21
-for the 15.x line, Next.js 16.2.11 for the 16.x line, and React/React DOM
+As of **2026-08-30**, the enforced public security floors are Next.js 15.5.21
+for the 15.x line, Next.js 16.3.3 for the 16.x line, and React/React DOM
 19.0.8, 19.1.9, or 19.2.8 for their respective lines. These floors correspond
 to the current upstream advisories and are minimums, not a claim that any
 specific CopilotKit combination has already passed this repository's build.
 They must be re-audited when the dependency set changes.
 
-This Draft stack intentionally adds the enforcement before selecting and
-committing the final compatible package set and lockfile. Until the follow-up
-lockfile slice supplies those exact artifacts and a supported-runtime build
-passes, the Mission Control commands and `complete:local` fail during contract
-preflight. That failure is the intended state and must not be presented as a
-completed frontend validation.
+The validated local package contract uses npm 12.0.1, CopilotKit 1.69.3,
+Next.js 16.3.3, OpenAI SDK 6.49.0, and React/React DOM 19.2.8. CopilotKit's
+transitive Google Vertex adapter is overridden to 4.0.193 so its AI SDK and
+Undici closure remains on patched lines. The matching lockfile is committed;
+`npm ci`, the production-dependency audit, all Mission Control tests, and the
+standalone production build must pass without changing either package file.
+Any missing or stale lock remains a contract-preflight failure.
 
 Install, test, and build children receive a utility-only environment. Provider,
 ARC, GitHub, registry-token, database, and unknown values are not forwarded.

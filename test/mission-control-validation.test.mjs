@@ -11,6 +11,7 @@ import {
   assertRuntimeVersions,
   buildMissionControlChildEnvironment,
   inspectMissionControlContract,
+  validateLockedSecurityFloors,
   validateSecurityFloors,
 } from '../src/local/mission-control-validation.mjs';
 
@@ -33,10 +34,23 @@ test('exact-version validator rejects tags and ranges', () => {
 
 test('current Next.js and React security floors fail closed', () => {
   assert.throws(() => validateSecurityFloors({ ...SAFE_DEPENDENCIES, next: '15.5.20' }), /Next\.js.*security floor/);
-  assert.throws(() => validateSecurityFloors({ ...SAFE_DEPENDENCIES, next: '16.2.10' }), /Next\.js.*security floor/);
+  assert.throws(() => validateSecurityFloors({ ...SAFE_DEPENDENCIES, next: '16.3.2' }), /Next\.js.*security floor/);
   assert.throws(() => validateSecurityFloors({ ...SAFE_DEPENDENCIES, react: '19.1.8' }), /react.*security floor/);
   assert.throws(() => validateSecurityFloors({ ...SAFE_DEPENDENCIES, 'react-dom': '19.2.7' }), /react-dom.*security floor/);
   assert.equal(validateSecurityFloors(SAFE_DEPENDENCIES), true);
+});
+
+test('known vulnerable transitive security lines fail closed', () => {
+  for (const [name, version, expected] of [
+    ['postcss', '8.5.22', /PostCSS.*security floor/],
+    ['undici', '6.27.0', /Undici.*security floor/],
+    ['@ai-sdk/provider-utils', '3.0.35', /provider-utils.*security floor/],
+    ['@ai-sdk/google-vertex', '3.0.170', /google-vertex.*security floor/],
+  ]) {
+    assert.throws(() => validateLockedSecurityFloors({
+      [`node_modules/${name}`]: { version },
+    }), expected);
+  }
 });
 
 test('contract rejects a missing package lock', () => {
@@ -92,6 +106,7 @@ test('valid contract records package manager, hashes, exact dependencies and tes
   assert.equal(contract.expectedNpmVersion, '10.9.2');
   assert.equal(contract.nodeMinimum, '22.19.0');
   assert.deepEqual(Object.keys(contract.dependencies).sort(), [...MISSION_CONTROL_REQUIRED_DEPENDENCIES].sort());
+  assert.deepEqual(contract.overrides, { '@ai-sdk/google-vertex': '4.0.193' });
   assert.equal(contract.testFiles.length, 1);
   assert.match(contract.package.sha256, /^[a-f0-9]{64}$/);
   assert.match(contract.lock.sha256, /^[a-f0-9]{64}$/);
@@ -146,6 +161,7 @@ function makeFixture({ includeLock = true, includeTest = true } = {}) {
     engines: { node: '>=22.19.0' },
     scripts: { build: 'next build', test: 'node --test test/*.test.mjs' },
     dependencies: SAFE_DEPENDENCIES,
+    overrides: { '@ai-sdk/google-vertex': '4.0.193' },
   };
   fs.writeFileSync(path.join(app, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   if (includeLock) fs.writeFileSync(path.join(app, 'package-lock.json'), `${JSON.stringify(lockFor(manifest), null, 2)}\n`);
@@ -162,6 +178,18 @@ function lockFor(manifest) {
     },
   };
   for (const [name, version] of Object.entries(manifest.dependencies)) {
+    packages[`node_modules/${name}`] = {
+      version,
+      resolved: `https://registry.npmjs.org/${encodeURIComponent(name)}/-/${name.split('/').at(-1)}-${version}.tgz`,
+      integrity: 'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    };
+  }
+  for (const [name, version] of Object.entries({
+    ...manifest.overrides,
+    postcss: '8.5.23',
+    undici: '6.28.0',
+    '@ai-sdk/provider-utils': '4.0.49',
+  })) {
     packages[`node_modules/${name}`] = {
       version,
       resolved: `https://registry.npmjs.org/${encodeURIComponent(name)}/-/${name.split('/').at(-1)}-${version}.tgz`,
