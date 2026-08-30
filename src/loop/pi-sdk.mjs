@@ -141,6 +141,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         execute: async (_callId, params) => {
           const result = await tool.execute(params);
           let text = String(result.text ?? '');
+          let details = result.details ?? {};
           if (text.length > maxToolResultChars) {
             const originalChars = text.length;
             const notice = TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE
@@ -156,10 +157,11 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
               retainedChars: maxToolResultChars,
               latestEvidenceRef: String(result.details?.evidenceRef || '') || null,
             });
+            details = { ...details, contextTruncated: true };
           }
           return {
             content: [{ type: 'text', text }],
-            details: result.details ?? {},
+            details,
             terminate: Boolean(result.terminate),
           };
         },
@@ -621,7 +623,7 @@ function latestEvidencePair(messages) {
     return {
       ref,
       indexes: [callIndex, resultIndex].filter((index) => index >= 0),
-      exact: callIndex >= 0 && !isElidedToolResult(result),
+      exact: callIndex >= 0 && !isReducedToolResult(result),
     };
   }
   return { ref: null, indexes: [], exact: false };
@@ -672,10 +674,12 @@ function elidedToolOutput(message) {
     .replace('{recoveryHint}', () => toolRecoveryHint(toolName, message?.details));
 }
 
-function isElidedToolResult(message) {
+function isReducedToolResult(message) {
+  const text = String(message?.content?.[0]?.text || '');
   return message?.contextElided === true
-    || (String(message?.content?.[0]?.text || '').startsWith('[older ')
-      && String(message.content[0].text).includes(' output elided;'));
+    || message?.details?.contextTruncated === true
+    || (text.startsWith('[older ') && text.includes(' output elided;'))
+    || text.includes('[tool output truncated at ');
 }
 
 function toolRecoveryHint(toolName, details) {

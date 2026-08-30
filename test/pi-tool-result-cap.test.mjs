@@ -68,7 +68,10 @@ async function loadAdapterCapturing() {
       label: 'fat',
       description: 'd',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
-      execute: async () => ({ text: 'x'.repeat(60_000), details: { ok: true } }),
+      execute: async () => ({
+        text: 'x'.repeat(60_000),
+        details: { ok: true, evidenceRef: 'evidence-000001-123456789abc' },
+      }),
     }],
   });
   const agentOptions = globalThis.__avoCapAgent.options;
@@ -85,9 +88,9 @@ test('tool results are capped before entering the model context', async () => {
     const text = output.content[0].text;
     assert.ok(text.length < 26_000, `length=${text.length}`);
     assert.match(text, /\[tool output truncated at 24000 characters/);
-    assert.match(text, /do not repeat/);
-    assert.doesNotMatch(text, /re-call|re-query/);
-    assert.equal(output.details.ok, true, 'details pass through untouched');
+    assert.match(text, /trajectory_read ref=evidence-000001-123456789abc/);
+    assert.equal(output.details.ok, true, 'original details survive the context marker');
+    assert.equal(output.details.contextTruncated, true);
     assert.deepEqual(events, [{
       type: 'avo_context_compaction',
       mode: 'tool_result_truncation',
@@ -95,8 +98,34 @@ test('tool results are capped before entering the model context', async () => {
       toolName: 'fat_read',
       originalChars: 60_000,
       retainedChars: 24_000,
-      latestEvidenceRef: null,
+      latestEvidenceRef: 'evidence-000001-123456789abc',
     }]);
+
+    const status = mod.runtimeStatusMessage({
+      state: 'ACTIVE', environmentActions: 1, maxActions: 5,
+      terminalReason: 'none', allowedNext: 'inspect evidence or finish',
+    }, { outerTurns: 1, maxOuterTurns: 5 });
+    const compactions = [];
+    const bounded = mod.boundTranscript(mod.replaceRuntimeStatus([
+      { role: 'user', content: [{ type: 'text', text: 'task' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'call-1', name: 'fat_read', arguments: {} }],
+      },
+      { role: 'toolResult', toolCallId: 'call-1', toolName: 'fat_read', ...output },
+    ], status.text), {
+      maxMessages: 3,
+      maxTokens: 120_000,
+      onCompaction: (event) => compactions.push(event),
+    });
+    assert.ok(bounded.some((message) => message.content?.[0]?.text?.includes(
+      'latest_evidence_ref=evidence-000001-123456789abc',
+    )));
+    assert.deepEqual(compactions.map((event) => ({
+      mode: event.mode,
+      exactLatestEvidenceRetained: event.exactLatestEvidenceRetained,
+      noticeIncluded: event.noticeIncluded,
+    })), [{ mode: 'hard', exactLatestEvidenceRetained: false, noticeIncluded: true }]);
   } finally {
     cleanup();
   }
