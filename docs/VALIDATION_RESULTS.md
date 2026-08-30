@@ -5,6 +5,9 @@
 A real-provider ARC-AGI-3 public-set execution is retained as non-comparable
 diagnostic evidence in
 [`docs/results/real-public-20260828-high2.json`](results/real-public-20260828-high2.json).
+Those original bytes are immutable historical evidence; the hash-bound
+[`correction record`](results/real-public-20260828-high2.correction-v1.json)
+supersedes their classification without rewriting them.
 
 - **Accepted official score: unavailable.** The observed final-session
   scorecard value `0.0010988675559354109` is preserved as unaccepted
