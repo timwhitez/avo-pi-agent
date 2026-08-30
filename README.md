@@ -129,6 +129,21 @@ memory surfacing, and StallSupervisor strategy while retaining environment
 semantics, evidence, accounting, reliability, and workspace safety. Run
 capsules disclose and bind the requested/effective profile, prompt, and tools.
 
+The ordered production tool inventory is generated from the same sealed
+definitions used by the run capsule and checked against this table in the local
+test suite:
+
+<!-- effective-tool-inventory:start -->
+| Profile | Workspace mode | Count | Ordered tools |
+| --- | --- | ---: | --- |
+| `minimal-v1` | `disabled` | 6 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `finish` |
+| `minimal-v1` | `files-only` | 9 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `workspace_list`, `workspace_read`, `workspace_write`, `finish` |
+| `minimal-v1` | `isolated-python` | 10 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `workspace_list`, `workspace_read`, `workspace_write`, `workspace_python`, `finish` |
+| `current-v1` | `disabled` | 12 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `knowledge_read`, `memory_read`, `journal_read`, `memory_update`, `hypothesis_propose`, `hypothesis_evaluate`, `finish` |
+| `current-v1` | `files-only` | 15 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `knowledge_read`, `workspace_list`, `workspace_read`, `workspace_write`, `memory_read`, `journal_read`, `memory_update`, `hypothesis_propose`, `hypothesis_evaluate`, `finish` |
+| `current-v1` | `isolated-python` | 16 | `observe`, `trajectory_read`, `act`, `act_sequence`, `reset`, `knowledge_read`, `workspace_list`, `workspace_read`, `workspace_write`, `workspace_python`, `memory_read`, `journal_read`, `memory_update`, `hypothesis_propose`, `hypothesis_evaluate`, `finish` |
+<!-- effective-tool-inventory:end -->
+
 ### Persistent memory
 
 Each game has a structured memory record containing legacy harness notes plus
@@ -208,6 +223,8 @@ controls the current interpretation. See also
 [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md). The
 committed record explicitly separates completed offline checks from the
 historical diagnostic, and never treats synthetic results as an ARC score.
+The canonical audit, Issue-to-PR map, dependencies, and local test ledger are
+maintained in [`issues.md`](issues.md).
 
 ## Upstream references
 

@@ -4,6 +4,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
+import { POLICY_PROFILE_NAMES } from '../src/core/policy-profile.mjs';
+
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(testDir, '..');
 
@@ -57,4 +60,24 @@ test('validation documents label combined-worktree evidence as historical and no
     assert.match(document, /not\s+(?:current\s+)?exact-tip validation/i);
     assert.match(document, /no accepted official/i);
   }
+});
+
+test('README tool inventory is generated from the sealed production profiles', () => {
+  const readme = read('README.md');
+  const workspaceModes = ['disabled', 'files-only', 'isolated-python'];
+  const rows = POLICY_PROFILE_NAMES.flatMap((profile) => workspaceModes.map((mode) => {
+    const names = effectiveAvoToolNames(mode, profile);
+    return `| \`${profile}\` | \`${mode}\` | ${names.length} | ${names.map((name) => `\`${name}\``).join(', ')} |`;
+  }));
+  const inventory = [
+    '<!-- effective-tool-inventory:start -->',
+    '| Profile | Workspace mode | Count | Ordered tools |',
+    '| --- | --- | ---: | --- |',
+    ...rows,
+    '<!-- effective-tool-inventory:end -->',
+  ].join('\n');
+
+  assert.ok(readme.includes(inventory), 'README tool inventory must match production exactly');
+  assert.match(readme, /\[`issues\.md`\]\(issues\.md\)/);
+  assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
