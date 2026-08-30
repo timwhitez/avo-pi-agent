@@ -379,7 +379,7 @@ export class AvoArcAgent {
             query: { type: 'string', maxLength: 1000 },
             status: { type: 'string', enum: ['all', 'proposed', 'confirmed', 'contradicted', 'superseded'] },
             startSequence: { type: 'integer', minimum: 1 },
-            limit: { type: 'integer', minimum: 1, maximum: 20 },
+            limit: { type: 'integer', minimum: 1, maximum: 8 },
           },
           additionalProperties: false,
         },
@@ -1040,24 +1040,42 @@ export class AvoArcAgent {
   }
 
   withRelevantMemory(result, query = '', jsonType = null) {
-    const relevantMemory = this.memory.relevantClaims({
+    const candidates = this.memory.relevantClaims({
       query: String(query || ''),
       state: this.frame?.state ?? null,
       levelsCompleted: this.frame?.levelsCompleted ?? 0,
       availableActions: this.frame?.availableActions ?? [],
     }, this.config.memorySurfaceLimit ?? 4);
-    this.memoryClaimsSurfaced += relevantMemory.length;
-    const details = {
-      ...result.details,
+    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
+      throw new Error('tool result character limit must be a positive safe integer');
+    }
+    const render = (
       relevantMemory,
-      ...(result.details?.telemetry ? { telemetry: this.commandTelemetry() } : {}),
+      surfaced = this.memoryClaimsSurfaced + relevantMemory.length,
+    ) => {
+      const details = {
+        ...result.details,
+        relevantMemory,
+        ...(result.details?.telemetry ? {
+          telemetry: { ...this.commandTelemetry(), memoryClaimsSurfaced: surfaced },
+        } : {}),
+      };
+      const text = jsonType
+        ? JSON.stringify({ type: jsonType, ...details })
+        : relevantMemory.length
+          ? `${result.text}\nRELEVANT_MEMORY ${JSON.stringify(relevantMemory)}`
+          : result.text;
+      return { ...result, text, details };
     };
-    const text = jsonType
-      ? JSON.stringify({ type: jsonType, ...details })
-      : relevantMemory.length
-        ? `${result.text}\nRELEVANT_MEMORY ${JSON.stringify(relevantMemory)}`
-        : result.text;
-    return { ...result, text, details };
+    let relevantMemory = [];
+    for (const candidate of candidates) {
+      const next = [...relevantMemory, candidate];
+      if (render(next).text.length > maxChars) break;
+      relevantMemory = next;
+    }
+    this.memoryClaimsSurfaced += relevantMemory.length;
+    return render(relevantMemory, this.memoryClaimsSurfaced);
   }
 
   toolResult(text, details = {}, terminate = false) {

@@ -74,6 +74,7 @@ function runtimeConfig(overrides = {}) {
     maxActions: 1000,
     maxOuterTurns: 1000,
     stallWindow: 8,
+    memorySurfaceLimit: 4,
     workspaceMode: 'files-only',
     workspacePythonTimeoutMs: 10_000,
     workspaceContainerRuntime: 'docker',
@@ -167,14 +168,17 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   const baseline = capsule();
   const transcript = capsule({ env: { AVO_TRANSCRIPT_MAX_MESSAGES: '80' } });
   const tokenBound = capsule({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '90000' } });
+  const memoryOff = capsule({ config: runtimeConfig({ memorySurfaceLimit: 0 }) });
   const warm = capsule({
     initialState: initialState({ mode: 'warm-start', snapshotName: 'snapshot-a' }),
   });
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
   assert.notEqual(tokenBound.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(memoryOff.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
   assert.equal(tokenBound.definition.transcript.maxTokens, 90_000);
+  assert.equal(memoryOff.definition.runtime.config.memorySurfaceLimit, 0);
   assert.match(baseline.definition.prompts.runtimeStatusTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.prompts.compactionNoticeTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.transcript.toolResultElisionTemplateSha256, /^[a-f0-9]{64}$/);
@@ -341,6 +345,13 @@ test('execution verification rejects code and effective runtime drift after seal
       }),
     }),
     /provider or model interface differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
+      config: runtimeConfig({ memorySurfaceLimit: 0 }),
+    }),
+    /effective execution config differs/,
   );
   assert.throws(
     () => verifyRunCapsuleExecution({

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CandidateLineage } from './lineage.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
-import { writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
+import { wasAtomicWriteCommitted, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
@@ -150,6 +150,7 @@ export class PersistentMemory {
     }
     const previousClaims = this.data.claims;
     const previousSequence = this.data.claimSequence;
+    const previousUpdatedAt = this.data.updatedAt;
     let claim;
     let replaced = null;
     try {
@@ -204,8 +205,11 @@ export class PersistentMemory {
       this.save();
       return { operation, claim: structuredClone(claim), replaced: replaced ? structuredClone(replaced) : null };
     } catch (error) {
-      this.data.claims = previousClaims;
-      this.data.claimSequence = previousSequence;
+      if (!wasAtomicWriteCommitted(error)) {
+        this.data.claims = previousClaims;
+        this.data.claimSequence = previousSequence;
+        this.data.updatedAt = previousUpdatedAt;
+      }
       throw error;
     }
   }
@@ -487,6 +491,9 @@ function validateClaims(data) {
     }
     ids.add(claim.id);
   }
+  if (data.claims.some((claim) => claim.status === 'confirmed' && claim.evidenceRefs.length === 0)) {
+    throw new Error('memory confirmed claim requires evidence');
+  }
   for (const claim of data.claims) {
     const relations = normalizeRelations(claim.relations || {}, ids);
     if (JSON.stringify(relations) !== JSON.stringify(claim.relations)) {
@@ -494,13 +501,14 @@ function validateClaims(data) {
     }
   }
   for (const claim of data.claims) {
-    if (claim.status === 'contradicted'
-        && !data.claims.some((entry) => entry.relations.contradicts.includes(claim.id))) {
-      throw new Error('memory contradicted claim has no linked correction');
-    }
-    if (claim.status === 'superseded'
-        && !data.claims.some((entry) => entry.relations.derivedFrom.includes(claim.id))) {
-      throw new Error('memory superseded claim has no linked correction');
+    const relation = claim.status === 'contradicted'
+      ? 'contradicts'
+      : claim.status === 'superseded' ? 'derivedFrom' : null;
+    if (relation && !data.claims.some((entry) => entry.sequence > claim.sequence
+        && entry.status === 'confirmed'
+        && entry.evidenceRefs.length > 0
+        && entry.relations[relation].includes(claim.id))) {
+      throw new Error(`memory ${claim.status} claim has no later evidence-backed correction`);
     }
   }
   const highWater = data.claims.reduce((max, claim) => Math.max(max, claim.sequence), 0);

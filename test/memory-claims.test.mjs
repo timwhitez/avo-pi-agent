@@ -23,7 +23,12 @@ function frame(cell = 0) {
   };
 }
 
-function makeAgent(root, environment, loop = { kind: 'test', async run() { return { error: null }; } }) {
+function makeAgent(
+  root,
+  environment,
+  loop = { kind: 'test', async run() { return { error: null }; } },
+  configOverrides = {},
+) {
   return new AvoArcAgent({
     gameId: 'memory-game',
     environment,
@@ -35,6 +40,7 @@ function makeAgent(root, environment, loop = { kind: 'test', async run() { retur
       memorySurfaceLimit: 2,
       memoryDir: path.join(root, 'memory'),
       workspaceDir: path.join(root, 'workspace'),
+      ...configOverrides,
     },
   });
 }
@@ -140,6 +146,55 @@ test('typed claims confirm and correct only against retrievable evidence while r
   }
 });
 
+test('post-commit persistence errors retain the live typed claim and cannot erase it on the next save', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-post-commit-'));
+  const memory = new PersistentMemory(root, 'game').load();
+  const originalFsync = fs.fsyncSync;
+  let calls = 0;
+  try {
+    fs.fsyncSync = function patchedFsync(descriptor, ...args) {
+      calls += 1;
+      if (calls === 2) {
+        throw Object.assign(new Error('synthetic directory fsync failure'), { code: 'EIO' });
+      }
+      return originalFsync.call(this, descriptor, ...args);
+    };
+    let error;
+    assert.throws(() => memory.applyClaim({
+      operation: 'propose',
+      subject: 'goal',
+      type: 'hypothesis',
+      content: 'The first durable claim must survive an uncertain commit acknowledgement.',
+    }), (caught) => {
+      error = caught;
+      return true;
+    });
+    assert.equal(error.code, 'ATOMIC_WRITE_POST_COMMIT');
+    assert.equal(error.atomicWriteCommitted, true);
+  } finally {
+    fs.fsyncSync = originalFsync;
+  }
+
+  try {
+    assert.equal(memory.queryClaims({}).claims[0].id, 'claim-000001');
+    assert.equal(memory.data.claimSequence, 1);
+    assert.equal(JSON.parse(fs.readFileSync(memory.file, 'utf8')).claims[0].id, 'claim-000001');
+    assert.equal(new PersistentMemory(root, 'game').load().queryClaims({}).claims[0].id, 'claim-000001');
+    memory.applyClaim({
+      operation: 'propose',
+      subject: 'goal',
+      type: 'hypothesis',
+      content: 'A later save must append instead of overwriting the committed audit record.',
+    });
+    assert.deepEqual(
+      new PersistentMemory(root, 'game').load().queryClaims({ limit: 8 }).claims.map((claim) => claim.id),
+      ['claim-000001', 'claim-000002'],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('production tools surface bounded active claims and reject orphan evidence after restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-tools-'));
   let cell = 0;
@@ -151,6 +206,7 @@ test('production tools surface bounded active claims and reject orphan evidence 
     const agent = makeAgent(root, environment);
     await agent.initialize();
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    assert.equal(tools.memory_read.parameters.properties.limit.maximum, 8);
     const initialRef = agent.currentObservationRef;
 
     const proposed = await tools.memory_update.execute({
@@ -230,6 +286,9 @@ test('production tools surface bounded active claims and reject orphan evidence 
 
     const memoryFile = path.join(root, 'memory', 'memory-game.json');
     const state = JSON.parse(fs.readFileSync(memoryFile, 'utf8'));
+    state.claims[1].evidenceRefs = [];
+    fs.writeFileSync(memoryFile, `${JSON.stringify(state, null, 2)}\n`);
+    assert.throws(() => makeAgent(root, environment), /confirmed claim requires evidence/);
     state.claims[1].evidenceRefs = ['evidence-999999-ffffffffffff'];
     fs.writeFileSync(memoryFile, `${JSON.stringify(state, null, 2)}\n`);
     assert.throws(() => makeAgent(root, environment), /evidence is not retrievable/);
@@ -257,9 +316,94 @@ test('schema v3 migration is deterministic and malformed claim relations fail cl
       content: 'Test the goal marker.',
     });
     const state = JSON.parse(fs.readFileSync(memory.file, 'utf8'));
-    state.claims[0].relations.supports = ['claim-999999'];
-    fs.writeFileSync(memory.file, `${JSON.stringify(state)}\n`);
+    const noEvidence = structuredClone(state);
+    noEvidence.claims[0].status = 'confirmed';
+    fs.writeFileSync(memory.file, `${JSON.stringify(noEvidence)}\n`);
+    assert.throws(() => new PersistentMemory(root, 'legacy').load(), /confirmed claim requires evidence/);
+
+    const missingRelation = structuredClone(state);
+    missingRelation.claims[0].relations.supports = ['claim-999999'];
+    fs.writeFileSync(memory.file, `${JSON.stringify(missingRelation)}\n`);
     assert.throws(() => new PersistentMemory(root, 'legacy').load(), /relation is not retrievable/);
+
+    fs.writeFileSync(memory.file, `${JSON.stringify(state)}\n`);
+    const corrected = new PersistentMemory(root, 'legacy').load();
+    corrected.applyClaim({
+      operation: 'contradict',
+      claimId: 'claim-000001',
+      content: 'The goal marker requires a different test.',
+      evidenceRefs: [SECOND_REF],
+    }, [{ id: SECOND_REF }]);
+    const brokenCorrection = JSON.parse(fs.readFileSync(memory.file, 'utf8'));
+    brokenCorrection.claims[1].status = 'proposed';
+    brokenCorrection.claims[1].evidenceRefs = [];
+    fs.writeFileSync(memory.file, `${JSON.stringify(brokenCorrection)}\n`);
+    assert.throws(
+      () => new PersistentMemory(root, 'legacy').load(),
+      /no later evidence-backed correction/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('observe, act, reset, and action sequences surface only complete claims inside the Pi result cap', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-surface-cap-'));
+  let cell = 0;
+  const environment = {
+    async start() { return frame(cell); },
+    async step() { cell += 1; return frame(cell); },
+    async reset() { cell = 0; return frame(cell); },
+  };
+  try {
+    const agent = makeAgent(root, environment, undefined, {
+      maxActions: 30,
+      memorySurfaceLimit: 8,
+      toolResultMaxChars: 12_000,
+    });
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const ids = [];
+    for (let index = 0; index < 8; index += 1) {
+      const proposed = await tools.memory_update.execute({
+        operation: 'propose',
+        subject: `surface-${index}`,
+        type: 'action-semantics',
+        content: `ACTION1 retained fact ${index}: ${'x'.repeat(1850)}`,
+        importance: 100 - index,
+        tags: Array.from({ length: 8 }, (_, tag) => `tag-${index}-${tag}-${'z'.repeat(48)}`),
+        supports: ids,
+      });
+      ids.push(proposed.details.claim.id);
+      await tools.memory_update.execute({
+        operation: 'confirm',
+        claimId: proposed.details.claim.id,
+        evidenceRefs: [agent.currentObservationRef],
+      });
+    }
+
+    const results = [
+      await tools.observe.execute({}),
+      await tools.act.execute({ action: 'ACTION1', reasoning: 'use retained ACTION1 facts' }),
+      await tools.reset.execute({ rationale: 'exercise reset memory visibility' }),
+      await tools.act_sequence.execute({
+        steps: Array.from({ length: 20 }, () => ({
+          action: 'ACTION1',
+          reasoning: 'execute the known safe action',
+        })),
+      }),
+    ];
+    let surfaced = 0;
+    for (const result of results) {
+      assert.ok(result.text.length <= 12_000);
+      assert.ok(result.details.relevantMemory.length > 0 && result.details.relevantMemory.length < 8);
+      surfaced += result.details.relevantMemory.length;
+      assert.equal(result.details.telemetry?.memoryClaimsSurfaced ?? surfaced, surfaced);
+    }
+    const sequence = JSON.parse(results[3].text);
+    assert.equal(sequence.type, 'ACTION_SEQUENCE');
+    assert.deepEqual(sequence.relevantMemory, results[3].details.relevantMemory);
+    assert.equal(agent.memoryClaimsSurfaced, surfaced);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
