@@ -12,6 +12,7 @@ import {
   runCapsuleProvenanceFixture,
   scorecardCoverageFixture,
 } from './support/run-capsule.mjs';
+import { providerCapabilities } from './support/provider.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
 const provider = {
@@ -19,6 +20,7 @@ const provider = {
   apiKey: 'runtime-only-value',
   model: 'production-model',
   reasoningEffort: 'max',
+  capabilities: providerCapabilities('max'),
 };
 
 function response(payload) {
@@ -65,17 +67,6 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
         runCapsule: publicRunCapsuleFixture({}, { runId }),
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: {
-          ok: true,
-          outputVerified: true,
-          challengeVerified: true,
-          responseFreshnessVerified: true,
-          attestationVersion: 2,
-          responseIdHash: 'a'.repeat(64),
-          challengeHash: 'b'.repeat(64),
-          responseHash: 'c'.repeat(64),
-          proofHash: 'd'.repeat(64),
-        },
       },
     },
     analysis: {

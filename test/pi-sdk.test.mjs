@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { providerCapabilities } from './support/provider.mjs';
 
 test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-pi-sdk-'));
@@ -11,7 +12,8 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     const scoped = path.join(root, 'node_modules', '@earendil-works');
     fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
     fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
 
     fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
       name: '@earendil-works/pi-agent-core', type: 'module', exports: './index.js',
@@ -85,12 +87,15 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
       });
     `);
 
-    fs.copyFileSync('src/loop/pi-sdk.mjs', path.join(root, 'src', 'pi-sdk.mjs'));
-    const module = await import(`${pathToFileURL(path.join(root, 'src', 'pi-sdk.mjs')).href}?test=${Date.now()}`);
+    fs.copyFileSync('src/loop/pi-sdk.mjs', path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
+    fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
+    fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
+    const module = await import(`${pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href}?test=${Date.now()}`);
     const events = [];
     const loop = await module.createPiSdkLoop({
       provider: {
         baseUrl: 'http://localhost:9999/v1', model: 'test-model', reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
       },
       maxOuterTurns: 1001,
     }, { onEvent: (event) => events.push(event) });
@@ -120,6 +125,9 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
 
     assert.equal(loop.kind, 'pi-sdk');
     assert.equal(globalThis.__avoFakePi.options.initialState.model.api, 'openai-responses');
+    assert.equal(globalThis.__avoFakePi.options.initialState.model.contextWindow, 128_000);
+    assert.equal(globalThis.__avoFakePi.options.initialState.model.maxTokens, 16_000);
+    assert.deepEqual(globalThis.__avoFakePi.options.initialState.model.input, ['text']);
     assert.equal(globalThis.__avoFakePi.options.initialState.thinkingLevel, 'max');
     assert.equal(globalThis.__avoFakePi.options.initialState.tools[0].parameters.kind, 'Object');
     assert.equal(globalThis.__avoFakePi.options.followUpMode, 'one-at-a-time');

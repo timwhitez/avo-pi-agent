@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { providerCapabilities } from './support/provider.mjs';
 
 // Builds a scoped fake Pi SDK whose Agent fails `continue()` with the given
 // error messages (in order) before behaving cleanly.
@@ -13,6 +14,7 @@ async function loadLoopWith(script) {
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
   fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
 
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-agent-core', type: 'module', exports: './index.js',
@@ -73,6 +75,8 @@ async function loadLoopWith(script) {
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'api', 'openai-responses.lazy.js'),
     'export const openAIResponsesApi = () => ({});');
   fs.copyFileSync(path.resolve(process.cwd(), 'src/loop/pi-sdk.mjs'), path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
+  fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
+  fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
   const captured = root;
   globalThis.__avoPlan = script;
   const mod = await import(pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href);
@@ -85,6 +89,7 @@ const baseConfig = {
     baseUrl: 'https://provider.internal/v1',
     apiKey: 'sk-probe-key-value',
     reasoningEffort: 'max',
+    capabilities: providerCapabilities('max'),
   },
   maxActions: 10,
   maxOuterTurns: 40,

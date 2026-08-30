@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { providerCapabilitiesFromEnvironment } from './provider-capabilities.mjs';
+
 function parseDotEnv(text) {
   const out = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -46,11 +48,12 @@ function enumValue(name, fallback, allowed) {
 }
 
 export function getRuntimeConfig({ requireProvider = true } = {}) {
+  const reasoningEffort = String(process.env.OPENAI_REASONING_EFFORT || 'max').trim().toLowerCase();
   const provider = {
     baseUrl: process.env.OPENAI_BASE_URL?.replace(/\/$/, ''),
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL,
-    reasoningEffort: process.env.OPENAI_REASONING_EFFORT || 'max',
+    reasoningEffort,
   };
   if (requireProvider) {
     const missing = Object.entries(provider)
@@ -60,6 +63,10 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
       throw new Error(`Missing provider environment values: ${missing.join(', ')}`);
     }
   }
+  provider.capabilities = providerCapabilitiesFromEnvironment(process.env, {
+    required: requireProvider,
+    reasoningEffort,
+  });
   return {
     provider,
     maxActions: integer('AVO_MAX_ACTIONS', 1000),
@@ -80,6 +87,7 @@ export function publicConfigSummary(config) {
     providerConfigured: Boolean(config.provider.baseUrl && config.provider.apiKey && config.provider.model),
     wireApi: 'responses',
     reasoningEffort: config.provider.reasoningEffort,
+    providerCapabilities: config.provider.capabilities,
     maxActions: config.maxActions,
     maxOuterTurns: config.maxOuterTurns,
     stallWindow: config.stallWindow,

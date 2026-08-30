@@ -16,6 +16,12 @@ const provider = {
   OPENAI_API_KEY: 'provider-secret',
   OPENAI_MODEL: 'model-id',
   OPENAI_REASONING_EFFORT: 'max',
+  OPENAI_CONTEXT_WINDOW: '128000',
+  OPENAI_MAX_OUTPUT_TOKENS: '16000',
+  OPENAI_INPUT_MODALITIES: 'text',
+  OPENAI_REASONING_EFFORTS: 'high,max',
+  OPENAI_SUPPORTS_DEVELOPER_ROLE: '1',
+  OPENAI_CACHE_RETENTION: 'none',
 };
 
 function hostileSource() {
@@ -50,6 +56,8 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   const env = buildAgentChildEnvironment({ source: hostileSource() });
   assert.equal(env.OPENAI_API_KEY, provider.OPENAI_API_KEY);
   assert.equal(env.OPENAI_MODEL, provider.OPENAI_MODEL);
+  assert.equal(env.OPENAI_CONTEXT_WINDOW, provider.OPENAI_CONTEXT_WINDOW);
+  assert.equal(env.OPENAI_MAX_OUTPUT_TOKENS, provider.OPENAI_MAX_OUTPUT_TOKENS);
   assert.equal(env.ARC_API_KEY, '');
   assert.equal(env.AVO_ARC_AUTH_MODE, 'anonymous-auto');
   assert.equal(env.AVO_DISABLE_DOTENV, '1');

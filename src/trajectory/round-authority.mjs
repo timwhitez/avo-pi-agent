@@ -24,6 +24,8 @@ export function evaluateRoundAuthority({
   const integrity = recordOrEmpty(analysis?.integrity);
   const provenance = recordOrEmpty(benchmark?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
+  const piStreamPreflight = recordOrEmpty(provenance.piStreamPreflight);
+  const modelCapabilities = recordOrEmpty(provenance.modelCapabilities);
   const runCapsule = recordOrEmpty(provenance.runCapsule);
   const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, {
     privateCapsuleEvidence,
@@ -89,7 +91,7 @@ export function evaluateRoundAuthority({
     'real-provider nonce-bound freshness attestation failed',
     reasons,
   );
-  requireCondition(providerAttestationVersion !== null && providerAttestationVersion >= 2, 'provider attestation schema is older than v2', reasons);
+  requireCondition(providerAttestationVersion !== null && providerAttestationVersion >= 3, 'provider attestation schema is older than v3', reasons);
   for (const [name, value] of [
     ['response ID', providerPreflight.responseIdHash],
     ['challenge', providerPreflight.challengeHash],
@@ -98,6 +100,19 @@ export function evaluateRoundAuthority({
   ]) {
     requireCondition(isSha256(value), `provider ${name} attestation digest is absent or malformed`, reasons);
   }
+  requireCondition(
+    modelCapabilities.capabilityStatus === 'configured-with-bounded-probes'
+      && isSha256(modelCapabilities.manifestSha256)
+      && providerPreflight.capabilityManifestSha256 === modelCapabilities.manifestSha256
+      && piStreamPreflight.capabilityManifestSha256 === modelCapabilities.manifestSha256
+      && piStreamPreflight.ok === true
+      && piStreamPreflight.productionToolSchemaVerified === true
+      && piStreamPreflight.requestedVsEffectiveVerified === true
+      && piStreamPreflight.multiTurnContinuationVerified === true
+      && piStreamPreflight.largeToolResultVerified === true,
+    'requested/effective provider capability attestation failed',
+    reasons,
+  );
   requireCondition(provenance?.arcRuntime?.officialPackageAttested === true, 'official ARC package attestation failed', reasons);
   requireCondition(provenance?.arcAuth?.keyAcquired === true, 'official ARC runtime did not acquire a key', reasons);
   requireCondition(['anonymous-auto', 'registered'].includes(String(provenance?.arcAuth?.mode || '')), 'ARC authentication mode is not accepted', reasons);

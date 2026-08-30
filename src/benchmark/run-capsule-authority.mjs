@@ -96,7 +96,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(tools.length > 0 && tools.every((name) => typeof name === 'string' && name.length > 0), 'run capsule enabled-tool set is absent or malformed', reasons);
   requireCondition(new Set(tools).size === tools.length, 'run capsule enabled-tool set contains duplicates', reasons);
   requireCondition(typeof capsule.initialStateSnapshot === 'string' && capsule.initialStateSnapshot.length > 0, 'run capsule initial-state snapshot name is absent', reasons);
-  requireCondition(['declared-unverified', 'attested'].includes(String(capsule.modelCapabilityStatus || '')), 'run capsule model-capability status is unknown', reasons);
+  requireCondition(capsule.modelCapabilityStatus === 'configured-with-bounded-probes', 'run capsule model-capability status lacks bounded probes', reasons);
   const components = recordOrEmpty(capsule.components);
   requireCondition(Object.keys(components).length > 0 && Object.values(components).every(isSha256), 'run capsule component manifest is absent or malformed', reasons);
   requireCondition(
@@ -155,11 +155,64 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(['anonymous-auto', 'registered'].includes(String(task.arcAuthMode || '')), 'run capsule ARC auth mode is unknown', reasons);
   requireCondition(Array.isArray(task.versionedGameIds) && task.versionedGameIds.length > 0, 'run capsule versioned game set is absent', reasons);
   const model = recordOrEmpty(capsule.modelInterface);
+  const manifest = recordOrEmpty(model.effectiveCapabilityManifest);
+  const limits = recordOrEmpty(manifest.limits);
+  const reasoning = recordOrEmpty(manifest.reasoning);
+  const attestation = recordOrEmpty(model.attestation);
   requireCondition(isSha256(model.implementationSha256), 'run capsule model-interface digest is absent', reasons);
   requireCondition(model.capabilityStatus === capsule.modelCapabilityStatus, 'run capsule model-capability status is inconsistent', reasons);
   requireCondition(model.wireApi === 'responses' && typeof model.reasoningEffort === 'string' && model.reasoningEffort.length > 0, 'run capsule model request settings are malformed', reasons);
-  requireCondition(model.requestedCapabilities?.streaming === true && model.requestedCapabilities?.toolCalling === true, 'run capsule requested model capabilities are malformed', reasons);
-  requireCondition(isRecord(model.declaredCapabilityManifest), 'run capsule declared model manifest is absent', reasons);
+  requireCondition(
+    model.requestedCapabilities?.streaming === true
+      && model.requestedCapabilities?.toolCalling === true
+      && model.requestedCapabilities?.parallelToolCalls === false
+      && canonicalJson(model.requestedCapabilities?.inputModalities) === canonicalJson(['text'])
+      && model.requestedCapabilities?.reasoningEffort === model.reasoningEffort,
+    'run capsule requested model capabilities are malformed',
+    reasons,
+  );
+  requireCondition(
+    manifest.schema === 'avo.provider-capabilities.v1'
+      && manifest.wireApi === 'responses'
+      && manifest.tools?.calling === true
+      && manifest.tools?.executionMode === 'sequential'
+      && manifest.tools?.parallelCalls === false
+      && manifest.visualObservation?.enabled === false
+      && Array.isArray(manifest.inputModalities)
+      && manifest.inputModalities.includes('text')
+      && Array.isArray(reasoning.acceptedEfforts)
+      && reasoning.acceptedEfforts.includes(model.reasoningEffort)
+      && isPositiveInteger(limits.contextWindowTokens)
+      && isPositiveInteger(limits.maxOutputTokens)
+      && isPositiveInteger(limits.contextSafetyTokens)
+      && isPositiveInteger(limits.maxTranscriptTokens)
+      && limits.maxOutputTokens + limits.contextSafetyTokens + limits.maxTranscriptTokens === limits.contextWindowTokens,
+    'run capsule effective provider capability manifest is malformed',
+    reasons,
+  );
+  requireCondition(
+    isSha256(model.capabilityManifestSha256)
+      && model.capabilityManifestSha256 === sha256(canonicalJson(manifest)),
+    'run capsule provider capability manifest digest is inconsistent',
+    reasons,
+  );
+  requireCondition(
+    transcript.maxTokens <= limits.maxTranscriptTokens,
+    'run capsule transcript limit exceeds the provider-safe context budget',
+    reasons,
+  );
+  requireCondition(
+    attestation.providerFreshnessVersion === 3
+      && attestation.providerRequestAccepted === true
+      && attestation.piToolProtocolVerified === true
+      && attestation.productionToolSchemaVerified === true
+      && attestation.requestedVsEffectiveVerified === true
+      && attestation.multiTurnContinuationVerified === true
+      && attestation.largeToolResultVerified === true
+      && attestation.capabilityManifestSha256 === model.capabilityManifestSha256,
+    'run capsule provider capability probes are incomplete',
+    reasons,
+  );
   requireCondition(model.samplingParameters?.temperature === 'omitted-provider-default' && model.samplingParameters?.topP === 'omitted-provider-default', 'run capsule sampling declaration is malformed', reasons);
   return Object.freeze({
     accepted: reasons.length === 0,
@@ -194,6 +247,22 @@ function bindBenchmarkReport(definition, report, reasons) {
       && provenance.providerModelFingerprint === model.modelFingerprint
       && provenance.reasoningEffort === model.reasoningEffort,
     'report provider/model provenance differs from the private capsule',
+    reasons,
+  );
+  requireCondition(
+    provenance.modelCapabilities?.capabilityStatus === model.capabilityStatus
+      && provenance.modelCapabilities?.manifestSha256 === model.capabilityManifestSha256
+      && canonicalJson(provenance.modelCapabilities?.requested) === canonicalJson({
+        wireApi: model.wireApi,
+        reasoningEffort: model.reasoningEffort,
+        inputModalities: model.requestedCapabilities?.inputModalities,
+        streaming: model.requestedCapabilities?.streaming,
+        toolCalling: model.requestedCapabilities?.toolCalling,
+        parallelToolCalls: model.requestedCapabilities?.parallelToolCalls,
+      })
+      && canonicalJson(provenance.modelCapabilities?.effective) === canonicalJson(model.effectiveCapabilityManifest)
+      && Object.values(provenance.modelCapabilities?.probes || {}).every((value) => value === true),
+    'report requested/effective model capabilities differ from the private capsule',
     reasons,
   );
   requireCondition(

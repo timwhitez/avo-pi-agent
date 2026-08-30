@@ -4,6 +4,8 @@ import { canonicalJson, sealRunCapsule } from '../../src/benchmark/run-capsule.m
 import { projectPublicRunCapsule } from '../../src/benchmark/run-capsule-public.mjs';
 import { fingerprint } from '../../src/benchmark/redaction.mjs';
 import { evaluateScorecardCoverage, normalizeScorecardSnapshot } from '../../src/benchmark/scorecard-evidence.mjs';
+import { providerCapabilityDigest } from '../../src/provider-capabilities.mjs';
+import { providerCapabilities } from './provider.mjs';
 
 const ARC_RUNTIME = Object.freeze({
   arcAgiVersion: '0.9.9',
@@ -117,6 +119,8 @@ export function runCapsuleProvenanceFixture({
 } = {}) {
   const sorted = versionedGameIds.slice().sort();
   const salt = digestText(runId);
+  const capabilities = providerCapabilities('high');
+  const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
   return {
     runId,
     gitSha: '1'.repeat(40),
@@ -125,6 +129,47 @@ export function runCapsuleProvenanceFixture({
     providerFingerprint: '5'.repeat(64),
     providerEndpointFingerprint: '6'.repeat(64),
     providerModelFingerprint: '7'.repeat(64),
+    providerPreflight: {
+      ok: true,
+      outputVerified: true,
+      challengeVerified: true,
+      responseFreshnessVerified: true,
+      requestAccepted: true,
+      attestationVersion: 3,
+      capabilityManifestSha256,
+      responseIdHash: 'a'.repeat(64),
+      challengeHash: 'b'.repeat(64),
+      responseHash: 'c'.repeat(64),
+      proofHash: 'd'.repeat(64),
+    },
+    piStreamPreflight: {
+      ok: true,
+      capabilityManifestSha256,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+    },
+    modelCapabilities: {
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      requested: {
+        wireApi: 'responses',
+        reasoningEffort: 'high',
+        inputModalities: ['text'],
+        streaming: true,
+        toolCalling: true,
+        parallelToolCalls: false,
+      },
+      effective: capabilities,
+      probes: {
+        freshnessRequestAccepted: true,
+        productionPiProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+      },
+    },
     arcRuntime: structuredClone(ARC_RUNTIME),
     arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
     publicGameCount: sorted.length,
@@ -135,6 +180,8 @@ export function runCapsuleProvenanceFixture({
 }
 
 function privateRunCapsuleFixture(runId, versionedGameIds) {
+  const capabilities = providerCapabilities('high');
+  const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
   const initialState = {
     mode: 'cold-start',
     snapshotName: 'cold-test-run',
@@ -176,19 +223,36 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       thinkingElisionPolicySha256: 'e'.repeat(64),
       recentToolResults: 6,
       maxMessages: 160,
-      maxTokens: 120_000,
+      maxTokens: 99_200,
       maxToolResultChars: 24_000,
     },
     modelInterface: {
       implementationSha256: 'd'.repeat(64),
-      capabilityStatus: 'declared-unverified',
+      capabilityStatus: 'configured-with-bounded-probes',
       wireApi: 'responses',
       providerFingerprint: '5'.repeat(64),
       endpointFingerprint: '6'.repeat(64),
       modelFingerprint: '7'.repeat(64),
       reasoningEffort: 'high',
-      requestedCapabilities: { streaming: true, toolCalling: true },
-      declaredCapabilityManifest: { api: 'openai-responses' },
+      requestedCapabilities: {
+        streaming: true,
+        toolCalling: true,
+        parallelToolCalls: false,
+        inputModalities: ['text'],
+        reasoningEffort: 'high',
+      },
+      capabilityManifestSha256,
+      effectiveCapabilityManifest: capabilities,
+      attestation: {
+        providerFreshnessVersion: 3,
+        providerRequestAccepted: true,
+        piToolProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        requestedVsEffectiveVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+        capabilityManifestSha256,
+      },
       samplingParameters: {
         temperature: 'omitted-provider-default',
         topP: 'omitted-provider-default',

@@ -13,7 +13,6 @@ import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
   COMPACTION_NOTICE_TEMPLATE_SHA256,
-  PI_MODEL_CAPABILITY_MANIFEST,
   RUNTIME_STATUS_TEMPLATE_SHA256,
   THINKING_ELISION_POLICY_SHA256,
   TOOL_RESULT_ELISION_TEMPLATE_SHA256,
@@ -22,6 +21,11 @@ import {
   createPiSdkLoop,
   effectivePiSystemPrompt,
 } from '../loop/pi-sdk.mjs';
+import {
+  assertProviderCapabilities,
+  providerCapabilityDigest,
+  transcriptMaxTokens,
+} from '../provider-capabilities.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { fingerprint } from './redaction.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
@@ -35,12 +39,17 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'package-lock.json',
   'bridge/requirements.txt',
   'bridge/arc_bridge.py',
+  'scripts/pi-provider-smoke.mjs',
   'scripts/run-real-public.mjs',
   'src/arc/bridge-client.mjs',
   'src/benchmark/resume-cache.mjs',
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
   'src/benchmark/scorecard-evidence.mjs',
+  'src/benchmark/pi-stream-attestation.mjs',
+  'src/benchmark/provider-attestation.mjs',
+  'src/benchmark/provenance-core.mjs',
+  'src/benchmark/provenance.mjs',
   'src/benchmark/run-capsule-authority.mjs',
   'src/benchmark/run-capsule-evidence.mjs',
   'src/benchmark/run-capsule-public.mjs',
@@ -60,6 +69,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/local/child-environment.mjs',
   'src/local/regular-file-evidence.mjs',
   'src/loop/pi-sdk.mjs',
+  'src/provider-capabilities.mjs',
 ]);
 const STATE_MODES = new Set(['cold-start', 'warm-start']);
 const RESUME_MODES = new Set(['recovered', 'migrated']);
@@ -229,6 +239,7 @@ export function buildRunCapsule({
   }
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
+  const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const providerIdentity = inspectProviderIdentity(runId, config?.provider);
   if (providerIdentity.providerFingerprint !== provenance?.providerFingerprint
       || providerIdentity.endpointFingerprint !== provenance?.providerEndpointFingerprint
@@ -268,27 +279,16 @@ export function buildRunCapsule({
       thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
-      maxTokens: positiveInteger(env.AVO_TRANSCRIPT_MAX_TOKENS, 120_000, 'AVO_TRANSCRIPT_MAX_TOKENS'),
+      maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
-    modelInterface: {
-      implementationSha256: sha256(createPiSdkLoop.toString()),
-      capabilityStatus: 'declared-unverified',
-      wireApi: String(provenance?.wireApi || 'responses'),
-      providerFingerprint: providerIdentity.providerFingerprint,
-      endpointFingerprint: providerIdentity.endpointFingerprint,
-      modelFingerprint: providerIdentity.modelFingerprint,
+    modelInterface: modelInterfaceDefinition({
+      config,
+      provenance,
+      providerIdentity,
       reasoningEffort,
-      requestedCapabilities: {
-        streaming: true,
-        toolCalling: true,
-      },
-      declaredCapabilityManifest: structuredClone(PI_MODEL_CAPABILITY_MANIFEST),
-      samplingParameters: {
-        temperature: 'omitted-provider-default',
-        topP: 'omitted-provider-default',
-      },
-    },
+      providerCapabilities,
+    }),
     runtime: {
       node: process.version,
       dependencies: validateDependencyClosure(dependencies),
@@ -499,6 +499,7 @@ export function verifyRunCapsuleExecution({
     throw new Error('official execution refuses unattested isolated-python runtime identity');
   }
   if (config) verifyEffectiveConfig(config, definition.runtime.config);
+  const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
   const prompt = effectivePiSystemPrompt(
     AvoArcAgent.prototype.systemPrompt.call({}),
@@ -525,7 +526,7 @@ export function verifyRunCapsuleExecution({
       thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
-      maxTokens: positiveInteger(env.AVO_TRANSCRIPT_MAX_TOKENS, 120_000, 'AVO_TRANSCRIPT_MAX_TOKENS'),
+      maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
   };
@@ -535,21 +536,13 @@ export function verifyRunCapsuleExecution({
     throw new Error('effective prompt, tool, or transcript contract differs from the sealed run capsule');
   }
   const providerIdentity = inspectProviderIdentity(definition.runId, config?.provider);
-  const observedModelInterface = {
-    implementationSha256: sha256(createPiSdkLoop.toString()),
-    capabilityStatus: 'declared-unverified',
-    wireApi: 'responses',
-    providerFingerprint: providerIdentity.providerFingerprint,
-    endpointFingerprint: providerIdentity.endpointFingerprint,
-    modelFingerprint: providerIdentity.modelFingerprint,
+  const observedModelInterface = modelInterfaceDefinition({
+    config,
+    providerIdentity,
     reasoningEffort: String(config?.provider?.reasoningEffort || ''),
-    requestedCapabilities: { streaming: true, toolCalling: true },
-    declaredCapabilityManifest: structuredClone(PI_MODEL_CAPABILITY_MANIFEST),
-    samplingParameters: {
-      temperature: 'omitted-provider-default',
-      topP: 'omitted-provider-default',
-    },
-  };
+    providerCapabilities,
+    attestation: definition.modelInterface.attestation,
+  });
   if (canonicalJson(observedModelInterface) !== canonicalJson(definition.modelInterface)) {
     throw new Error('effective provider or model interface differs from the sealed run capsule');
   }
@@ -685,6 +678,85 @@ export function validateRunState(value) {
   }));
   if (value.sha256 !== expected) throw new Error('run state binding hash is inconsistent');
   return value;
+}
+
+function modelInterfaceDefinition({
+  config,
+  provenance = null,
+  providerIdentity,
+  reasoningEffort,
+  providerCapabilities,
+  attestation = null,
+}) {
+  const manifestSha256 = providerCapabilityDigest(providerCapabilities);
+  const requestedCapabilities = {
+    streaming: true,
+    toolCalling: true,
+    parallelToolCalls: false,
+    inputModalities: ['text'],
+    reasoningEffort,
+  };
+  let effectiveAttestation = attestation;
+  if (provenance) {
+    const declared = provenance.modelCapabilities;
+    const providerProbe = provenance.providerPreflight;
+    const piProbe = provenance.piStreamPreflight;
+    const probesValid = declared?.capabilityStatus === 'configured-with-bounded-probes'
+      && declared?.manifestSha256 === manifestSha256
+      && canonicalJson(declared?.requested) === canonicalJson({ wireApi: 'responses', ...requestedCapabilities })
+      && canonicalJson(declared?.effective) === canonicalJson(providerCapabilities)
+      && Object.values(declared?.probes || {}).every((value) => value === true)
+      && providerProbe?.ok === true
+      && providerProbe?.requestAccepted === true
+      && providerProbe?.attestationVersion >= 3
+      && providerProbe?.capabilityManifestSha256 === manifestSha256
+      && piProbe?.ok === true
+      && piProbe?.capabilityManifestSha256 === manifestSha256
+      && piProbe?.productionToolSchemaVerified === true
+      && piProbe?.requestedVsEffectiveVerified === true
+      && piProbe?.multiTurnContinuationVerified === true
+      && piProbe?.largeToolResultVerified === true;
+    if (!probesValid) throw new Error('run capsule requires configured and bounded-probed provider capabilities');
+    effectiveAttestation = {
+      providerFreshnessVersion: providerProbe.attestationVersion,
+      providerRequestAccepted: true,
+      piToolProtocolVerified: true,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+      capabilityManifestSha256: manifestSha256,
+    };
+  }
+  if (canonicalJson(effectiveAttestation || {}) !== canonicalJson({
+    providerFreshnessVersion: 3,
+    providerRequestAccepted: true,
+    piToolProtocolVerified: true,
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultVerified: true,
+    capabilityManifestSha256: manifestSha256,
+  })) {
+    throw new Error('provider capability attestation is absent or inconsistent');
+  }
+  return {
+    implementationSha256: sha256(createPiSdkLoop.toString()),
+    capabilityStatus: 'configured-with-bounded-probes',
+    wireApi: 'responses',
+    providerFingerprint: providerIdentity.providerFingerprint,
+    endpointFingerprint: providerIdentity.endpointFingerprint,
+    modelFingerprint: providerIdentity.modelFingerprint,
+    reasoningEffort,
+    requestedCapabilities,
+    capabilityManifestSha256: manifestSha256,
+    effectiveCapabilityManifest: structuredClone(providerCapabilities),
+    attestation: structuredClone(effectiveAttestation),
+    samplingParameters: {
+      temperature: 'omitted-provider-default',
+      topP: 'omitted-provider-default',
+    },
+  };
 }
 
 function normalizeVersionedGames(games) {

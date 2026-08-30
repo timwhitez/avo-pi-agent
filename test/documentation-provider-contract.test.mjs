@@ -13,14 +13,20 @@ function read(relativePath) {
 
 test('active real-run runbook uses exactly the Provider variables consumed by runtime', () => {
   const runbook = read('docs/REAL_PUBLIC_RUNBOOK.md');
-  const config = read('src/config.mjs');
-  const provenance = read('src/benchmark/provenance-core.mjs');
+  const config = `${read('src/config.mjs')}\n${read('src/provider-capabilities.mjs')}`;
+  const provenance = `${read('src/benchmark/provenance-core.mjs')}\n${read('src/provider-capabilities.mjs')}`;
 
   const supported = [
     'OPENAI_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
     'OPENAI_REASONING_EFFORT',
+    'OPENAI_CONTEXT_WINDOW',
+    'OPENAI_MAX_OUTPUT_TOKENS',
+    'OPENAI_INPUT_MODALITIES',
+    'OPENAI_REASONING_EFFORTS',
+    'OPENAI_SUPPORTS_DEVELOPER_ROLE',
+    'OPENAI_CACHE_RETENTION',
   ];
   const unsupported = [
     'AVO_PROVIDER_BASE_URL',

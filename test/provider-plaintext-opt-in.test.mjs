@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import { normalizeRealProviderBaseUrl } from '../src/benchmark/provider-url.mjs';
 import { requireRealProviderEnvironment, buildProvenance } from '../src/benchmark/provenance.mjs';
+import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
+import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 
 const HTTP_ENDPOINT = 'http://203.0.113.10:24634/v1/';
 const HTTPS_ENDPOINT = 'https://provider.internal/v1';
@@ -13,6 +15,7 @@ function environment(overrides = {}) {
     OPENAI_API_KEY: 'live-key-value-0123456789abcdef',
     OPENAI_MODEL: 'runtime-model-x7',
     OPENAI_REASONING_EFFORT: 'max',
+    ...providerEnvironment(),
     ...overrides,
   };
 }
@@ -65,9 +68,29 @@ test('the opt-in never weakens the other transport boundaries', () => {
 
 test('provenance records the transport decision without leaking the endpoint', () => {
   const games = [{ gameId: 'ls20', versionedGameId: 'ls20@1' }];
+  const capabilities = providerCapabilities('max');
+  const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
+  const providerPreflight = {
+    ok: true,
+    outputVerified: true,
+    challengeVerified: true,
+    responseFreshnessVerified: true,
+    requestAccepted: true,
+    attestationVersion: 3,
+    capabilityManifestSha256,
+  };
+  const piStreamPreflight = {
+    ok: true,
+    capabilityManifestSha256,
+    productionToolSchemaVerified: true,
+    requestedVsEffectiveVerified: true,
+    multiTurnContinuationVerified: true,
+    largeToolResultVerified: true,
+  };
   const plaintext = buildProvenance({
-    provider: { baseUrl: HTTP_ENDPOINT, model: 'm', reasoningEffort: 'max', plaintextTransportAllowed: true },
-    providerPreflight: { challengeVerified: true, responseFreshnessVerified: true },
+    provider: { baseUrl: HTTP_ENDPOINT, model: 'm', reasoningEffort: 'max', capabilities, plaintextTransportAllowed: true },
+    providerPreflight,
+    piStreamPreflight,
     games,
     runId: 'run-1',
   });
@@ -75,8 +98,9 @@ test('provenance records the transport decision without leaking the endpoint', (
   assert.ok(!JSON.stringify(plaintext).includes('203.0.113.10'));
 
   const secure = buildProvenance({
-    provider: { baseUrl: HTTPS_ENDPOINT, model: 'm', reasoningEffort: 'max', plaintextTransportAllowed: false },
-    providerPreflight: { challengeVerified: true, responseFreshnessVerified: true },
+    provider: { baseUrl: HTTPS_ENDPOINT, model: 'm', reasoningEffort: 'max', capabilities, plaintextTransportAllowed: false },
+    providerPreflight,
+    piStreamPreflight,
     games,
     runId: 'run-2',
   });

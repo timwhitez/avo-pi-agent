@@ -12,10 +12,24 @@ mode-0600, gitignored local `.env`:
 - `OPENAI_BASE_URL` — the Responses-compatible HTTPS `/v1` base URL
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
+- `OPENAI_CONTEXT_WINDOW` — documented model context limit in tokens
+- `OPENAI_MAX_OUTPUT_TOKENS` — documented output ceiling in tokens
+- `OPENAI_INPUT_MODALITIES` — comma-separated `text` or `text,image`
+- `OPENAI_REASONING_EFFORTS` — comma-separated accepted controls from
+  `off,minimal,low,medium,high,xhigh,max`
+- `OPENAI_SUPPORTS_DEVELOPER_ROLE` — explicit `1/true` or `0/false`
+- `OPENAI_CACHE_RETENTION` — explicit `none`, `short`, or `long`
+- `OPENAI_REASONING_EFFORT` — requested value; defaults to `max` and must be
+  present in `OPENAI_REASONING_EFFORTS`
 
-The runtime also consumes:
-
-- `OPENAI_REASONING_EFFORT` — optional; defaults to `max`
+Responses-compatible endpoints have no portable capability-discovery
+protocol. These values are operator declarations, not inferred model names.
+The bounded preflight verifies the requested reasoning/role/output request and
+the production streaming/tool path; it records, but does not pretend to probe,
+the full context ceiling. Contradictions fail before an ARC game starts.
+The transcript ceiling is the lower of 120,000 tokens and the declared context
+window minus the declared output ceiling and a 10% (minimum 4,096-token) safety
+reserve. An explicit `AVO_TRANSCRIPT_MAX_TOKENS` above that bound is rejected.
 
 The legacy `AVO_PROVIDER_*` family is not consumed or aliased by the current
 runtime. Supplying only that family makes the real-provider preflight fail
@@ -64,8 +78,9 @@ publication, or client-side frontend configuration.
    portable/test mode;
 2. issue a real `/responses` request and require a response ID plus model output
    satisfying a fresh challenge-bound attestation;
-3. require a real Pi SDK streaming turn that completes exactly one tool call in
-   the same filtered Agent-child environment;
+3. require real Pi SDK streaming turns over the complete production tool schema,
+   a large tool result, and tool-result continuation in the same filtered
+   Agent-child environment;
 4. inspect the installed `arc-agi` and `arcengine` module paths and package
    versions, rejecting local/mock paths;
 5. dynamically discover and freeze the complete public game set;
@@ -94,9 +109,10 @@ per-game durable memory, evidence ledger and checkpoint file, and provider
 load multiplies accordingly — raise the level only as far as the Provider
 endpoint tolerates parallel streams.
 
-Reasoning effort stays `OPENAI_REASONING_EFFORT` (default `max`). A
-different effort level is a different run context: pin a fresh `AVO_REAL_RUN_ID`
-rather than mixing effort levels inside one run.
+Reasoning effort stays `OPENAI_REASONING_EFFORT` (default `max`) and must be
+declared by `OPENAI_REASONING_EFFORTS`. A different effort level is a different
+run context: pin a fresh `AVO_REAL_RUN_ID` rather than mixing effort levels
+inside one run.
 
 ## Resuming an interrupted benchmark
 

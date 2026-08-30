@@ -56,7 +56,9 @@ export function projectPublicRunCapsule(capsule, {
       wireApi: definition.modelInterface.wireApi,
       reasoningEffort: definition.modelInterface.reasoningEffort,
       requestedCapabilities: definition.modelInterface.requestedCapabilities,
-      declaredCapabilityManifest: definition.modelInterface.declaredCapabilityManifest,
+      capabilityManifestSha256: definition.modelInterface.capabilityManifestSha256,
+      effectiveCapabilityManifest: definition.modelInterface.effectiveCapabilityManifest,
+      attestation: definition.modelInterface.attestation,
       samplingParameters: definition.modelInterface.samplingParameters,
     },
   };

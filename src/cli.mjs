@@ -8,6 +8,7 @@ import { loadResumedRecords, loadSessionScorecards, resolveResumeDirectory, save
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
+import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
 import {
   assertRunStateMatchesInitial,
   inspectRunState,
@@ -55,37 +56,14 @@ function parseSelection(args) {
 
 async function providerCheck() {
   const config = getRuntimeConfig();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const response = await fetch(`${config.provider.baseUrl}/responses`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        authorization: `Bearer ${config.provider.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: config.provider.model,
-        input: 'Reply with exactly: OK',
-        reasoning: { effort: config.provider.reasoningEffort },
-        max_output_tokens: 16,
-        stream: false,
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Responses API returned HTTP ${response.status}: ${text.slice(0, 500)}`);
-    const payload = JSON.parse(text);
-    console.log(JSON.stringify({
-      ok: true,
-      status: response.status,
-      responseIdPresent: Boolean(payload.id),
-      outputPresent: Boolean(payload.output || payload.output_text),
-      config: publicConfigSummary(config),
-    }, null, 2));
-  } finally {
-    clearTimeout(timer);
-  }
+  const attestation = await preflightResponsesProvider(config.provider);
+  console.log(JSON.stringify({
+    ok: true,
+    requestAttested: attestation.ok,
+    capabilityManifestSha256: attestation.capabilityManifestSha256,
+    usage: attestation.usage,
+    config: publicConfigSummary(config),
+  }, null, 2));
 }
 
 async function offlineDemo(args) {
@@ -214,7 +192,9 @@ async function runPublic(args) {
       let contextSequence = 0;
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
-          if (event.type === 'avo_runtime_status' || event.type === 'avo_context_compaction') {
+          if (event.type === 'avo_runtime_status'
+              || event.type === 'avo_context_compaction'
+              || event.type === 'avo_provider_request') {
             process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject({
               ...event,
               gameId,

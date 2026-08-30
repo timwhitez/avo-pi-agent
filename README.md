@@ -55,6 +55,9 @@ chmod 600 .env
 ```
 
 Populate `.env` locally. The repository contains placeholders only.
+Replace the example capability limits with values documented by the configured
+provider/model. The runtime rejects an absent or contradictory capability
+manifest instead of inferring limits from a model name.
 
 ## Container run
 

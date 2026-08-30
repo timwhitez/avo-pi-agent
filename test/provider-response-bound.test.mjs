@@ -5,12 +5,14 @@ import {
   preflightResponsesProvider,
   readResponseTextLimited,
 } from '../src/benchmark/provider-attestation.mjs';
+import { providerCapabilities } from './support/provider.mjs';
 
 const config = {
   baseUrl: 'https://provider.invalid/v1',
   apiKey: 'runtime-only-value',
   model: 'production-model',
   reasoningEffort: 'max',
+  capabilities: providerCapabilities('max'),
 };
 const challenge = 'bounded_response_challenge_1234567890';
 const expected = `REAL_PROVIDER_OK:${challenge}`;

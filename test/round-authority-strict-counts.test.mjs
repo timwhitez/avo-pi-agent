@@ -41,17 +41,6 @@ function fixture() {
         runCapsule: publicRunCapsuleFixture({}, { runId: roundId, versionedGameIds }),
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: {
-          ok: true,
-          outputVerified: true,
-          challengeVerified: true,
-          responseFreshnessVerified: true,
-          attestationVersion: 2,
-          responseIdHash: 'a'.repeat(64),
-          challengeHash: 'b'.repeat(64),
-          responseHash: 'c'.repeat(64),
-          proofHash: 'd'.repeat(64),
-        },
       },
     },
     analysis: {

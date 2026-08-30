@@ -16,6 +16,8 @@ import {
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
+import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
+import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -32,13 +34,16 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     path.join(root, 'scripts', 'pi-provider-smoke.mjs'),
   );
   fs.writeFileSync(path.join(root, 'src', 'benchmark', 'provider-attestation.mjs'), String.raw`
-    export async function preflightResponsesProvider() {
+    import { providerCapabilityDigest } from '../provider-capabilities.mjs';
+    export async function preflightResponsesProvider(config) {
       return Object.freeze({
         ok: true,
         outputVerified: true,
         challengeVerified: true,
         responseFreshnessVerified: true,
-        attestationVersion: 2,
+        requestAccepted: true,
+        attestationVersion: 3,
+        capabilityManifestSha256: providerCapabilityDigest(config.capabilities),
         responseIdHash: 'a'.repeat(64),
         challengeHash: 'b'.repeat(64),
         responseHash: 'c'.repeat(64),
@@ -100,8 +105,23 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
         const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
-        if (tools.has('diagnostic_ack')) {
-          await call('diagnostic_ack', { nonce: 'PI_STREAM_OK' });
+        const handoff = async (toolResult = '') => this.options.streamFn(
+          this.options.initialState.model,
+          {
+            systemPrompt: this.options.initialState.systemPrompt,
+            messages: toolResult
+              ? [{ role: 'user', content: [{ type: 'text', text: toolResult }] }]
+              : [],
+            tools: this.options.initialState.tools,
+          },
+          { reasoning: this.options.initialState.thinkingLevel },
+        );
+        await handoff();
+        if (this.options.initialState.systemPrompt.includes('protocol diagnostic')) {
+          const observed = await call('observe');
+          const nonce = /continuation_nonce=([^\n]+)/.exec(observed.content[0].text)?.[1];
+          await handoff(observed.content[0].text);
+          await call('finish', { summary: nonce });
           return;
         }
         await call('memory_read');
@@ -180,7 +200,21 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           if (provider?.id !== providerId) return undefined;
           return provider.models.find((model) => model.id === modelId);
         },
-        streamSimple() { return { result: async () => ({}) }; },
+        async streamSimple(model, context, options) {
+          const role = model.reasoning && model.compat?.supportsDeveloperRole !== false ? 'developer' : 'system';
+          const effort = model.reasoning ? model.thinkingLevelMap?.[options.reasoning] ?? options.reasoning : null;
+          await options.onPayload?.({
+            input: [
+              { role, content: context.systemPrompt },
+              ...context.messages.map((message) => ({ role: message.role, content: message.content })),
+            ],
+            stream: true,
+            max_output_tokens: model.maxTokens,
+            ...(effort ? { reasoning: { effort } } : {}),
+            tools: context.tools.map((tool) => ({ type: 'function', name: tool.name })),
+          }, model);
+          return { result: async () => ({}) };
+        },
       };
     };
   `);
@@ -417,6 +451,7 @@ process.exit(result.status ?? 1);
       baseUrl: 'http://localhost:1/v1',
       model: 'test-model',
       reasoningEffort: 'max',
+      capabilities: providerCapabilities('max'),
     },
     maxActions: 200,
     maxOuterTurns: 1000,
@@ -432,6 +467,42 @@ process.exit(result.status ?? 1);
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, providerSalt),
     providerModelFingerprint: fingerprint(config.provider.model, providerSalt),
   };
+  const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
+  const capabilityProvenance = {
+    providerPreflight: {
+      ok: true,
+      outputVerified: true,
+      challengeVerified: true,
+      responseFreshnessVerified: true,
+      requestAccepted: true,
+      attestationVersion: 3,
+      capabilityManifestSha256,
+    },
+    piStreamPreflight: {
+      ok: true,
+      capabilityManifestSha256,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+    },
+    modelCapabilities: {
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      requested: {
+        wireApi: 'responses', reasoningEffort: 'max', inputModalities: ['text'],
+        streaming: true, toolCalling: true, parallelToolCalls: false,
+      },
+      effective: config.provider.capabilities,
+      probes: {
+        freshnessRequestAccepted: true,
+        productionPiProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+      },
+    },
+  };
   const capsule = buildRunCapsule({
     root,
     runId: 'contract-run',
@@ -439,6 +510,7 @@ process.exit(result.status ?? 1);
     provenance: {
       wireApi: 'responses',
       ...providerIdentity,
+      ...capabilityProvenance,
       reasoningEffort: 'max',
       gitSha,
       arcAuth: { mode: 'registered' },
@@ -464,6 +536,7 @@ process.exit(result.status ?? 1);
     OPENAI_API_KEY: 'test-key',
     OPENAI_MODEL: 'test-model',
     OPENAI_REASONING_EFFORT: 'max',
+    ...providerEnvironment(),
     AVO_GAME_CONCURRENCY: '4',
     AVO_MAX_ACTIONS: '200',
     AVO_MEMORY_DIR: runState.memoryDir,
@@ -582,7 +655,17 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const contextRecords = result.stdout.split('\n')
     .filter((line) => line.startsWith('[avo-context] '))
     .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
-  assert.equal(contextRecords.length, 26);
+  assert.equal(contextRecords.length, 52);
+  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status').length, 26);
+  const providerRecords = contextRecords.filter((record) => record.type === 'avo_provider_request');
+  assert.equal(providerRecords.length, 26);
+  assert.ok(providerRecords.every((record) => (
+    /^[a-f0-9]{64}$/.test(record.capabilityManifestSha256)
+      && record.requested?.reasoningEffort === 'max'
+      && record.effective?.systemPromptRole === 'developer'
+      && record.effective?.toolCount > 0
+      && record.retry?.idempotencyKey === false
+  )));
   for (const record of contextRecords) {
     assert.match(record.gameId, /^g\d{2}$/);
     assert.equal(record.versionedGameId, `${record.gameId}-v1`);
@@ -590,7 +673,12 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     assert.ok(Number.isInteger(record.contextSequence) && record.contextSequence > 0);
   }
   const g02Context = contextRecords.filter((record) => record.gameId === 'g02');
-  assert.deepEqual(g02Context.map((record) => [record.attempt, record.contextSequence]), [[1, 1], [2, 2]]);
+  assert.deepEqual(g02Context.map((record) => [record.type, record.attempt, record.contextSequence]), [
+    ['avo_runtime_status', 1, 1],
+    ['avo_provider_request', 1, 2],
+    ['avo_runtime_status', 2, 3],
+    ['avo_provider_request', 2, 4],
+  ]);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
@@ -688,6 +776,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     provenance: {
       wireApi: 'responses',
       ...providerIdentity,
+      ...capabilityProvenance,
       reasoningEffort: 'max',
       gitSha: migratedGitSha,
       arcAuth: { mode: 'registered' },
@@ -733,6 +822,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       OPENAI_API_KEY: 'contract-provider-key-1234567890',
       OPENAI_MODEL: 'production-model',
       OPENAI_REASONING_EFFORT: 'max',
+      ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
     },
@@ -790,6 +880,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       OPENAI_API_KEY: 'contract-provider-key-1234567890',
       OPENAI_MODEL: 'production-model',
       OPENAI_REASONING_EFFORT: 'max',
+      ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
       AVO_DEBUG: 'contract-mutate-after-child',

@@ -1,5 +1,11 @@
 import crypto from 'node:crypto';
 
+import {
+  assertProviderCapabilities,
+  providerCapabilityDigest,
+  transcriptMaxTokens,
+} from '../provider-capabilities.mjs';
+
 /** Production loop backed by the official Pi Agent Harness packages. */
 export const RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
 state={state}
@@ -32,27 +38,6 @@ export const THINKING_ELISION_POLICY_SHA256 = crypto
   .createHash('sha256')
   .update(THINKING_ELISION_POLICY)
   .digest('hex');
-export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
-  api: 'openai-responses',
-  reasoning: true,
-  input: Object.freeze(['text']),
-  contextWindow: 1_000_000,
-  maxTokens: 64_000,
-  thinkingLevelMap: Object.freeze({
-    off: 'none',
-    minimal: 'minimal',
-    low: 'low',
-    medium: 'medium',
-    high: 'high',
-    xhigh: 'xhigh',
-    max: 'max',
-  }),
-  compat: Object.freeze({
-    supportsDeveloperRole: true,
-    supportsReasoningEffort: true,
-  }),
-});
-
 export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   let Agent;
   let estimateTokens;
@@ -72,6 +57,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     );
   }
 
+  const capabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const providerId = 'runtime-responses';
   const model = {
     id: config.provider.model,
@@ -79,7 +65,16 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     provider: providerId,
     baseUrl: config.provider.baseUrl,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    ...PI_MODEL_CAPABILITY_MANIFEST,
+    api: 'openai-responses',
+    reasoning: capabilities.reasoning.supported,
+    input: capabilities.inputModalities,
+    contextWindow: capabilities.limits.contextWindowTokens,
+    maxTokens: capabilities.limits.maxOutputTokens,
+    thinkingLevelMap: capabilities.reasoning.thinkingLevelMap,
+    compat: {
+      supportsDeveloperRole: capabilities.roles.supportsDeveloperRole,
+      supportsLongCacheRetention: capabilities.cache.retention === 'long',
+    },
   };
 
   const provider = createProvider({
@@ -102,16 +97,31 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   // streamFn is the only seam where pi-ai accepts per-request transport knobs.
   const streamTimeoutMs = positiveEnvInt('AVO_PROVIDER_STREAM_TIMEOUT_MS', 20 * 60 * 1000);
   const streamMaxRetries = positiveEnvInt('AVO_PROVIDER_STREAM_MAX_RETRIES', 4);
-  const resilientStreamFn = (model, context, options) =>
-    models.streamSimple.call(models, model, context, {
+  let providerRequestSequence = 0;
+  const resilientStreamFn = (model, context, options) => {
+    const requestSequence = ++providerRequestSequence;
+    const priorOnPayload = options?.onPayload;
+    return models.streamSimple.call(models, model, context, {
       ...options,
+      cacheRetention: capabilities.cache.retention,
       timeoutMs: streamTimeoutMs,
       maxRetries: streamMaxRetries,
+      onPayload: async (payload, currentModel) => {
+        const telemetry = providerRequestTelemetry(payload, {
+          capabilities,
+          reasoningEffort: config.provider.reasoningEffort,
+          requestSequence,
+          streamMaxRetries,
+        });
+        onEvent(telemetry);
+        return priorOnPayload ? priorOnPayload(payload, currentModel) : undefined;
+      },
     });
+  };
   const transcriptOptions = {
     recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
-    maxTokens: positiveEnvInt('AVO_TRANSCRIPT_MAX_TOKENS', 120_000),
+    maxTokens: transcriptMaxTokens(capabilities, process.env.AVO_TRANSCRIPT_MAX_TOKENS),
     estimateMessageTokens: estimateTokens,
     onCompaction: onEvent,
   };
@@ -245,6 +255,92 @@ export function effectivePiSystemPrompt(systemPrompt, workspaceMode = 'files-onl
         ? 'The scratch workspace is disabled. No arbitrary-code or workspace-file tool is available.'
         : 'The scratch workspace is files-only. It rejects symlinks and hard links, and no model-facing arbitrary-code execution tool is available.',
   );
+}
+
+export function providerRequestTelemetry(payload, {
+  capabilities,
+  reasoningEffort,
+  requestSequence,
+  streamMaxRetries,
+} = {}) {
+  assertProviderCapabilities(capabilities);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('provider request payload is malformed');
+  }
+  const expectedReasoningEffort = capabilities.reasoning.supported
+    ? capabilities.reasoning.thinkingLevelMap[reasoningEffort]
+    : null;
+  const effectiveReasoningEffort = payload.reasoning?.effort ?? null;
+  const effectiveSystemPromptRole = Array.isArray(payload.input)
+    ? payload.input.find((entry) => ['developer', 'system'].includes(entry?.role))?.role ?? null
+    : null;
+  const effectiveMaxOutputTokens = Number(payload.max_output_tokens);
+  const inputChars = JSON.stringify(payload.input ?? []).length;
+  const inputModalities = payloadModalities(payload.input);
+  const toolCount = Array.isArray(payload.tools) ? payload.tools.length : 0;
+  const cacheRetention = capabilities.cache.retention;
+  const cacheValid = cacheRetention === 'none'
+    ? payload.prompt_cache_key === undefined && payload.prompt_cache_retention === undefined
+    : payload.prompt_cache_key !== undefined
+      && (cacheRetention !== 'long' || payload.prompt_cache_retention === '24h');
+  const valid = payload.stream === true
+    && Number.isSafeInteger(effectiveMaxOutputTokens)
+    && effectiveMaxOutputTokens >= 16
+    && effectiveMaxOutputTokens <= capabilities.limits.maxOutputTokens
+    && effectiveReasoningEffort === expectedReasoningEffort
+    && effectiveSystemPromptRole === capabilities.roles.effectiveSystemPromptRole
+    && inputModalities.includes('text')
+    && inputModalities.every((modality) => capabilities.inputModalities.includes(modality))
+    && toolCount > 0
+    && cacheValid;
+  if (!valid) throw new Error('effective provider request contradicts the capability manifest');
+
+  return Object.freeze({
+    type: 'avo_provider_request',
+    schemaVersion: 1,
+    requestSequence: Number(requestSequence),
+    capabilityManifestSha256: providerCapabilityDigest(capabilities),
+    requested: {
+      reasoningEffort: String(reasoningEffort),
+      maxOutputTokens: capabilities.limits.maxOutputTokens,
+      inputModalities: ['text'],
+      streaming: true,
+      toolCalling: true,
+      parallelToolCalls: false,
+    },
+    effective: {
+      reasoningEffort: effectiveReasoningEffort,
+      maxOutputTokens: effectiveMaxOutputTokens,
+      inputModalities,
+      systemPromptRole: effectiveSystemPromptRole,
+      inputChars,
+      streaming: true,
+      toolCount,
+      toolSchemaSha256: crypto.createHash('sha256').update(JSON.stringify(payload.tools)).digest('hex'),
+      cacheRetention,
+    },
+    retry: {
+      maxRetries: Number(streamMaxRetries),
+      idempotencyKey: false,
+    },
+  });
+}
+
+function payloadModalities(input) {
+  let text = false;
+  let image = false;
+  const pending = [input];
+  while (pending.length) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+    } else if (value && typeof value === 'object') {
+      if (value.type === 'input_text' || typeof value.content === 'string') text = true;
+      if (value.type === 'input_image') image = true;
+      pending.push(...Object.values(value).filter((child) => child && typeof child === 'object'));
+    }
+  }
+  return [...(text ? ['text'] : []), ...(image ? ['image'] : [])];
 }
 
 export function toTypeBox(schema, Type) {

@@ -39,6 +39,9 @@ try {
     piPackagesPresent: true,
     provider: {
       wireApi: 'responses',
+      capabilityStatus: 'configured-with-bounded-probes',
+      capabilityManifestSha256: providerPreflight.capabilityManifestSha256,
+      effectiveCapabilities: provider.capabilities,
       requestAttested: providerPreflight.ok === true,
       piStreamAttested: piStreamPreflight.ok === true,
       piStream: piStreamPreflight,

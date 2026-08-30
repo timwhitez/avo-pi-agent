@@ -25,6 +25,8 @@ import {
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
+import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
+import { providerCapabilities } from './support/provider.mjs';
 
 function temporaryRoot(prefix = 'avo-capsule-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -65,6 +67,7 @@ function runtimeConfig(overrides = {}) {
       baseUrl: 'https://provider.invalid/v1',
       model: 'model-a',
       reasoningEffort: 'high',
+      capabilities: providerCapabilities('high'),
     },
     maxActions: 1000,
     maxOuterTurns: 1000,
@@ -79,10 +82,48 @@ function runtimeConfig(overrides = {}) {
 
 function providerProvenance(runId, config) {
   const salt = crypto.createHash('sha256').update(runId).digest('hex');
+  const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
   return {
     providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
     providerModelFingerprint: fingerprint(config.provider.model, salt),
+    providerPreflight: {
+      ok: true,
+      outputVerified: true,
+      challengeVerified: true,
+      responseFreshnessVerified: true,
+      requestAccepted: true,
+      attestationVersion: 3,
+      capabilityManifestSha256,
+    },
+    piStreamPreflight: {
+      ok: true,
+      capabilityManifestSha256,
+      productionToolSchemaVerified: true,
+      requestedVsEffectiveVerified: true,
+      multiTurnContinuationVerified: true,
+      largeToolResultVerified: true,
+    },
+    modelCapabilities: {
+      capabilityStatus: 'configured-with-bounded-probes',
+      manifestSha256: capabilityManifestSha256,
+      requested: {
+        wireApi: 'responses',
+        reasoningEffort: config.provider.reasoningEffort,
+        inputModalities: ['text'],
+        streaming: true,
+        toolCalling: true,
+        parallelToolCalls: false,
+      },
+      effective: config.provider.capabilities,
+      probes: {
+        freshnessRequestAccepted: true,
+        productionPiProtocolVerified: true,
+        productionToolSchemaVerified: true,
+        multiTurnContinuationVerified: true,
+        largeToolResultVerified: true,
+      },
+    },
   };
 }
 
@@ -347,6 +388,9 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
   assert.equal(published.capsuleHash, value.capsuleHash);
   assert.equal(published.comparable, true);
+  assert.equal(published.modelCapabilityStatus, 'configured-with-bounded-probes');
+  assert.equal(published.modelInterface.effectiveCapabilityManifest.limits.contextWindowTokens, 128_000);
+  assert.equal(published.modelInterface.effectiveCapabilityManifest.visualObservation.enabled, false);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
   const changedComponent = structuredClone(published);

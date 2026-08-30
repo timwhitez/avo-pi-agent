@@ -40,17 +40,6 @@ function fixture(score = 0.75) {
         runCapsule: publicRunCapsuleFixture({}, { runId: roundId, versionedGameIds }),
         noMockAttestation: true,
         wireApi: 'responses',
-        providerPreflight: {
-          ok: true,
-          outputVerified: true,
-          challengeVerified: true,
-          responseFreshnessVerified: true,
-          attestationVersion: 2,
-          responseIdHash: 'a'.repeat(64),
-          challengeHash: 'b'.repeat(64),
-          responseHash: 'c'.repeat(64),
-          proofHash: 'd'.repeat(64),
-        },
       },
     },
     analysis: {
@@ -87,7 +76,7 @@ test('accepts only a complete real-provider official-score v5 trajectory round',
   assert.equal(result.authoritative, true);
   assert.equal(result.clean, true);
   assert.equal(result.reasons.length, 0);
-  assert.equal(result.providerAttestationVersion, 2);
+  assert.equal(result.providerAttestationVersion, 3);
   assert.deepEqual(result.officialScore, { value: 0.75, origin: 'scorecardEvidence.score' });
 });
 
@@ -199,7 +188,7 @@ test('rejects legacy fixed-output attestation and malformed proof digests', () =
   const legacyResult = evaluateRoundAuthority(legacy);
   assert.equal(legacyResult.authoritative, false);
   assert.ok(legacyResult.reasons.some((reason) => /freshness attestation/.test(reason)));
-  assert.ok(legacyResult.reasons.some((reason) => /older than v2/.test(reason)));
+  assert.ok(legacyResult.reasons.some((reason) => /older than v3/.test(reason)));
 
   const malformed = fixture();
   malformed.benchmark.provenance.providerPreflight.proofHash = 'not-a-sha';

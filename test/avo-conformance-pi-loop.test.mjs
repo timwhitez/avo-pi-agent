@@ -32,9 +32,15 @@ test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustio
   assert.match(cliSource, /\[avo-context\]/);
 });
 
-test('runtime model is configured for Responses and extended reasoning', () => {
+test('runtime model is configured from the explicit effective capability manifest', () => {
   assert.match(source, /api:\s*'openai-responses'/);
-  assert.match(source, /reasoning:\s*true/);
-  assert.match(source, /max:\s*'max'/);
-  assert.match(source, /supportsReasoningEffort:\s*true/);
+  assert.match(source, /assertProviderCapabilities\(config\?\.provider\?\.capabilities\)/);
+  assert.match(source, /reasoning:\s*capabilities\.reasoning\.supported/);
+  assert.match(source, /contextWindow:\s*capabilities\.limits\.contextWindowTokens/);
+  assert.match(source, /maxTokens:\s*capabilities\.limits\.maxOutputTokens/);
+  assert.match(source, /thinkingLevelMap:\s*capabilities\.reasoning\.thinkingLevelMap/);
+  assert.match(source, /supportsDeveloperRole:\s*capabilities\.roles\.supportsDeveloperRole/);
+  assert.match(source, /providerRequestTelemetry/);
+  assert.doesNotMatch(source, /contextWindow:\s*1_000_000/);
+  assert.doesNotMatch(source, /maxTokens:\s*64_000/);
 });
