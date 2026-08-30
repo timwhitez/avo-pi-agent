@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { sealRunCapsule, writeRunCapsule } from '../src/benchmark/run-capsule.mjs';
+import { summarizeEvidenceEvents } from '../src/core/evidence-store.mjs';
 
 const runner = path.resolve('scripts/run-real-public.mjs');
 
@@ -50,6 +51,14 @@ test('the production runner refuses to resume a completed diagnostic migration',
     git: { commit: 'a'.repeat(40) },
     policyProfile: { requested: 'current-v1', effective: 'current-v1' },
     runtime: { config: { policyProfile: 'current-v1' } },
+    task: {
+      versionedGameIds: ['g1-v1'],
+      trajectoryStarts: [{
+        gameId: 'g1',
+        versionedGameId: 'g1-v1',
+        trajectoryEvidence: summarizeEvidenceEvents([]),
+      }],
+    },
   });
   writeRunCapsule(path.join(interrupted.privateDir, 'run-capsule.json'), capsule, {
     root: interrupted.privateDir,

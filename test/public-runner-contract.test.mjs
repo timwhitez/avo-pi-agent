@@ -17,9 +17,14 @@ import {
 import { evaluatePublicRunCapsule } from '../src/benchmark/run-capsule-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
+import {
+  experimentIdentitySha256,
+  sealExperimentPlan,
+} from '../src/benchmark/experiment-protocol.mjs';
 import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
 import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 import { workspaceAttestationFixture } from './support/run-capsule.mjs';
+import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -101,10 +106,9 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
       subscribe(listener) { this.listener = listener; return () => {}; }
       followUp() {}
       async prompt() {
-        this.listener?.({
-          type: 'avo_runtime_status',
-          templateSha256: 'a'.repeat(64),
-          status: { state: 'ACTIVE' },
+        await this.options.prepareNextTurnWithContext({
+          message: { content: [{ type: 'toolCall' }] },
+          context: { messages: [] },
         });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
         const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
@@ -127,18 +131,26 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           await call('finish', { summary: nonce });
           return;
         }
-        for (const name of [
+        const strategicTools = [
           'knowledge_read',
           'memory_read',
           'journal_read',
           'memory_update',
           'hypothesis_propose',
           'hypothesis_evaluate',
-        ]) {
-          if (tools.has(name)) throw new Error('minimal profile exposed strategic tool: ' + name);
-        }
-        if (/memory|hypothesis|journal|knowledge|supervisor/i.test(this.options.initialState.systemPrompt)) {
-          throw new Error('minimal profile injected strategic system guidance');
+        ];
+        const currentProfile = tools.has('knowledge_read');
+        if (currentProfile) {
+          for (const name of strategicTools) {
+            if (!tools.has(name)) throw new Error('current profile omitted strategic tool: ' + name);
+          }
+        } else {
+          for (const name of strategicTools) {
+            if (tools.has(name)) throw new Error('minimal profile exposed strategic tool: ' + name);
+          }
+          if (/memory|hypothesis|journal|knowledge|supervisor/i.test(this.options.initialState.systemPrompt)) {
+            throw new Error('minimal profile injected strategic system guidance');
+          }
         }
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
@@ -568,8 +580,13 @@ process.exit(result.status ?? 1);
     config,
     workspaceAttestation: workspaceAttestationFixture(config),
     initialState: runState.initialState,
+    memoryDir: runState.memoryDir,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });
+  assert.equal(capsule.definition.task.trajectoryStarts.length, 25);
+  assert.ok(capsule.definition.task.trajectoryStarts.every(
+    (start) => start.trajectoryEvidence.highWaterSequence === 0,
+  ));
   const capsuleFile = path.join(privateDir, 'run-capsule.json');
   writeRunCapsule(capsuleFile, capsule, { root: privateDir });
 
@@ -698,6 +715,7 @@ globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback,
 process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
 await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   `;
+  const scorecardObservationNotBefore = Date.now();
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
@@ -737,6 +755,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     ['avo_runtime_status', 2, 3],
     ['avo_provider_request', 2, 4],
   ]);
+  const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
+  assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
+  assert.equal(g02Statuses[1].status.maxOuterTurns, g02Statuses[0].status.maxOuterTurns - 1);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
@@ -760,6 +781,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.results[0].rejectedCommands, 1);
   assert.equal(report.results[0].terminalRejectedCommands, 1);
   assert.equal(report.results[0].postTerminalGameplayActions, 0);
+  assert.equal(report.results[0].mechanismMetrics.toolFailures, 0);
   assert.equal(report.results[1].resets, 1);
   assert.equal(report.results[1].fullResets, 1);
   assert.equal(report.results[1].episodeId, 'episode-000002');
@@ -769,7 +791,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.summary.totalTerminalRejectedCommands, 1);
   assert.equal(report.summary.totalPostTerminalGameplayActions, 0);
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
-  assert.equal(report.scorecardEvidence[0].observedAt, '2026-08-30T00:01:00.000Z');
+  assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) >= scorecardObservationNotBefore);
+  assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) <= Date.parse(report.createdAt));
   assert.equal(report.aggregateScorecard.score, 100);
   assert.equal(report.summary.allWon, true);
   assert.equal(report.results[0].versionedGameId, 'g01-v1');
@@ -802,6 +825,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(retryCheckpoint.record.terminalRejectedCommands, 0);
   assert.equal(retryCheckpoint.record.postTerminalGameplayActions, 0);
   assert.equal(retryCheckpoint.record.executions.length, 3);
+  assert.ok(retryCheckpoint.record.actions <= retryCheckpoint.record.actionBudget.total);
+  assert.ok(retryCheckpoint.record.outerTurns <= retryCheckpoint.record.outerTurnBudget);
   const stateAuthority = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
   ), 'utf8'));
@@ -850,8 +875,14 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     config,
     workspaceAttestation: workspaceAttestationFixture(config),
     initialState: migratedState.initialState,
+    memoryDir: migratedState.memoryDir,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });
+  const retryTrajectoryStart = migratedCapsule.definition.task.trajectoryStarts.find(
+    (start) => start.gameId === 'g02',
+  );
+  assert.ok(retryTrajectoryStart.trajectoryEvidence.highWaterSequence > 0);
+  assert.equal(retryTrajectoryStart.trajectoryEvidence.complete, true);
   const migratedCapsuleFile = path.join(privateDir, `run-capsule.${migratedCapsule.capsuleHash}.json`);
   writeRunCapsule(migratedCapsuleFile, migratedCapsule, { root: privateDir });
   const migrated = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
@@ -922,6 +953,12 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   );
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
   assert.deepEqual(
+    publishedReport.games.map(({ versionedGameId, actionBudget, outerTurnBudget }) => ({
+      versionedGameId, actionBudget, outerTurnBudget,
+    })),
+    publishedReport.provenance.runCapsule.task.gameBudgets,
+  );
+  assert.deepEqual(
     publishedReport.provenance.publicVersionedGameIds,
     Array.from({ length: 25 }, (_, index) => `g${String(index + 1).padStart(2, '0')}-v1`),
   );
@@ -929,6 +966,140 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     publishedReport.provenance.runCapsule,
     { privateCapsuleEvidence: outerEvidence },
   ).accepted, true);
+
+  const sealed = publishedReport.provenance.runCapsule;
+  const experimentRuntime = {
+    nodeVersion: sealed.runtime.node,
+    npmVersion: sealed.runtime.npm,
+    pythonVersion: sealed.runtime.python,
+    nodeDependencySha256: sealed.nodeDependencySha256,
+    pythonDependencySha256: sealed.pythonDependencySha256,
+    arcRuntime: publishedReport.provenance.arcRuntime,
+    gameConcurrency: sealed.runtime.gameConcurrency,
+    gameAttempts: sealed.runtime.gameAttempts,
+    transientTurnRecoveries: sealed.runtime.transientTurnRecoveries,
+    providerStreamTimeoutMs: sealed.runtime.providerStreamTimeoutMs,
+    providerStreamMaxRetries: sealed.runtime.providerStreamMaxRetries,
+    actionBudgetPolicy: sealed.runtime.actionBudgetPolicy,
+    maxActions: sealed.runtime.config.maxActions,
+    maxOuterTurns: sealed.runtime.config.maxOuterTurns,
+    stallWindow: sealed.runtime.config.stallWindow,
+    memorySurfaceLimit: sealed.runtime.config.memorySurfaceLimit,
+    workspaceMode: sealed.runtime.config.workspaceMode,
+    workspacePythonTimeoutMs: sealed.runtime.config.workspacePythonTimeoutMs,
+    workspaceContainerRuntime: sealed.runtime.config.workspaceContainerRuntime,
+    workspaceContainerImage: sealed.runtime.config.workspaceContainerImage,
+    transcriptRecentToolResults: sealed.transcript.recentToolResults,
+    transcriptMaxMessages: sealed.transcript.maxMessages,
+    transcriptMaxTokens: sealed.transcript.maxTokens,
+    toolResultMaxChars: sealed.transcript.maxToolResultChars,
+    arcAuthMode: sealed.task.arcAuthMode,
+  };
+  const experimentManifest = (versionedGameIds) => ({
+    versionedGameIds,
+    gameBudgets: deriveGameBudgets(versionedGameIds.map((versionedGameId) => ({
+      versionedGameId,
+      baseline_actions: [],
+    })), {
+      hardCap: experimentRuntime.maxActions,
+      outerTurnHardCap: experimentRuntime.maxOuterTurns,
+      policy: experimentRuntime.actionBudgetPolicy,
+    }),
+  });
+  const experimentPlan = sealExperimentPlan({
+    schema: 'avo.benchmark-experiment-plan.v1',
+    experimentId: 'production-profile-contract',
+    createdAt: '2026-08-30T00:02:00.000Z',
+    hypothesis: 'current-v1 changes outcomes relative to minimal-v1 under matched production conditions',
+    manifests: {
+      tuning: experimentManifest(['g01-v1', 'g02-v1', 'g03-v1']),
+      evaluation: experimentManifest(['g04-v1', 'g05-v1', 'g06-v1']),
+    },
+    arms: {
+      baseline: { policyProfile: 'minimal-v1' },
+      intervention: { policyProfile: 'current-v1' },
+    },
+    changedVariable: 'policyProfile',
+    execution: { repetitions: 1 },
+    conditions: {
+      gitCommit: sealed.gitCommit,
+      provider: {
+        wireApi: 'responses',
+        endpointSha256: experimentIdentitySha256('endpoint', 'https://provider.invalid/v1'),
+        modelSha256: experimentIdentitySha256('model', 'production-model'),
+        reasoningEffort: 'max',
+        capabilities: sealed.modelInterface.effectiveCapabilityManifest,
+        capabilityManifestSha256: sealed.modelInterface.capabilityManifestSha256,
+      },
+      runtime: experimentRuntime,
+      initialState: {
+        mode: sealed.initialState.mode,
+        memory: sealed.initialState.memory,
+        workspace: sealed.initialState.workspace,
+      },
+    },
+  });
+  const experimentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-experiment-'));
+  const experimentFile = path.join(experimentRoot, 'plan.json');
+  fs.writeFileSync(experimentFile, JSON.stringify(experimentPlan));
+  const experimentReports = [];
+  for (const arm of ['baseline', 'intervention']) {
+    const experimentRunId = `experiment-tuning-${arm}`;
+    const experimentRun = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        AVO_DISABLE_DOTENV: '1',
+        AVO_REAL_RUN_ID: experimentRunId,
+        AVO_ARC_AUTH_MODE: 'registered',
+        ARC_API_KEY: 'contract-arc-key',
+        ARC_PYTHON: fakePython,
+        OPENAI_BASE_URL: 'https://provider.invalid/v1',
+        OPENAI_API_KEY: 'contract-provider-key-1234567890',
+        OPENAI_MODEL: 'production-model',
+        OPENAI_REASONING_EFFORT: 'max',
+        ...providerEnvironment(),
+        AVO_MAX_ACTIONS: '200',
+        AVO_BENCHMARK_TIMEOUT_MS: '60000',
+        AVO_EXPERIMENT_PLAN_FILE: experimentFile,
+        AVO_EXPERIMENT_PHASE: 'tuning',
+        AVO_EXPERIMENT_ARM: arm,
+        AVO_EXPERIMENT_REPETITION: '1',
+      },
+    });
+    assert.equal(experimentRun.status, 0, experimentRun.stderr || experimentRun.stdout);
+    const report = JSON.parse(fs.readFileSync(
+      path.join(root, 'runs', 'public', `${experimentRunId}.json`),
+      'utf8',
+    ));
+    assert.equal(report.status, 'complete');
+    assert.equal(report.completeness.actualCount, 3);
+    assert.equal(report.experiment.arm, arm);
+    assert.equal(report.experiment.policyProfile, arm === 'baseline' ? 'minimal-v1' : 'current-v1');
+    assert.equal(Object.hasOwn(report.experiment, 'providerEndpointSha256'), false);
+    assert.equal(Object.hasOwn(report.experiment, 'providerModelSha256'), false);
+    assert.equal(report.aggregates.mechanismMetrics.toolFailures, 0);
+    assert.equal(report.aggregates.mechanismMetrics.workspaceFailures, 0);
+    assert.deepEqual(
+      report.games.map(({ versionedGameId, actionBudget, outerTurnBudget }) => ({
+        versionedGameId, actionBudget, outerTurnBudget,
+      })),
+      experimentPlan.manifests.tuning.gameBudgets,
+    );
+    const experimentEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report });
+    assert.match(
+      experimentEvidence.value.definition.experiment.providerEndpointSha256,
+      /^[a-f0-9]{64}$/,
+    );
+    experimentReports.push(report);
+  }
+  assert.deepEqual(
+    experimentReports.map((report) => report.provenance.runCapsule.policyProfile.effective),
+    ['minimal-v1', 'current-v1'],
+  );
+  fs.rmSync(experimentRoot, { recursive: true, force: true });
 
   const configFileAfterSuccess = path.join(root, 'src', 'config.mjs');
   const cleanConfig = fs.readFileSync(configFileAfterSuccess);

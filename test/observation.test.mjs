@@ -98,6 +98,15 @@ test('separates grid content, observation content, episode identity, and transit
   assert.notEqual(frameHash(base), frameHash(changedAffordance));
   assert.equal(first.observation.executionIdSha256.length, 64);
   assert.equal(JSON.stringify(first).includes('private-execution-id'), false);
+  const rehydrated = observationIdentity(first.observation, {
+    attemptId: 'attempt-1',
+    episodeId: 'episode-1',
+  });
+  assert.deepEqual(rehydrated, first);
+  assert.throws(
+    () => observationIdentity({ ...first.observation, executionIdSha256: 'invalid' }),
+    /executionIdSha256/,
+  );
 
   const nextEpisode = observationIdentity(base, { attemptId: 'attempt-1', episodeId: 'episode-2' });
   assert.equal(first.observationContentHash, nextEpisode.observationContentHash);

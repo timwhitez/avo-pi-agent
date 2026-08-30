@@ -179,6 +179,62 @@ gameplay actions, resets, rejected commands and total environment actions
 separate so later analysis can use the official scorecard rather than a
 fabricated local score.
 
+### Controlled benchmark experiments
+
+`src/benchmark/experiment-protocol.mjs` seals one low-cost comparison before
+execution: 3–4 tuning games, a different 3–4 held-out evaluation games,
+`minimal-v1` versus `current-v1`, and exactly one changed variable
+(`policyProfile`). The plan also fixes the commit, provider/model capability
+manifest, reasoning effort, budgets, retries, runtime, workspace, and initial
+state. Every manifest freezes the discovered baseline inputs and exact action
+and outer-turn budget for each game. Those are whole-game totals: retries receive
+only the remaining actions and turns, and cumulative reports above either limit
+are rejected.
+Mutated, overlapping, unsorted, oversized, or same-game multi-version manifests
+fail before any provider or ARC request.
+
+Run one predeclared unit through the normal local benchmark entrypoint:
+
+```bash
+AVO_EXPERIMENT_PLAN_FILE=/absolute/path/plan.json \
+AVO_EXPERIMENT_PHASE=tuning \
+AVO_EXPERIMENT_ARM=baseline \
+AVO_EXPERIMENT_REPETITION=1 \
+npm run benchmark:local
+```
+
+Each public report binds its phase, arm, repetition, manifest, plan, capsule,
+state, and single exact scorecard session. Model/tool/mechanism metrics,
+including successful calls for each required interface, are reported per game
+and in aggregate. The classifier always revalidates the raw private capsule plus
+public report rather than accepting a caller-built result.
+Paired result validation rejects mixed
+commits, capsules, sessions, states, or non-intervention conditions. Its only
+conclusions are `harness-limited`, `feature-helpful-or-harmful`,
+`model-limited-under-tested-conditions`, and `undetermined`; the model-limit
+label additionally requires securely read durable ledgers whose event digests
+and roots exactly match every report and whose observation, transition, attempt,
+episode, action legality, controller rejection, counter, and execution identities
+recompute from the raw events. Each capsule seals the complete per-game
+trajectory boundary at run start: warm history must match that root and remain
+semantically valid, while run counters and execution IDs come only from the
+post-boundary suffix recorded between the exact scorecard session start and
+the actual scorecard fetch completion; scorecard action/reset totals must match
+that suffix through the published per-game counters;
+concrete legal-action events with recorded model reasoning; per-game
+production-path checks; non-causal incident analysis; and held-out repetition.
+Its independent review is a bounded regular JSON file:
+the classifier recomputes the file byte hash and requires an approval created
+after all runs that binds the exact plan, result, and assessment hashes. Summary
+roots, self-reported pass flags, and arbitrary review digests cannot establish a
+model-limit conclusion. No public benchmark result is claimed by this
+implementation change.
+
+For that final classification call, the fourth argument is
+`{ trajectoryRoots: [{ runId, root }], independentReviewFile,
+independentReviewSha256 }`; every experiment run must have one distinct private
+trajectory root.
+
 ## Security and privacy
 
 - Provider endpoint, model name and key are read only from environment.
@@ -203,6 +259,7 @@ src/core/supervisor.mjs      stall and cycle intervention
 src/loop/pi-sdk.mjs          production Pi Agent loop
 src/loop/portable-pi.mjs     offline-only deterministic test double
 src/arc/bridge-client.mjs    Node side of official ARC adapter
+src/benchmark/experiment-protocol.mjs paired attribution gate
 bridge/arc_bridge.py         Python side using arc-agi / arcengine
 scripts/secret-scan.mjs      pre-publication secret gate
 docs/ARCHITECTURE.md         mechanism mapping and trust boundaries

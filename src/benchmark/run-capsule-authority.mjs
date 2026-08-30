@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 
+import { deriveGameBudgets } from '../arc/action-budget.mjs';
+import { summarizeEvidenceEvents } from '../core/evidence-store.mjs';
+import { EPISODE_OBSERVATION_SCHEMA } from '../core/observation.mjs';
 import { POLICY_PROFILE_NAMES } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
@@ -169,6 +172,12 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
   requireCondition(runtime.scorecardBinding === 'exact-session-execution-v5', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);
+  const actionBudgetPolicy = recordOrEmpty(runtime.actionBudgetPolicy);
+  requireCondition(
+    isPositiveNumber(actionBudgetPolicy.multiplier) && isPositiveInteger(actionBudgetPolicy.fallback),
+    'run capsule action-budget policy is malformed',
+    reasons,
+  );
   requireCondition(
     runtime.config?.policyProfile === policyProfile.effective,
     'run capsule runtime policy profile differs from its attestation',
@@ -195,6 +204,29 @@ export function evaluatePublicRunCapsule(value, {
   const task = recordOrEmpty(capsule.task);
   requireCondition(['anonymous-auto', 'registered'].includes(String(task.arcAuthMode || '')), 'run capsule ARC auth mode is unknown', reasons);
   requireCondition(Array.isArray(task.versionedGameIds) && task.versionedGameIds.length > 0, 'run capsule versioned game set is absent', reasons);
+  try {
+    const observedBudgets = deriveGameBudgets((task.gameBudgets || []).map((entry) => ({
+      versionedGameId: entry?.versionedGameId,
+      baseline_actions: entry?.actionBudget?.baselineActions,
+    })), {
+      hardCap: runtime.config?.maxActions,
+      outerTurnHardCap: runtime.config?.maxOuterTurns,
+      policy: actionBudgetPolicy,
+    });
+    requireCondition(
+      canonicalJson(observedBudgets) === canonicalJson(task.gameBudgets)
+        && canonicalJson(observedBudgets.map((entry) => entry.versionedGameId)) === canonicalJson(task.versionedGameIds),
+      'run capsule per-game budgets are malformed',
+      reasons,
+    );
+  } catch {
+    reasons.push('run capsule per-game budgets are malformed');
+  }
+  requireCondition(
+    validTrajectoryStarts(task.trajectoryStarts, task.versionedGameIds),
+    'run capsule trajectory-start boundaries are malformed',
+    reasons,
+  );
   const model = recordOrEmpty(capsule.modelInterface);
   const manifest = recordOrEmpty(model.effectiveCapabilityManifest);
   const limits = recordOrEmpty(manifest.limits);
@@ -404,6 +436,39 @@ function normalizeShortGameSet(values) {
   return { valid, values: normalized };
 }
 
+function validTrajectoryStarts(value, versionedGameIds) {
+  if (!Array.isArray(value) || !Array.isArray(versionedGameIds)
+      || value.length !== versionedGameIds.length) return false;
+  const expected = versionedGameIds.slice().sort();
+  const seen = new Set();
+  return value.every((item, index) => {
+    const trajectory = item?.trajectoryEvidence;
+    const count = trajectory?.eventCount;
+    const gameId = expected[index]?.split('-')[0];
+    if (item?.versionedGameId !== expected[index] || item?.gameId !== gameId
+        || seen.has(gameId) || trajectory?.schema !== 'avo.trajectory-evidence.v1'
+        || trajectory?.complete !== true || !Number.isSafeInteger(count) || count < 0
+        || trajectory.highWaterSequence !== count || !isSha256(trajectory.rootSha256)) {
+      return false;
+    }
+    seen.add(gameId);
+    if (count === 0) {
+      return trajectory.identitySchema === null
+        && trajectory.firstEvidenceRef === null
+        && trajectory.lastEvidenceRef === null
+        && trajectory.rootSha256 === summarizeEvidenceEvents([]).rootSha256;
+    }
+    return trajectory.identitySchema === EPISODE_OBSERVATION_SCHEMA
+      && evidenceRefSequence(trajectory.firstEvidenceRef) === 1
+      && evidenceRefSequence(trajectory.lastEvidenceRef) === count;
+  });
+}
+
+function evidenceRefSequence(value) {
+  const match = /^evidence-([0-9]{6,})-[a-f0-9]{12}$/.exec(String(value || ''));
+  return match ? Number(match[1]) : null;
+}
+
 function fingerprint(value, salt) {
   return crypto.createHash('sha256')
     .update(String(salt))
@@ -434,6 +499,10 @@ function isSha256(value) {
 
 function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function isPositiveNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function isSafeRunId(value) {

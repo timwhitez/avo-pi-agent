@@ -9,6 +9,12 @@ import {
   AvoArcAgent,
   effectiveAvoToolContract,
 } from '../core/avo-agent-base.mjs';
+import { EvidenceStore, summarizeEvidenceEvents } from '../core/evidence-store.mjs';
+import { EPISODE_OBSERVATION_SCHEMA } from '../core/observation.mjs';
+import {
+  actionBudgetPolicy,
+  deriveGameBudgets,
+} from '../arc/action-budget.mjs';
 import {
   normalizePolicyProfile,
   policyInitialPrompt,
@@ -34,6 +40,10 @@ import {
   providerCapabilityDigest,
   transcriptMaxTokens,
 } from '../provider-capabilities.mjs';
+import {
+  experimentIdentitySha256,
+  validateExperimentRunBinding,
+} from './experiment-protocol.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { fingerprint } from './redaction.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
@@ -54,6 +64,9 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'scripts/pi-provider-smoke.mjs',
   'scripts/run-real-public.mjs',
   'src/arc/bridge-client.mjs',
+  'src/arc/action-budget.mjs',
+  'src/benchmark/experiment-protocol.mjs',
+  'src/benchmark/mechanism-metrics.mjs',
   'src/benchmark/resume-cache.mjs',
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
@@ -230,6 +243,9 @@ export function buildRunCapsule({
   config,
   workspaceAttestation,
   initialState,
+  memoryDir = null,
+  resumeCapsule = null,
+  experiment = null,
   env = process.env,
   git = null,
   dependencies = inspectDependencyClosure({ root, python }),
@@ -255,6 +271,17 @@ export function buildRunCapsule({
   const workspaceMode = String(config?.workspaceMode || 'files-only');
   if (!WORKSPACE_MODES.has(workspaceMode)) throw new Error('run capsule workspace mode is invalid');
   const policyProfile = normalizePolicyProfile(config?.policyProfile);
+  const experimentBinding = experiment === null ? null : validateExperimentRunBinding(experiment);
+  if (experimentBinding
+      && (experimentBinding.gitCommit !== inspectedGit.commit
+        || experimentBinding.providerEndpointSha256 !== experimentIdentitySha256(
+          'endpoint', String(config?.provider?.baseUrl || '').replace(/\/$/, ''),
+        )
+        || experimentBinding.providerModelSha256 !== experimentIdentitySha256(
+          'model', config?.provider?.model,
+        ))) {
+    throw new Error('run capsule provider or Git identity differs from its experiment binding');
+  }
   validateWorkspaceCapabilityAttestation(workspaceAttestation, { config });
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
@@ -275,6 +302,19 @@ export function buildRunCapsule({
     AvoArcAgent.prototype.systemPrompt.call({ policyProfile }),
     workspaceMode,
   );
+  const versionedGameIds = normalizeVersionedGames(games);
+  const sealedInitialState = validateInitialState(initialState);
+  const sealedTrajectoryStarts = resumeCapsule === null
+    ? inspectTrajectoryStarts({
+        memoryDir,
+        initialState: sealedInitialState,
+        versionedGameIds,
+      })
+    : resumeTrajectoryStarts(resumeCapsule, {
+        initialState: sealedInitialState,
+        runId,
+        versionedGameIds,
+      });
   const definition = {
     schema: RUN_CAPSULE_SCHEMA,
     runId: safeIdentifier(runId, 'run ID'),
@@ -337,6 +377,7 @@ export function buildRunCapsule({
       scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
       providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
+      actionBudgetPolicy: actionBudgetPolicy(env),
       config: {
         maxActions: positiveInteger(config?.maxActions, 1000, 'maxActions'),
         maxOuterTurns: positiveInteger(config?.maxOuterTurns, 1000, 'maxOuterTurns'),
@@ -351,9 +392,16 @@ export function buildRunCapsule({
     },
     task: {
       arcAuthMode: String(provenance?.arcAuth?.mode || 'unknown'),
-      versionedGameIds: normalizeVersionedGames(games),
+      versionedGameIds,
+      gameBudgets: deriveGameBudgets(games, {
+        hardCap: config?.maxActions,
+        outerTurnHardCap: config?.maxOuterTurns,
+        policy: actionBudgetPolicy(env),
+      }),
+      trajectoryStarts: sealedTrajectoryStarts,
     },
-    initialState: validateInitialState(initialState),
+    initialState: sealedInitialState,
+    experiment: experimentBinding,
   };
   return sealRunCapsule(definition, { createdAt });
 }
@@ -623,6 +671,7 @@ export function verifyRunCapsuleExecution({
     transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
     providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
     providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
+    actionBudgetPolicy: actionBudgetPolicy(env),
     arcAuthMode: String(env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase(),
   };
   if (observedRuntime.gameConcurrency !== definition.runtime.gameConcurrency
@@ -630,6 +679,7 @@ export function verifyRunCapsuleExecution({
       || observedRuntime.transientTurnRecoveries !== definition.runtime.transientTurnRecoveries
       || observedRuntime.providerStreamTimeoutMs !== definition.runtime.providerStreamTimeoutMs
       || observedRuntime.providerStreamMaxRetries !== definition.runtime.providerStreamMaxRetries
+      || canonicalJson(observedRuntime.actionBudgetPolicy) !== canonicalJson(definition.runtime.actionBudgetPolicy)
       || observedRuntime.arcAuthMode !== definition.task.arcAuthMode) {
     throw new Error('effective execution topology or retry policy differs from the sealed run capsule');
   }
@@ -652,6 +702,14 @@ export function verifyRunCapsuleGameSet(capsule, games) {
   const observed = normalizeVersionedGames(games);
   if (canonicalJson(observed) !== canonicalJson(capsule.definition.task.versionedGameIds)) {
     throw new Error('effective public game set differs from the sealed run capsule');
+  }
+  const expectedBudgets = deriveGameBudgets(games, {
+    hardCap: capsule.definition.runtime.config.maxActions,
+    outerTurnHardCap: capsule.definition.runtime.config.maxOuterTurns,
+    policy: capsule.definition.runtime.actionBudgetPolicy,
+  });
+  if (canonicalJson(expectedBudgets) !== canonicalJson(capsule.definition.task.gameBudgets)) {
+    throw new Error('effective public game metadata or budgets differ from the sealed run capsule');
   }
   return true;
 }
@@ -718,6 +776,13 @@ function validateRunCapsule(capsule) {
       !== canonicalJson({ requested: profile, effective: profile })) {
     throw new Error('run capsule policy profile is absent or inconsistent');
   }
+  if (capsule.definition.experiment !== null && capsule.definition.experiment !== undefined) {
+    validateExperimentRunBinding(capsule.definition.experiment);
+  }
+  validateTrajectoryStarts(
+    capsule.definition.task?.trajectoryStarts,
+    capsule.definition.task?.versionedGameIds,
+  );
   const actual = sha256(canonicalJson(capsule.definition));
   if (!/^[a-f0-9]{64}$/.test(String(capsule.capsuleHash || '')) || capsule.capsuleHash !== actual) {
     throw new Error('run capsule hash does not match its definition');
@@ -854,6 +919,107 @@ function normalizeVersionedGames(games) {
   }
   if (new Set(values).size !== values.length) throw new Error('run capsule game set contains duplicate versioned IDs');
   return values;
+}
+
+function inspectTrajectoryStarts({ memoryDir, initialState, versionedGameIds }) {
+  const gameIds = versionedGameIds.map((versionedGameId) => versionedGameId.split('-')[0]);
+  if (new Set(gameIds).size !== gameIds.length) {
+    throw new Error('run capsule game set contains duplicate short IDs');
+  }
+  let observedMemory = null;
+  if (memoryDir) {
+    observedMemory = hashDirectoryTree(memoryDir);
+    if (canonicalJson(observedMemory) !== canonicalJson(initialState.memory)) {
+      throw new Error('trajectory start memory differs from the sealed initial state');
+    }
+  } else if (!initialState.memory.empty) {
+    throw new Error('non-empty initial memory requires a trajectory start snapshot');
+  }
+  const starts = versionedGameIds.map((versionedGameId, index) => {
+    const gameId = gameIds[index];
+    const trajectoryEvidence = memoryDir
+      ? new EvidenceStore(path.join(memoryDir, 'evidence'), gameId, {
+          authorityRoot: memoryDir,
+        }).load().summary()
+      : summarizeEvidenceEvents([]);
+    if (trajectoryEvidence.highWaterSequence > 0
+        && (trajectoryEvidence.complete !== true
+          || trajectoryEvidence.identitySchema !== EPISODE_OBSERVATION_SCHEMA)) {
+      throw new Error(`trajectory start for ${gameId} is not complete current-schema evidence`);
+    }
+    return { gameId, versionedGameId, trajectoryEvidence };
+  });
+  if (memoryDir
+      && canonicalJson(hashDirectoryTree(memoryDir)) !== canonicalJson(observedMemory)) {
+    throw new Error('trajectory start memory changed while it was inspected');
+  }
+  return validateTrajectoryStarts(starts, versionedGameIds);
+}
+
+function resumeTrajectoryStarts(capsule, { initialState, runId, versionedGameIds }) {
+  validateRunCapsule(capsule);
+  if (capsule.definition.runId !== safeIdentifier(runId, 'run ID')
+      || canonicalJson(capsule.definition.initialState) !== canonicalJson(initialState)
+      || canonicalJson(capsule.definition.task.versionedGameIds) !== canonicalJson(versionedGameIds)) {
+    throw new Error('resume capsule cannot supply this run trajectory start');
+  }
+  return validateTrajectoryStarts(capsule.definition.task.trajectoryStarts, versionedGameIds);
+}
+
+function validateTrajectoryStarts(value, versionedGameIds) {
+  if (!Array.isArray(value) || !Array.isArray(versionedGameIds)
+      || value.length !== versionedGameIds.length) {
+    throw new Error('run capsule trajectory starts are incomplete');
+  }
+  const expected = versionedGameIds.slice().sort();
+  const starts = value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+        || canonicalJson(Object.keys(item).sort())
+          !== canonicalJson(['gameId', 'trajectoryEvidence', 'versionedGameId'])) {
+      throw new Error(`run capsule trajectory start ${index + 1} is malformed`);
+    }
+    const versionedGameId = String(item.versionedGameId || '');
+    const gameId = String(item.gameId || '');
+    const trajectory = item.trajectoryEvidence;
+    const eventCount = trajectory?.eventCount;
+    const highWaterSequence = trajectory?.highWaterSequence;
+    if (versionedGameId !== expected[index]
+        || gameId !== versionedGameId.split('-')[0]
+        || !trajectory || typeof trajectory !== 'object' || Array.isArray(trajectory)
+        || canonicalJson(Object.keys(trajectory).sort()) !== canonicalJson([
+          'complete', 'eventCount', 'firstEvidenceRef', 'highWaterSequence',
+          'identitySchema', 'lastEvidenceRef', 'rootSha256', 'schema',
+        ])
+        || trajectory.schema !== 'avo.trajectory-evidence.v1'
+        || trajectory.complete !== true
+        || !Number.isSafeInteger(eventCount) || eventCount < 0
+        || highWaterSequence !== eventCount
+        || !/^[a-f0-9]{64}$/.test(String(trajectory.rootSha256 || ''))) {
+      throw new Error(`run capsule trajectory start ${index + 1} is malformed`);
+    }
+    if (eventCount === 0) {
+      if (trajectory.identitySchema !== null
+          || trajectory.firstEvidenceRef !== null
+          || trajectory.lastEvidenceRef !== null
+          || trajectory.rootSha256 !== summarizeEvidenceEvents([]).rootSha256) {
+        throw new Error(`run capsule trajectory start ${index + 1} empty boundary is malformed`);
+      }
+    } else if (trajectory.identitySchema !== EPISODE_OBSERVATION_SCHEMA
+        || evidenceRefSequence(trajectory.firstEvidenceRef) !== 1
+        || evidenceRefSequence(trajectory.lastEvidenceRef) !== highWaterSequence) {
+      throw new Error(`run capsule trajectory start ${index + 1} boundary is malformed`);
+    }
+    return structuredClone(item);
+  });
+  if (new Set(starts.map((item) => item.gameId)).size !== starts.length) {
+    throw new Error('run capsule trajectory starts contain duplicate short IDs');
+  }
+  return deepFreeze(starts);
+}
+
+function evidenceRefSequence(value) {
+  const match = /^evidence-([0-9]{6,})-[a-f0-9]{12}$/.exec(String(value || ''));
+  return match ? Number(match[1]) : null;
 }
 
 function inspectProviderIdentity(runId, provider) {

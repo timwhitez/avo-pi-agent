@@ -16,6 +16,13 @@ import { runProcess } from '../src/benchmark/process-runner.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
+  assertExperimentArcRuntime,
+  assertExperimentCapsule,
+  assertExperimentEnvironment,
+  loadExperimentRunFromEnvironment,
+  selectExperimentGames,
+} from '../src/benchmark/experiment-protocol.mjs';
+import {
   aggregateGameMetrics,
   copyRegularFileExclusive,
   findNewJsonReports,
@@ -39,6 +46,7 @@ import {
   classifyCapsuleResult,
   classifyResume,
   inspectRunState,
+  inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
   readRunCapsule,
@@ -53,6 +61,9 @@ loadLocalEnv();
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
+
+const experimentRun = loadExperimentRunFromEnvironment(process.env);
+if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
 
 const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
 const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
@@ -91,6 +102,12 @@ const stage = { value: 'configuration' };
 try {
   provider = requireRealProviderEnvironment();
   const explicitSecrets = [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean);
+  const config = getRuntimeConfig();
+  assertExperimentEnvironment(experimentRun, {
+    provider,
+    config,
+    git: inspectGitCheckout(root),
+  });
   const runState = prepareRunState({
     root,
     privateDir,
@@ -113,8 +130,6 @@ try {
       assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
     }
   }
-  const config = getRuntimeConfig();
-
   stage.value = 'workspace-preflight';
   console.log('[real-run] attesting the initialized workspace capability');
   const workspaceAttestation = await attestWorkspaceCapability(config);
@@ -131,12 +146,14 @@ try {
   console.log('[real-run] validating official arc-agi runtime');
   const python = process.env.ARC_PYTHON || '.venv/bin/python';
   const arcRuntime = await inspectOfficialArcRuntime({ python, cwd: root });
+  assertExperimentArcRuntime(experimentRun, arcRuntime);
 
   stage.value = 'public-game-discovery';
   console.log('[real-run] freezing the dynamically discovered public game set');
   process.env.AVO_ARC_AUTH_MODE = process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto';
   if (process.env.AVO_ARC_AUTH_MODE === 'anonymous-auto') process.env.ARC_API_KEY = '';
-  const games = await discoverPublicGames({ python, cwd: root });
+  const discoveredGames = await discoverPublicGames({ python, cwd: root });
+  const games = selectExperimentGames(experimentRun, discoveredGames);
   const gitSha = await currentGitSha(root);
   const provenance = buildProvenance({
     provider,
@@ -158,7 +175,13 @@ try {
     config,
     workspaceAttestation,
     initialState: runState.initialState,
+    memoryDir: runState.memoryDir,
+    resumeCapsule: resumeContext && String(process.env.AVO_RESUME_MODE || 'recovered') !== 'migrated'
+      ? resumeContext.originalCapsule
+      : null,
+    experiment: experimentRun?.binding ?? null,
   });
+  assertExperimentCapsule(experimentRun, capsule);
   const resumeDecision = resumeContext
     ? classifyResume(resumeContext.originalCapsule, capsule, process.env.AVO_RESUME_MODE || 'recovered')
     : Object.freeze({ runClass: runState.initialState.mode, comparable: true, sourceCapsuleHash: null });
@@ -202,7 +225,10 @@ try {
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
   const timeoutMs = benchmarkTimeout();
-  const child = await runProcess(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const childArgs = experimentRun
+    ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
+    : ['src/cli.mjs', 'run-public', '--all'];
+  const child = await runProcess(process.execPath, childArgs, {
     cwd: root,
     env: buildAgentChildEnvironment({
       source: process.env,
@@ -373,6 +399,7 @@ try {
       : {}),
     aggregates,
     games: selected.records,
+    experiment: experimentRun?.binding ?? null,
     artifacts: {
       rawRunReport: {
         file: path.basename(rawRunReport),
@@ -404,6 +431,9 @@ try {
     officialScore,
     aggregates,
     games: selected.records,
+    experiment: provenance.runCapsule?.experiment
+      ? structuredClone(provenance.runCapsule.experiment)
+      : null,
     privateArtifactHashes: privateManifest.artifacts,
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(publicReport, null, 2)}\n`;
@@ -428,6 +458,7 @@ try {
     status: 'failed',
     failedStage: stage.value,
     failedAt: new Date().toISOString(),
+    experiment: publicExperimentBinding(experimentRun?.binding),
     error: redactText(error instanceof Error ? error.message : String(error), { explicitSecrets }),
   }, { explicitSecrets });
   const serialized = `${JSON.stringify(failure, null, 2)}\n`;
@@ -466,6 +497,16 @@ function safeRunId(value) {
   const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
   if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
   return result;
+}
+
+function publicExperimentBinding(value) {
+  if (!value) return null;
+  const {
+    providerEndpointSha256: _providerEndpointSha256,
+    providerModelSha256: _providerModelSha256,
+    ...published
+  } = value;
+  return published;
 }
 
 function persistRunCapsule({ privateDir, capsule, resumeContext }) {

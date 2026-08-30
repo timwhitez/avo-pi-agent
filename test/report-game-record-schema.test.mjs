@@ -10,6 +10,7 @@ import {
   validateProductionLoops,
 } from '../src/benchmark/report.mjs';
 import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
+import { deriveActionBudget } from '../src/arc/action-budget.mjs';
 
 function valid(overrides = {}) {
   return {
@@ -223,6 +224,7 @@ test('aggregates controller telemetry across attempts without dropping prior res
   const aggregate = aggregateAttemptTelemetry([
     {
       actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 2,
+      outerTurns: 2,
       terminalRejectedCommands: 2, postTerminalGameplayActions: 0,
       fullResets: 1, episodeId: 'episode-000002',
       actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
@@ -232,6 +234,7 @@ test('aggregates controller telemetry across attempts without dropping prior res
     },
     {
       actions: 3, gameplayActions: 3, resets: 0, rejectedCommands: 1,
+      outerTurns: 3,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001',
       actionSequences: 1, sequenceActionsRequested: 4, sequenceActionsExecuted: 3,
@@ -242,6 +245,7 @@ test('aggregates controller telemetry across attempts without dropping prior res
   ]);
   assert.deepEqual(aggregate, {
     actions: 4,
+    outerTurns: 5,
     gameplayActions: 3,
     resets: 1,
     rejectedCommands: 3,
@@ -262,6 +266,7 @@ test('aggregates controller telemetry across attempts without dropping prior res
   assert.throws(
     () => aggregateAttemptTelemetry([{
       actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
+      outerTurns: 1,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000002',
       actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
@@ -282,6 +287,22 @@ test('aggregates monotonic progress across attempts without inventing totals', (
     { levelsCompleted: 1, totalLevels: 3 },
     { levelsCompleted: 2, totalLevels: 4 },
   ]), /inconsistent/);
+});
+
+test('rejects cumulative actions or turns above one frozen per-game budget', () => {
+  const actionBudget = deriveActionBudget({}, { hardCap: 2, multiplier: 2, fallback: 2 });
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 3, outerTurns: 1, actionBudget, outerTurnBudget: 2 })),
+    /actions exceed/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 1, outerTurns: 3, actionBudget, outerTurnBudget: 2 })),
+    /outer turns.*exceed/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ actions: 1, actionBudget, outerTurnBudget: 2 })),
+    /outer turns are absent/,
+  );
 });
 
 test('rejects coercible, negative and fractional game metrics', () => {

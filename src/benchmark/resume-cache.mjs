@@ -298,6 +298,7 @@ function recordBinding(record) {
     levelsCompleted: record.levelsCompleted,
     totalLevels: record.totalLevels,
     actions: record.actions,
+    outerTurns: record.outerTurns,
     gameplayActions: record.gameplayActions,
     resets: record.resets,
     rejectedCommands: record.rejectedCommands,

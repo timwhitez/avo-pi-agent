@@ -1,9 +1,13 @@
 import crypto from 'node:crypto';
 
+import { deriveGameBudgets } from '../../src/arc/action-budget.mjs';
 import { canonicalJson, sealRunCapsule } from '../../src/benchmark/run-capsule.mjs';
 import { projectPublicRunCapsule } from '../../src/benchmark/run-capsule-public.mjs';
 import { fingerprint } from '../../src/benchmark/redaction.mjs';
-import { effectiveAvoToolNames } from '../../src/core/avo-agent-base.mjs';
+import { effectiveAvoToolContract, effectiveAvoToolNames } from '../../src/core/avo-agent-base.mjs';
+import { summarizeEvidenceEvents } from '../../src/core/evidence-store.mjs';
+import { policyInitialPrompt, policySystemPrompt } from '../../src/core/policy-profile.mjs';
+import { effectivePiSystemPrompt, runtimeStatusTemplateSha256 } from '../../src/loop/pi-sdk.mjs';
 import { evaluateScorecardCoverage, normalizeScorecardSnapshot } from '../../src/benchmark/scorecard-evidence.mjs';
 import { providerCapabilityDigest } from '../../src/provider-capabilities.mjs';
 import { providerCapabilities } from './provider.mjs';
@@ -11,8 +15,16 @@ import { providerCapabilities } from './provider.mjs';
 const ARC_RUNTIME = Object.freeze({
   arcAgiVersion: '0.9.9',
   arcEngineVersion: '0.9.9',
+  arcAgiPathHash: '8'.repeat(64),
+  arcEnginePathHash: '9'.repeat(64),
+  arcAgiInstaller: 'pip',
+  arcEngineInstaller: 'pip',
   officialPackageAttested: true,
 });
+
+export function arcRuntimeFixture() {
+  return structuredClone(ARC_RUNTIME);
+}
 
 export function workspaceAttestationFixture(config = {}) {
   const mode = String(config.workspaceMode || 'files-only');
@@ -76,17 +88,21 @@ export function scorecardCoverageFixture({
   versionedGameIds = ['g1-v1'],
   score = 0,
   sessionId = 'test-scorecard',
+  startedAt = '2026-08-30T00:00:00Z',
+  observedAt = '2026-08-30T00:01:00Z',
+  actions = 1,
+  resets = 0,
 } = {}) {
   const evidence = normalizeScorecardSnapshot({
     scorecard_session: {
-      started_at: '2026-08-30T00:00:00Z',
-      observed_at: '2026-08-30T00:01:00Z',
+      started_at: startedAt,
+      observed_at: observedAt,
     },
     scorecard: {
       card_id: sessionId,
       score,
       total_environments: versionedGameIds.length,
-      total_actions: versionedGameIds.length,
+      total_actions: versionedGameIds.length * actions,
       total_levels_completed: 0,
       total_levels: versionedGameIds.length,
       environments: versionedGameIds.map((versionedGameId, index) => ({
@@ -99,8 +115,8 @@ export function scorecardCoverageFixture({
           guid: `${sessionId}-${index}`,
           score: 0,
           levels_completed: 0,
-          actions: 1,
-          resets: 0,
+          actions,
+          resets,
           state: 'GAME_OVER',
           completed: false,
         }],
@@ -112,6 +128,8 @@ export function scorecardCoverageFixture({
     return {
       gameId: versionedGameId.split('-')[0],
       versionedGameId,
+      actions,
+      resets,
       executions: [{
         versionedGameId,
         executionIdSha256: gameEvidence.executions[0].executionIdSha256,
@@ -132,8 +150,25 @@ export function scorecardCoverageFixture({
 export function privateRunCapsuleEvidenceFixture({
   runId = 'test-run',
   versionedGameIds = ['g1-v1'],
+  policyProfile = 'current-v1',
+  experiment = null,
+  gitCommit = '1'.repeat(40),
+  initialStateOverrides = {},
+  gameBudgets = null,
+  trajectoryStarts = null,
+  createdAt = '2026-08-30T00:00:00Z',
 } = {}) {
-  const capsule = privateRunCapsuleFixture(runId, versionedGameIds);
+  const capsule = privateRunCapsuleFixture({
+    runId,
+    versionedGameIds,
+    policyProfile,
+    experiment,
+    gitCommit,
+    initialStateOverrides,
+    gameBudgets,
+    trajectoryStarts,
+    createdAt,
+  });
   const text = `${JSON.stringify(capsule, null, 2)}\n`;
   return Object.freeze({
     value: capsule,
@@ -146,8 +181,25 @@ export function privateRunCapsuleEvidenceFixture({
 export function publicRunCapsuleFixture(overrides = {}, {
   runId = 'test-run',
   versionedGameIds = ['g1-v1'],
+  policyProfile = 'current-v1',
+  experiment = null,
+  gitCommit = '1'.repeat(40),
+  initialStateOverrides = {},
+  gameBudgets = null,
+  trajectoryStarts = null,
+  createdAt = '2026-08-30T00:00:00Z',
 } = {}) {
-  const evidence = privateRunCapsuleEvidenceFixture({ runId, versionedGameIds });
+  const evidence = privateRunCapsuleEvidenceFixture({
+    runId,
+    versionedGameIds,
+    policyProfile,
+    experiment,
+    gitCommit,
+    initialStateOverrides,
+    gameBudgets,
+    trajectoryStarts,
+    createdAt,
+  });
   const valid = projectPublicRunCapsule(evidence.value, {
     runClass: 'cold-start',
     comparable: true,
@@ -227,7 +279,17 @@ export function runCapsuleProvenanceFixture({
   };
 }
 
-function privateRunCapsuleFixture(runId, versionedGameIds) {
+function privateRunCapsuleFixture({
+  runId,
+  versionedGameIds,
+  policyProfile,
+  experiment,
+  gitCommit,
+  initialStateOverrides,
+  gameBudgets,
+  trajectoryStarts,
+  createdAt,
+}) {
   const capabilities = providerCapabilities('high');
   const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
   const providerToolSchemaSha256 = 'f'.repeat(64);
@@ -238,38 +300,54 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
     workspacePathFingerprint: 'f'.repeat(64),
     memory: { sha256: '1'.repeat(64), fileCount: 0, bytes: 0, empty: true },
     workspace: { sha256: '2'.repeat(64), fileCount: 0, bytes: 0, empty: true },
+    ...initialStateOverrides,
   };
   const components = { 'src/cli.mjs': '3'.repeat(64) };
   const nodeTree = { name: 'avo-pi-arc-agi3', version: '0.1.0', dependencies: {} };
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
+  const actionBudgetPolicy = { multiplier: 2, fallback: 80 };
+  const sealedGameBudgets = gameBudgets ?? deriveGameBudgets(versionedGameIds.map((versionedGameId) => ({
+    versionedGameId,
+    baseline_actions: [],
+  })), {
+    hardCap: 1000,
+    outerTurnHardCap: 1000,
+    policy: actionBudgetPolicy,
+  });
+  const sealedTrajectoryStarts = trajectoryStarts ?? versionedGameIds.slice().sort().map((versionedGameId) => ({
+    gameId: versionedGameId.split('-')[0],
+    versionedGameId,
+    trajectoryEvidence: summarizeEvidenceEvents([]),
+  }));
+  const toolContract = effectiveAvoToolContract('files-only', policyProfile);
   return sealRunCapsule({
     schema: 'avo.run-capsule.v2',
     runId,
     git: {
-      commit: '1'.repeat(40),
+      commit: gitCommit,
       tree: '2'.repeat(40),
       clean: true,
       dirtyStateSha256: '4'.repeat(64),
     },
     components: { files: components, setSha256: digest(components) },
-    policyProfile: { requested: 'current-v1', effective: 'current-v1' },
+    policyProfile: { requested: policyProfile, effective: policyProfile },
     prompts: {
-      systemSha256: '7'.repeat(64),
+      systemSha256: digestText(effectivePiSystemPrompt(policySystemPrompt(policyProfile), 'files-only')),
       developerPresent: false,
       developerSha256: null,
-      initialTemplateSha256: '8'.repeat(64),
-      runtimeStatusTemplateSha256: '9'.repeat(64),
+      initialTemplateSha256: digest({ policyProfile, renderer: policyInitialPrompt.toString() }),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
       compactionNoticeTemplateSha256: '6'.repeat(64),
     },
     tools: {
-      schemaSha256: 'a'.repeat(64),
+      schemaSha256: digest(toolContract),
       providerSchemaSha256: providerToolSchemaSha256,
-      enabled: effectiveAvoToolNames('files-only'),
+      enabled: effectiveAvoToolNames('files-only', policyProfile),
       executionMode: 'sequential',
     },
     workspaceCapability: {
-      sha256: digest(workspaceAttestationFixture()),
-      attestation: workspaceAttestationFixture(),
+      sha256: digest(workspaceAttestationFixture({ policyProfile })),
+      attestation: workspaceAttestationFixture({ policyProfile }),
     },
     transcript: {
       policySha256: 'b'.repeat(64),
@@ -337,20 +415,28 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: 1_200_000,
       providerStreamMaxRetries: 4,
+      actionBudgetPolicy,
       config: {
         maxActions: 1000,
         maxOuterTurns: 1000,
         stallWindow: 8,
-        policyProfile: 'current-v1',
+        memorySurfaceLimit: 4,
+        policyProfile,
         workspaceMode: 'files-only',
         workspacePythonTimeoutMs: 10_000,
         workspaceContainerRuntime: 'docker',
         workspaceContainerImage: 'python:3.12-slim',
       },
     },
-    task: { arcAuthMode: 'anonymous-auto', versionedGameIds: versionedGameIds.slice().sort() },
+    task: {
+      arcAuthMode: 'anonymous-auto',
+      versionedGameIds: versionedGameIds.slice().sort(),
+      gameBudgets: sealedGameBudgets,
+      trajectoryStarts: sealedTrajectoryStarts,
+    },
     initialState,
-  }, { createdAt: '2026-08-30T00:00:00Z' });
+    experiment,
+  }, { createdAt });
 }
 
 function digest(value) {

@@ -129,10 +129,20 @@ export function exactObservation(frame) {
     totalLevels: positiveIntegerOrNull(value.totalLevels ?? null, 'totalLevels'),
     availableActions: normalizeActions(value.availableActions ?? []).sort(),
     fullReset: Boolean(value.fullReset),
-    executionIdSha256: value.guid === null || value.guid === undefined
-      ? null
-      : crypto.createHash('sha256').update(String(value.guid)).digest('hex'),
+    executionIdSha256: executionIdentity(value),
   });
+}
+
+function executionIdentity(value) {
+  if (value.guid !== null && value.guid !== undefined) {
+    return crypto.createHash('sha256').update(String(value.guid)).digest('hex');
+  }
+  if (value.executionIdSha256 === null || value.executionIdSha256 === undefined) return null;
+  const identity = String(value.executionIdSha256);
+  if (!/^[a-f0-9]{64}$/.test(identity)) {
+    throw new Error('executionIdSha256 must be a SHA-256 digest');
+  }
+  return identity;
 }
 
 export function gridToExactText(grid) {

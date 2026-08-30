@@ -114,6 +114,7 @@ async function runPublic(args) {
   let runCapsuleHash = null;
   let runClass = null;
   let runCapsule = null;
+  let runCapsuleBudgets = null;
   let sourceCapsuleHashes = [];
   let resumedRecords = new Map();
 
@@ -168,7 +169,13 @@ async function runPublic(args) {
       return selection.all || selection.games.includes(short) || selection.games.includes(env.game_id);
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
-    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, selected);
+    if (runCapsule) {
+      verifyRunCapsuleGameSet(runCapsule, selected);
+      runCapsuleBudgets = new Map(runCapsule.definition.task.gameBudgets.map((budget) => [
+        budget.versionedGameId,
+        budget,
+      ]));
+    }
 
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
@@ -186,54 +193,55 @@ async function runPublic(args) {
       }
       replayedGames += 1;
       replayedGameIds.add(gameId);
-      const actionBudget = deriveActionBudget(info, { hardCap: config.maxActions });
+      const frozenBudget = runCapsuleBudgets?.get(versionedGameId);
+      const actionBudget = frozenBudget?.actionBudget
+        ?? deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
         maxActions: actionBudget.total,
-        maxOuterTurns: deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
+        maxOuterTurns: frozenBudget?.outerTurnBudget
+          ?? deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
       };
       let observedActions = 0;
       let observedLevels = 0;
       let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
       let activeAttempt = null;
       let contextSequence = 0;
-      const loop = await createPiSdkLoop(gameConfig, {
-        onEvent(event) {
-          if (event.type === 'avo_runtime_status'
-              || event.type === 'avo_context_compaction'
-              || event.type === 'avo_provider_request') {
-            process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject({
-              ...event,
-              gameId,
-              versionedGameId,
-              attempt: activeAttempt,
-              contextSequence: ++contextSequence,
-            }))}\n`);
-            return;
-          }
-          if (event.type !== 'tool_execution_end') return;
-          process.stdout.write('.');
-          if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
-          observedActions += 1;
-          const frame = event.result?.details?.frame || {};
-          observedLevels = Math.max(
-            observedLevels,
-            Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels),
-          );
-          observedTotalLevels ??= positiveCountOrNull(
-            frame.totalLevels ?? frame.total_levels,
-          );
-          progress.gameProgress({
-            index: ordinal,
-            total: selected.length,
+      const onLoopEvent = (event) => {
+        if (event.type === 'avo_runtime_status'
+            || event.type === 'avo_context_compaction'
+            || event.type === 'avo_provider_request') {
+          process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject({
+            ...event,
             gameId,
-            actions: observedActions,
-            levelsCompleted: observedLevels,
-            totalLevels: observedTotalLevels,
-            state: String(frame.state || 'PLAYING'),
-          });
-        },
-      });
+            versionedGameId,
+            attempt: activeAttempt,
+            contextSequence: ++contextSequence,
+          }))}\n`);
+          return;
+        }
+        if (event.type !== 'tool_execution_end') return;
+        process.stdout.write('.');
+        if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
+        observedActions += 1;
+        const frame = event.result?.details?.frame || {};
+        observedLevels = Math.max(
+          observedLevels,
+          Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels),
+        );
+        observedTotalLevels ??= positiveCountOrNull(
+          frame.totalLevels ?? frame.total_levels,
+        );
+        progress.gameProgress({
+          index: ordinal,
+          total: selected.length,
+          gameId,
+          actions: observedActions,
+          levelsCompleted: observedLevels,
+          totalLevels: observedTotalLevels,
+          state: String(frame.state || 'PLAYING'),
+        });
+      };
       console.log(`\n[${ordinal}/${selected.length}] ${gameId} budget=${actionBudget.total} source=${actionBudget.source}`);
       progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: actionBudget.total });
       try {
@@ -244,12 +252,24 @@ async function runPublic(args) {
         const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           activeAttempt = attempt;
+          const consumed = attemptResults.length
+            ? aggregateAttemptTelemetry(attemptResults)
+            : { actions: 0, outerTurns: 0 };
+          const remainingActions = actionBudget.total - consumed.actions;
+          const remainingOuterTurns = gameConfig.maxOuterTurns - consumed.outerTurns;
+          if (remainingActions < 1 || remainingOuterTurns < 1) break;
+          const attemptConfig = {
+            ...gameConfig,
+            maxActions: remainingActions,
+            maxOuterTurns: remainingOuterTurns,
+          };
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
+          const loop = await createPiSdkLoop(attemptConfig, { onEvent: onLoopEvent });
           const agent = new AvoArcAgent({
             gameId,
             environment: env,
             loop,
-            config: gameConfig,
+            config: attemptConfig,
             captureScorecard: false,
           });
           const agentResult = await agent.run();
@@ -264,9 +284,10 @@ async function runPublic(args) {
             executionOccurrences.set(executionIdSha256, executionOccurrence + 1);
             executions.push({ versionedGameId, executionIdSha256, executionOccurrence });
           }
+          const attemptTelemetry = aggregateAttemptTelemetry(attemptResults);
           result = {
             ...agentResult,
-            ...aggregateAttemptTelemetry(attemptResults),
+            ...attemptTelemetry,
             ...aggregateAttemptProgress(attemptResults),
             versionedGameId,
             executions: executions.slice(),
@@ -276,7 +297,9 @@ async function runPublic(args) {
           if (!result.error || isWinState(result.state)) break;
           // A transient provider fault must not sacrifice the whole game:
           // durable memory persists across attempts, so a retry re-grounds.
-          if (attempt < maxAttempts) {
+          if (attempt < maxAttempts
+              && result.actions < actionBudget.total
+              && result.outerTurns < gameConfig.maxOuterTurns) {
             const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
             console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(result.error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
             await sleep(delayMs);

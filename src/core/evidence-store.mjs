@@ -126,24 +126,9 @@ export class EvidenceStore {
   }
 
   summary() {
-    const refs = this.events.map((event) => ({
-      sequence: event.sequence,
-      id: event.id,
-      digest: event.digest,
-    }));
-    const identitySchemas = [...new Set(this.events.map((event) => event.identitySchema ?? null))];
-    const identitySchema = identitySchemas.length === 1 ? identitySchemas[0] : null;
-    return Object.freeze({
-      schema: TRAJECTORY_EVIDENCE_SCHEMA,
-      identitySchema,
-      complete: this.historyComplete
-        && this.events.length === this.sequence
-        && (this.events.length === 0 || identitySchema !== null),
-      eventCount: this.events.length,
+    return summarizeEvidenceEvents(this.events, {
       highWaterSequence: this.sequence,
-      firstEvidenceRef: this.events[0]?.id ?? null,
-      lastEvidenceRef: this.events.at(-1)?.id ?? null,
-      rootSha256: digestFor({ schema: TRAJECTORY_EVIDENCE_SCHEMA, refs }),
+      historyComplete: this.historyComplete,
     });
   }
 
@@ -293,6 +278,31 @@ export class EvidenceStore {
       lock.release();
     }
   }
+}
+
+export function summarizeEvidenceEvents(events, {
+  highWaterSequence = events.at(-1)?.sequence ?? 0,
+  historyComplete = true,
+} = {}) {
+  const refs = events.map((event) => ({
+    sequence: event.sequence,
+    id: event.id,
+    digest: event.digest,
+  }));
+  const identitySchemas = [...new Set(events.map((event) => event.identitySchema ?? null))];
+  const identitySchema = identitySchemas.length === 1 ? identitySchemas[0] : null;
+  return Object.freeze({
+    schema: TRAJECTORY_EVIDENCE_SCHEMA,
+    identitySchema,
+    complete: historyComplete
+      && events.length === highWaterSequence
+      && (events.length === 0 || identitySchema !== null),
+    eventCount: events.length,
+    highWaterSequence,
+    firstEvidenceRef: events[0]?.id ?? null,
+    lastEvidenceRef: events.at(-1)?.id ?? null,
+    rootSha256: digestFor({ schema: TRAJECTORY_EVIDENCE_SCHEMA, refs }),
+  });
 }
 
 function assertEvidenceLineBytes(line, lineNumber, maxEventBytes, terminatorBytes) {

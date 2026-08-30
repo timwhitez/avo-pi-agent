@@ -5,6 +5,7 @@ import {
   classifyResume,
   sealRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
+import { summarizeEvidenceEvents } from '../src/core/evidence-store.mjs';
 
 function capsule(overrides = {}) {
   return sealRunCapsule({
@@ -14,6 +15,14 @@ function capsule(overrides = {}) {
     policyProfile: { requested: 'current-v1', effective: 'current-v1' },
     prompts: { systemSha256: 'b'.repeat(64) },
     runtime: { config: { policyProfile: 'current-v1' } },
+    task: {
+      versionedGameIds: ['g1-v1'],
+      trajectoryStarts: [{
+        gameId: 'g1',
+        versionedGameId: 'g1-v1',
+        trajectoryEvidence: summarizeEvidenceEvents([]),
+      }],
+    },
     ...overrides,
   }, { createdAt: '2026-08-28T06:45:00Z' });
 }

@@ -407,6 +407,7 @@ def main() -> int:
                 }
             elif command == "scorecard":
                 scorecard = arcade.get_scorecard()
+                scorecard_observed_at = datetime.now(timezone.utc)
                 response = {
                     "ok": True,
                     "arc_auth": auth,
@@ -415,13 +416,7 @@ def main() -> int:
                         "started_at": jsonable(
                             getattr(scorecard, "open_at", session_started_at)
                         ),
-                        "observed_at": jsonable(
-                            getattr(
-                                scorecard,
-                                "last_update",
-                                datetime.now(timezone.utc),
-                            )
-                        ),
+                        "observed_at": jsonable(scorecard_observed_at),
                     },
                 }
             elif command == "close":

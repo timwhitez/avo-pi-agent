@@ -1,4 +1,10 @@
 import { REPORT_LIMITS } from './report-safe-files.mjs';
+import { deriveActionBudget } from '../arc/action-budget.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
+import {
+  aggregateMechanismMetrics,
+  normalizeMechanismMetrics,
+} from './mechanism-metrics.mjs';
 
 const SAFE_VERSIONED_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SAFE_SHORT_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
@@ -61,6 +67,11 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     ? 'totalLevels'
     : legacyLevelAliases.length ? 'legacy-winLevels' : 'missing';
   const actions = optionalCount(firstOwn(value, ['actions', 'actionCount', 'action_count']), 'actions', sourcePath);
+  const outerTurns = reportedPositiveCount(
+    ownValues(value, ['outerTurns', 'outer_turns']),
+    'outerTurns',
+    sourcePath,
+  );
   const gameplayActions = reportedCount(
     ownValues(value, ['gameplayActions', 'gameplay_actions']),
     'gameplayActions',
@@ -164,6 +175,30 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     firstOwn(value, ['trajectoryEvidence', 'trajectory_evidence']),
     sourcePath,
   );
+  const mechanismValue = firstOwn(value, ['mechanismMetrics', 'mechanism_metrics']);
+  const mechanismMetrics = mechanismValue === undefined || mechanismValue === null
+    ? null
+    : normalizeMechanismMetrics(mechanismValue, `${sourcePath}.mechanismMetrics`);
+  const actionBudgetAliases = ownValues(value, ['actionBudget', 'action_budget']);
+  const normalizedActionBudgets = actionBudgetAliases.map((candidate) => normalizeActionBudget(candidate, sourcePath));
+  if (normalizedActionBudgets.some((candidate) => (
+    canonicalJson(candidate) !== canonicalJson(normalizedActionBudgets[0])
+  ))) {
+    invalidRecord(sourcePath, 'actionBudget aliases disagree');
+  }
+  const actionBudget = normalizedActionBudgets[0] ?? null;
+  const outerTurnBudget = reportedPositiveCount(
+    ownValues(value, ['outerTurnBudget', 'outer_turn_budget']),
+    'outerTurnBudget',
+    sourcePath,
+  );
+  if (actionBudget && actions > actionBudget.total) {
+    invalidRecord(sourcePath, 'actions exceed the frozen per-game action budget');
+  }
+  if (outerTurnBudget !== null
+      && (outerTurns === null || outerTurns > outerTurnBudget)) {
+    invalidRecord(sourcePath, 'outer turns are absent or exceed the frozen per-game outer-turn budget');
+  }
 
   return Object.freeze({
     gameId,
@@ -174,6 +209,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     legacyLevelMetadata: legacyWinLevels !== null,
     levelMetadata,
     actions,
+    outerTurns,
     gameplayActions,
     resets,
     rejectedCommands,
@@ -188,8 +224,65 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     loop: optionalString(value.loop, 'loop', sourcePath),
     executions,
     trajectoryEvidence,
+    mechanismMetrics,
+    actionBudget,
+    outerTurnBudget,
     sourcePath,
   });
+}
+
+function normalizeActionBudget(value, sourcePath) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    invalidRecord(sourcePath, 'actionBudget must be an object');
+  }
+  const expectedKeys = [
+    'baselineActions', 'hardCap', 'multiplier', 'perLevelBudgets', 'source', 'total', 'uncapped',
+  ];
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys.slice().sort())) {
+    invalidRecord(sourcePath, 'actionBudget fields are malformed');
+  }
+  const baselineActions = positiveNumberArray(value.baselineActions, 'actionBudget.baselineActions', sourcePath);
+  const hardCap = requiredPositiveCount(value.hardCap, 'actionBudget.hardCap', sourcePath);
+  const multiplier = Number(value.multiplier);
+  if (!Number.isFinite(multiplier) || multiplier <= 0) {
+    invalidRecord(sourcePath, 'actionBudget.multiplier must be positive');
+  }
+  const uncapped = requiredPositiveCount(value.uncapped, 'actionBudget.uncapped', sourcePath);
+  const expected = deriveActionBudget({ baseline_actions: baselineActions }, {
+    hardCap,
+    multiplier,
+    fallback: uncapped,
+  });
+  if (canonicalJson(expected) !== canonicalJson(value)) {
+    invalidRecord(sourcePath, 'actionBudget contradicts its derivation inputs');
+  }
+  return Object.freeze(expected);
+}
+
+function positiveNumberArray(value, field, sourcePath) {
+  if (!Array.isArray(value) || value.some((item) => !Number.isFinite(item) || item <= 0)) {
+    invalidRecord(sourcePath, `${field} must contain positive finite numbers`);
+  }
+  return value.slice();
+}
+
+function requiredPositiveCount(value, field, sourcePath) {
+  const count = optionalCount(value, field, sourcePath);
+  if (count < 1) invalidRecord(sourcePath, `${field} must be positive`);
+  return count;
+}
+
+function reportedPositiveCount(values, field, sourcePath) {
+  if (values.length === 0 || values.every((value) => value === null)) return null;
+  if (values.some((value) => value === null)) {
+    invalidRecord(sourcePath, `${field} aliases disagree`);
+  }
+  const normalized = values.map((value) => requiredPositiveCount(value, field, sourcePath));
+  if (normalized.some((value) => value !== normalized[0])) {
+    invalidRecord(sourcePath, `${field} aliases disagree`);
+  }
+  return normalized[0];
 }
 
 export function validateProductionLoops(records, expectedGames, {
@@ -305,6 +398,7 @@ export function validateCompleteGameSet(expectedGames, records) {
 }
 
 export function aggregateGameMetrics(records) {
+  const mechanismMetrics = aggregateMechanismMetrics(records.map((record) => record.mechanismMetrics));
   return {
     games: records.length,
     wins: records.filter((record) => record.won).length,
@@ -326,6 +420,7 @@ export function aggregateGameMetrics(records) {
     memoryClaimsConfirmed: optionalMetricTotal(records, 'memoryClaimsConfirmed'),
     memoryClaimsCorrected: optionalMetricTotal(records, 'memoryClaimsCorrected'),
     memoryClaimsSurfaced: optionalMetricTotal(records, 'memoryClaimsSurfaced'),
+    ...(mechanismMetrics ? { mechanismMetrics } : {}),
   };
 }
 
@@ -361,6 +456,7 @@ export function aggregateAttemptTelemetry(attempts) {
   }
   const totals = {
     actions: 0,
+    outerTurns: 0,
     gameplayActions: 0,
     resets: 0,
     rejectedCommands: 0,
@@ -408,9 +504,11 @@ export function aggregateAttemptTelemetry(attempts) {
       throw new Error(`attempt ${index + 1} episodeId is inconsistent with resets`);
     }
   }
+  const mechanismMetrics = aggregateMechanismMetrics(attempts.map((attempt) => attempt.mechanismMetrics));
   return Object.freeze({
     ...totals,
     episodeId: `episode-${String(totals.resets + 1).padStart(6, '0')}`,
+    ...(mechanismMetrics ? { mechanismMetrics } : {}),
   });
 }
 

@@ -236,7 +236,8 @@ export function evaluateScorecardCoverage(values, records) {
     const scorecards = (values === undefined || values === null
       ? []
       : requireArray(values, 'scorecard evidence set')).map(validateScorecardEvidence);
-    const expected = normalizeRecordRefs(records);
+    const published = normalizeRecordCoverage(records);
+    const expected = published.refs;
     const observed = scorecards.flatMap((scorecard) => flattenEvidenceRefs(scorecard.games));
     const expectedKeys = expected.map(refKey);
     const observedKeys = observed.map(refKey);
@@ -247,6 +248,8 @@ export function evaluateScorecardCoverage(values, records) {
     else if (scorecards.length !== 1) rejectionReason = 'published executions span multiple scorecard sessions';
     else if (missing.length || unexpected.length || expected.length !== observed.length) {
       rejectionReason = 'scorecard execution coverage differs from the published execution set';
+    } else if (scorecardCountersDiffer(scorecards[0], published.counters)) {
+      rejectionReason = 'scorecard action or reset totals differ from published game records';
     }
     const coverage = Object.freeze({
       exact: rejectionReason === null,
@@ -344,13 +347,21 @@ function normalizePublishedExecution(value, name) {
   }, name);
 }
 
-function normalizeRecordRefs(records) {
-  return requireArray(records, 'published game records').flatMap((record, recordIndex) => {
+function normalizeRecordCoverage(records) {
+  const counters = new Map();
+  const refs = requireArray(records, 'published game records').flatMap((record, recordIndex) => {
     const value = requireRecord(record, `published game record ${recordIndex}`);
     const versionedGameId = normalizeVersionedGameId(value.versionedGameId, `published game record ${recordIndex}`);
     if (normalizeGameId(versionedGameId) !== value.gameId) {
       throw new Error(`published game record ${recordIndex} has cross-wired identities`);
     }
+    if (counters.has(versionedGameId)) {
+      throw new Error(`published game records contain duplicate ${versionedGameId}`);
+    }
+    counters.set(versionedGameId, {
+      actions: strictCount(value.actions, `published game record ${recordIndex} actions`),
+      resets: strictCount(value.resets, `published game record ${recordIndex} resets`),
+    });
     const executions = requireArray(value.executions, `published game record ${recordIndex} executions`);
     if (executions.length === 0) throw new Error(`published game record ${recordIndex} has no execution IDs`);
     return executions.map((execution, executionIndex) => {
@@ -367,6 +378,18 @@ function normalizeRecordRefs(records) {
         ),
       };
     });
+  });
+  return { refs, counters };
+}
+
+function scorecardCountersDiffer(scorecard, expected) {
+  const observed = new Map(scorecard.games.map((game) => [game.versionedGameId, {
+    actions: game.executions.reduce((sum, execution) => sum + execution.actions, 0),
+    resets: game.executions.reduce((sum, execution) => sum + execution.resets, 0),
+  }]));
+  return observed.size !== expected.size || [...expected].some(([gameId, counters]) => {
+    const actual = observed.get(gameId);
+    return counters.actions !== actual?.actions || counters.resets !== actual?.resets;
   });
 }
 

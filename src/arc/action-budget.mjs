@@ -1,17 +1,28 @@
 const DEFAULT_MULTIPLIER = 2;
 const DEFAULT_FALLBACK = 80;
 
+export function actionBudgetPolicy(env = process.env) {
+  return Object.freeze({
+    multiplier: positiveNumber(envValue(env.AVO_BASELINE_ACTION_MULTIPLIER, DEFAULT_MULTIPLIER), 'multiplier'),
+    fallback: positiveInteger(envValue(env.AVO_FALLBACK_ACTIONS, DEFAULT_FALLBACK), 'fallback'),
+  });
+}
+
+function envValue(value, fallback) {
+  return value === undefined || value === null || String(value).trim() === '' ? fallback : value;
+}
+
 /**
  * Derive an ARC action budget from official per-level human baselines.
  *
- * This mirrors the official benchmarking harness policy: ceil each baseline
- * multiplied by 2, then sum the per-level budgets. A configured maxActions is
- * retained as a hard safety cap, not used as the default target.
+ * This mirrors the configured benchmarking policy: ceil each baseline
+ * multiplied by the frozen multiplier, then sum the per-level budgets. A
+ * configured maxActions is retained as a hard safety cap, not the default target.
  */
 export function deriveActionBudget(environmentInfo, {
   hardCap = 1000,
-  multiplier = numberFromEnv('AVO_BASELINE_ACTION_MULTIPLIER', DEFAULT_MULTIPLIER),
-  fallback = numberFromEnv('AVO_FALLBACK_ACTIONS', DEFAULT_FALLBACK),
+  multiplier = actionBudgetPolicy().multiplier,
+  fallback = actionBudgetPolicy().fallback,
 } = {}) {
   const safeCap = positiveInteger(hardCap, 'hardCap');
   const safeMultiplier = positiveNumber(multiplier, 'multiplier');
@@ -40,13 +51,25 @@ export function deriveOuterTurnBudget(actionBudget, hardCap = 1000) {
   // Pi may use non-action turns for memory, proposals and evaluation. Permit a
   // bounded 2:1 overhead while preventing a no-action conversation from
   // consuming the entire 12-hour workflow.
-  return Math.max(20, Math.min(cap, actions * 2 + 20));
+  return Math.min(cap, actions * 2 + 20);
 }
 
-function numberFromEnv(name, fallback) {
-  const value = process.env[name];
-  if (value === undefined || value === '') return fallback;
-  return Number(value);
+export function deriveGameBudgets(games, { hardCap, outerTurnHardCap, policy }) {
+  if (!Array.isArray(games)) throw new Error('games must be an array');
+  return games.map((game) => {
+    const versionedGameId = String(game?.versionedGameId ?? game?.game_id ?? '');
+    if (!versionedGameId) throw new Error('game budget requires a versioned game ID');
+    const actionBudget = deriveActionBudget(game, {
+      hardCap,
+      multiplier: policy?.multiplier,
+      fallback: policy?.fallback,
+    });
+    return Object.freeze({
+      versionedGameId,
+      actionBudget,
+      outerTurnBudget: deriveOuterTurnBudget(actionBudget.total, outerTurnHardCap),
+    });
+  }).sort((left, right) => left.versionedGameId.localeCompare(right.versionedGameId));
 }
 
 function positiveInteger(value, name) {
