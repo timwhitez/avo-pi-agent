@@ -83,11 +83,12 @@ test('README tool inventory is generated from the sealed production profiles', (
   const ledger = read('issues.md');
   assert.match(ledger, /^# Benchmark and Harness Audit:/m);
   assert.match(ledger, /^## Live remediation ledger$/m);
-  assert.match(ledger, /Issues audited: \*\*18\/18\*\*\. \*\*2 remain open\*\*/);
-  assert.match(ledger, /Open Draft PRs: \*\*18\*\*/);
-  assert.match(ledger, /PR #200 \(this documentation-contract tree\)/);
-  assert.match(ledger, /\| #182 \|[^\n]+PR #200 tree/);
-  assert.match(ledger, /\| #180 \| Valid P0 attribution gate/);
+  assert.match(ledger, /Issues audited: \*\*18\/18\*\*\. \*\*0 remain open\.\*\*/);
+  assert.match(ledger, /final integration boundary/);
+  assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
+  assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
+  assert.match(ledger, /\| #180 \|[^\n]+#201\]/);
+  assert.doesNotMatch(ledger, /Open Draft PRs:/);
   assert.match(ledger, /Public benchmark: \*\*not run\*\*/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
