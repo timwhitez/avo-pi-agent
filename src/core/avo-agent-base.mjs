@@ -11,6 +11,7 @@ import {
   TRANSITION_SCHEMA,
   describeFrame,
   frameHash,
+  gridDelta,
   normalizeFrame,
   observationIdentity,
   transitionIdentity,
@@ -18,6 +19,7 @@ import {
 
 const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
+const MAX_TRAJECTORY_DIFF_CELLS = 128;
 export const AVO_TOOL_NAMES = Object.freeze([
   'observe',
   'trajectory_read',
@@ -80,6 +82,7 @@ export class AvoArcAgent {
     this.evidenceSequence = 0;
     this.attemptId = 'attempt-000001';
     this.currentObservationId = null;
+    this.currentObservationRef = null;
     this.executionGuids = [];
   }
 
@@ -181,25 +184,34 @@ export class AvoArcAgent {
     return [
       {
         name: 'observe',
-        label: 'Observe exact ARC frame',
-        description: 'Read the exact current grid, game state, progress and available actions without spending an environment action. Returns an objective evidence reference.',
+        label: 'Observe current ARC state',
+        description: 'Read a compact current-state preview without spending an environment action. Unchanged state reuses its exact evidence ref; retrieve the full grid through trajectory_read.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         execute: async () => {
-          const evidence = this.recordEvidence({ type: 'observation', frame: this.frame });
-          return this.toolResult(`${this.describe()}\nEVIDENCE_REF: ${evidence.id}`, { frame: this.frame, evidenceRef: evidence.id });
+          const evidenceRef = this.currentObservationRef;
+          if (!evidenceRef) throw new Error('current observation has no durable evidence reference');
+          return this.toolResult(
+            `${this.describe(this.frame, evidenceRef)}\nEVIDENCE_REF: ${evidenceRef}`,
+            { frame: this.frame, evidenceRef, contextExactEvidence: false },
+          );
         },
       },
       {
         name: 'trajectory_read',
         label: 'Read exact durable trajectory evidence',
-        description: 'Retrieve one exact prior observation/transition by evidence ref, or page bounded summaries from a sequence number. Use ref plus part=before/after when a full transition is too large.',
+        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid.',
         parameters: {
           type: 'object',
           properties: {
             ref: { type: 'string', pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' },
             startSequence: { type: 'integer', minimum: 1 },
             limit: { type: 'integer', minimum: 1, maximum: 20 },
-            part: { type: 'string', enum: ['summary', 'event', 'before', 'after'] },
+            part: { type: 'string', enum: ['summary', 'event', 'before', 'after', 'region', 'diff'] },
+            compareRef: { type: 'string', pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' },
+            x: { type: 'integer', minimum: 0, maximum: 63 },
+            y: { type: 'integer', minimum: 0, maximum: 63 },
+            width: { type: 'integer', minimum: 1, maximum: 64 },
+            height: { type: 'integer', minimum: 1, maximum: 64 },
           },
           additionalProperties: false,
         },
@@ -511,11 +523,12 @@ export class AvoArcAgent {
       ? `\nSUPERVISOR_INTERVENTION ${stall.id}:\n${stall.directions.map((direction, index) => `${index + 1}. ${direction.rationale} Next: ${direction.nextExperiment}`).join('\n')}`
       : '';
     return this.toolResult(
-      `${this.describe()}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
+      `${this.describe(previousFrame, this.currentObservationRef)}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
       {
         ok: true,
         frame: this.frame,
         evidenceRef: evidence.id,
+        contextExactEvidence: false,
         progressed,
         novelState: wasNew,
         objective: this.objectiveState(),
@@ -549,6 +562,7 @@ export class AvoArcAgent {
         message,
         frame: this.frame,
         evidenceRef: evidence.id,
+        contextExactEvidence: false,
         episodeId: this.episodeId(),
         telemetry: this.commandTelemetry(),
       },
@@ -716,25 +730,53 @@ export class AvoArcAgent {
     });
     this.evidenceLedger.push(event);
     this.currentObservationId = afterIdentity.episodeObservationId;
+    if (!this.currentObservationRef || event.beforeObservationId !== event.episodeObservationId) {
+      this.currentObservationRef = event.id;
+    }
     return event;
   }
 
-  readTrajectory({ ref, startSequence, limit = 10, part } = {}) {
+  readTrajectory({
+    ref,
+    startSequence,
+    limit = 10,
+    part,
+    compareRef,
+    x,
+    y,
+    width,
+    height,
+  } = {}) {
     const hasRef = typeof ref === 'string' && ref.length > 0;
     const hasSequence = startSequence !== undefined && startSequence !== null;
     if (hasRef === hasSequence) {
       throw new Error('trajectory_read requires exactly one of ref or startSequence');
     }
     const view = part ?? (hasRef ? 'event' : 'summary');
-    if (!['summary', 'event', 'before', 'after'].includes(view)) {
+    if (!['summary', 'event', 'before', 'after', 'region', 'diff'].includes(view)) {
       throw new Error('trajectory_read part is invalid');
+    }
+    if (!hasRef && (view === 'region' || view === 'diff')) {
+      throw new Error(`trajectory_read part=${view} requires ref`);
     }
 
     let value;
+    let contextExactEvidence = false;
     if (hasRef) {
       const event = this.evidenceLedger.find((entry) => entry.id === ref);
       if (!event) throw new Error(`trajectory evidence not found: ${ref}`);
-      value = trajectoryView(event, view);
+      if (view === 'region') {
+        value = trajectoryRegion(event, { x, y, width, height });
+      } else if (view === 'diff') {
+        const compared = this.evidenceLedger.find((entry) => entry.id === compareRef);
+        if (!compared) throw new Error(`trajectory comparison evidence not found: ${String(compareRef || '')}`);
+        value = trajectoryDiff(compared, event);
+      } else {
+        value = trajectoryView(event, view);
+        contextExactEvidence = view === 'event'
+          || (view === 'before' && Array.isArray(event.beforeObservation?.frame))
+          || (view === 'after' && Array.isArray(event.observation?.frame));
+      }
     } else {
       if (!Number.isSafeInteger(startSequence) || startSequence < 1) {
         throw new Error('trajectory_read startSequence must be a positive safe integer');
@@ -758,6 +800,7 @@ export class AvoArcAgent {
     }
     return this.toolResult(text, {
       evidenceRef: hasRef ? ref : null,
+      contextExactEvidence,
       startSequence: hasSequence ? startSequence : null,
       part: view,
       characters: text.length,
@@ -785,8 +828,11 @@ export class AvoArcAgent {
     });
   }
 
-  describe() {
-    return describeFrame(this.frame, this.previousFrame);
+  describe(
+    previousFrame = this.previousFrame,
+    evidenceRef = this.currentObservationRef,
+  ) {
+    return describeFrame(this.frame, previousFrame, evidenceRef);
   }
 
   toolResult(text, details = {}, terminate = false) {
@@ -798,7 +844,7 @@ export class AvoArcAgent {
 
 AVO contract:
 1. You control the whole long-horizon loop. Decide what prior memory, proposals, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
-2. Use direct interaction with the exact text grid and currently legal gameplay actions as the primary ARC policy. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
+2. Use direct interaction with compact typed previews, exact referenced text grids, and currently legal gameplay actions as the primary ARC policy. When a delta is truncated or the shape changes, use trajectory_read after/region/diff before relying on missing cells. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
 3. Gameplay actions and the separate reset controller both consume environment actions. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
 5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
@@ -810,8 +856,8 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
 
   async run() {
     if (!this.frame) await this.initialize();
-    const initialEvidence = this.evidenceLedger.at(-1)?.id;
-    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe()}`;
+    const initialEvidence = this.currentObservationRef;
+    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe(null, initialEvidence)}`;
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
       tools: this.tools(),
@@ -887,6 +933,78 @@ function trajectoryView(event, part) {
     levelDelta: event.levelDelta,
     fullReset: event.fullReset,
     createdAt: event.createdAt,
+  };
+}
+
+function trajectoryRegion(event, { x, y, width, height }) {
+  const grid = exactEventGrid(event);
+  const gridHeight = grid.length;
+  const gridWidth = grid[0].length;
+  const left = regionInteger(x, 'x', 0, 63);
+  const top = regionInteger(y, 'y', 0, 63);
+  const regionWidth = regionInteger(width, 'width', 1, 64);
+  const regionHeight = regionInteger(height, 'height', 1, 64);
+  if (left + regionWidth > gridWidth || top + regionHeight > gridHeight) {
+    throw new Error(`trajectory_read region exceeds grid shape ${gridWidth}x${gridHeight}`);
+  }
+  return {
+    evidenceRef: event.id,
+    observationId: event.episodeObservationId,
+    gridContentHash: event.gridContentHash,
+    x: left,
+    y: top,
+    width: regionWidth,
+    height: regionHeight,
+    grid: grid.slice(top, top + regionHeight)
+      .map((row) => row.slice(left, left + regionWidth)),
+  };
+}
+
+function trajectoryDiff(fromEvent, toEvent) {
+  const from = exactEventGrid(fromEvent);
+  const to = exactEventGrid(toEvent);
+  const changed = gridDelta(from, to).changed;
+  return {
+    fromEvidenceRef: fromEvent.id,
+    toEvidenceRef: toEvent.id,
+    fromObservationId: fromEvent.episodeObservationId,
+    toObservationId: toEvent.episodeObservationId,
+    fromShape: [from.length, from[0].length],
+    toShape: [to.length, to[0].length],
+    view: changed === null ? 'shape_changed' : changed.length === 0 ? 'no_change' : 'delta',
+    changedCellCount: changed?.length ?? null,
+    changedCellFormat: ['x', 'y', 'before', 'after'],
+    changedCells: changed?.slice(0, MAX_TRAJECTORY_DIFF_CELLS) ?? [],
+    changedCellsTruncated: changed !== null && changed.length > MAX_TRAJECTORY_DIFF_CELLS,
+    changedBounds: trajectoryChangedBounds(changed),
+  };
+}
+
+function exactEventGrid(event) {
+  const grid = event?.observation?.frame;
+  if (!Array.isArray(grid) || grid.length === 0 || !Array.isArray(grid[0]) || grid[0].length === 0
+      || grid.some((row) => !Array.isArray(row) || row.length !== grid[0].length)) {
+    throw new Error(`trajectory evidence ${String(event?.id || '')} has no rectangular exact grid`);
+  }
+  return grid;
+}
+
+function regionInteger(value, name, minimum, maximum) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`trajectory_read ${name} must be an integer from ${minimum} through ${maximum}`);
+  }
+  return value;
+}
+
+function trajectoryChangedBounds(changed) {
+  if (!changed?.length) return null;
+  const xs = changed.map(([x]) => x);
+  const ys = changed.map(([, y]) => y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs) + 1,
+    height: Math.max(...ys) - Math.min(...ys) + 1,
   };
 }
 

@@ -6,6 +6,8 @@ export const GRID_CONTENT_SCHEMA = 'avo.grid-content.v1';
 export const OBSERVATION_CONTENT_SCHEMA = 'avo.observation-content.v1';
 export const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
 export const TRANSITION_SCHEMA = 'avo.transition.v1';
+const MAX_CHANGED_CELL_PREVIEW = 128;
+const MAX_PALETTE_PREVIEW = 32;
 
 export function normalizeFrame(raw) {
   const frame = raw?.frame ?? [];
@@ -139,7 +141,11 @@ export function gridToExactText(grid) {
 }
 
 export function gridDelta(previous, current) {
-  if (!previous?.length || previous.length !== current?.length) {
+  if (!previous?.length
+      || previous.length !== current?.length
+      || previous.some((row, index) => !Array.isArray(row)
+        || !Array.isArray(current[index])
+        || row.length !== current[index].length)) {
     return { changed: null, exact: gridToExactText(current) };
   }
   const changes = [];
@@ -154,9 +160,16 @@ export function gridDelta(previous, current) {
   return { changed: changes, exact: gridToExactText(current) };
 }
 
-export function describeFrame(frame, previousFrame = null) {
+export function describeFrame(frame, previousFrame = null, observationRef = null) {
   const delta = gridDelta(previousFrame?.frame, frame.frame);
   const identity = observationIdentity(frame);
+  const changed = delta.changed;
+  const palette = paletteSummary(frame.frame);
+  const view = previousFrame === null
+    ? 'exact_initial'
+    : changed === null
+      ? 'shape_changed'
+      : changed.length === 0 ? 'no_change' : 'delta';
   const header = {
     game_id: frame.gameId,
     state: frame.state,
@@ -168,9 +181,48 @@ export function describeFrame(frame, previousFrame = null) {
     grid_content_hash: identity.gridContentHash,
     observation_content_hash: identity.observationContentHash,
     frame_hash: identity.observationContentHash.slice(0, 16),
-    changed_cells: delta.changed?.length ?? null,
+    observation_ref: observationRef,
+    view,
+    palette_counts: palette.counts,
+    palette_color_count: palette.total,
+    palette_counts_truncated: palette.truncated,
+    changed_cell_count: changed?.length ?? null,
+    changed_cell_format: ['x', 'y', 'before', 'after'],
+    changed_cells: view === 'delta' ? changed.slice(0, MAX_CHANGED_CELL_PREVIEW) : [],
+    changed_cells_truncated: view === 'delta' && changed.length > MAX_CHANGED_CELL_PREVIEW,
+    changed_bounds: changedBounds(changed),
+    exact_read: observationRef ? { tool: 'trajectory_read', ref: observationRef, part: 'after' } : null,
   };
-  return `${JSON.stringify(header, null, 2)}\nGRID_EXACT:\n${delta.exact}`;
+  const preview = JSON.stringify(header, null, 2);
+  return view === 'exact_initial' ? `${preview}\nGRID_EXACT:\n${delta.exact}` : preview;
+}
+
+function paletteSummary(grid) {
+  const counts = new Map();
+  for (const row of Array.isArray(grid) ? grid : []) {
+    for (const cell of Array.isArray(row) ? row : []) {
+      const key = String(cell);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  const entries = [...counts].sort(([left], [right]) => left.localeCompare(right));
+  return {
+    counts: Object.fromEntries(entries.slice(0, MAX_PALETTE_PREVIEW)),
+    total: entries.length,
+    truncated: entries.length > MAX_PALETTE_PREVIEW,
+  };
+}
+
+function changedBounds(changed) {
+  if (!changed?.length) return null;
+  const xs = changed.map(([x]) => x);
+  const ys = changed.map(([, y]) => y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs) + 1,
+    height: Math.max(...ys) - Math.min(...ys) + 1,
+  };
 }
 
 function digest(value) {

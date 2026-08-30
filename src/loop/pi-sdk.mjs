@@ -678,6 +678,7 @@ function isReducedToolResult(message) {
   const text = String(message?.content?.[0]?.text || '');
   return message?.contextElided === true
     || message?.details?.contextTruncated === true
+    || message?.details?.contextExactEvidence === false
     || (text.startsWith('[older ') && text.includes(' output elided;'))
     || text.includes('[tool output truncated at ');
 }

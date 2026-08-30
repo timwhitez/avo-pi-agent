@@ -34,6 +34,51 @@ test('computes cell-level delta without losing exact frame', () => {
   assert.equal(delta.exact, '0 1\n0 0');
 });
 
+test('returns bounded delta and no_change previews with an exact evidence ref', () => {
+  const before = normalizeFrame({
+    game_id: 'preview-v1', frame: Array.from({ length: 64 }, () => Array(64).fill(0)),
+    state: 'PLAYING', levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'],
+  });
+  const after = { ...before, frame: before.frame.map((row) => row.slice()) };
+  after.frame[17][23] = 4;
+  const ref = 'evidence-000002-123456789abc';
+  const delta = JSON.parse(describeFrame(after, before, ref));
+  assert.equal(delta.view, 'delta');
+  assert.equal(delta.observation_ref, ref);
+  assert.equal(delta.changed_cell_count, 1);
+  assert.deepEqual(delta.changed_cells, [[23, 17, 0, 4]]);
+  assert.deepEqual(delta.changed_bounds, { x: 23, y: 17, width: 1, height: 1 });
+  assert.deepEqual(delta.exact_read, { tool: 'trajectory_read', ref, part: 'after' });
+  assert.ok(JSON.stringify(delta).length < 2_000, 'one changed cell must not reserialize a 64x64 grid');
+
+  const unchanged = JSON.parse(describeFrame(after, after, ref));
+  assert.equal(unchanged.view, 'no_change');
+  assert.equal(unchanged.changed_cell_count, 0);
+  assert.deepEqual(unchanged.changed_cells, []);
+  assert.equal(unchanged.observation_ref, ref);
+});
+
+test('bounds large change previews and treats width changes as shape changes', () => {
+  const before = normalizeFrame({ game_id: 'bounded-v1', frame: Array.from({ length: 20 }, () => Array(20).fill(0)) });
+  const after = { ...before, frame: Array.from({ length: 20 }, () => Array(20).fill(1)) };
+  const preview = JSON.parse(describeFrame(after, before, 'evidence-000002-aaaaaaaaaaaa'));
+  assert.equal(preview.changed_cell_count, 400);
+  assert.equal(preview.changed_cells.length, 128);
+  assert.equal(preview.changed_cells_truncated, true);
+
+  const wider = { ...before, frame: before.frame.map((row) => [...row, 0]) };
+  assert.equal(JSON.parse(describeFrame(wider, before)).view, 'shape_changed');
+
+  const colorful = {
+    ...before,
+    frame: Array.from({ length: 20 }, (_, y) => Array.from({ length: 20 }, (_, x) => y * 20 + x)),
+  };
+  const palette = JSON.parse(describeFrame(colorful, colorful));
+  assert.equal(palette.palette_color_count, 400);
+  assert.equal(Object.keys(palette.palette_counts).length, 32);
+  assert.equal(palette.palette_counts_truncated, true);
+});
+
 test('separates grid content, observation content, episode identity, and transitions', () => {
   const base = normalizeFrame({
     game_id: 'identity-v1',
