@@ -47,6 +47,14 @@ test('method+params protocol is captured as a real step with full private eviden
             evidence: [], missingEvidenceRefs: [],
           },
         },
+        {
+          id: 'legacy-mismatch', proposalId: 'proposal-a',
+          evaluation: {
+            proposalId: 'proposal-b', correctness: true,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-000002-bbbbbbbbbbbb' }], missingEvidenceRefs: [],
+          },
+        },
       ],
       supervisorInterventions: [{
         trigger: { evidenceRefs: ['e-1'] },
@@ -95,9 +103,9 @@ test('method+params protocol is captured as a real step with full private eviden
     assert.ok(durable.some((record) => record.kind === 'memory.snapshot'));
     const journal = durable.find((record) => record.kind === 'hypothesis_journal.snapshot');
     assert.ok(journal);
-    assert.equal(journal.evaluation_count, 2);
+    assert.equal(journal.evaluation_count, 3);
     assert.equal(journal.confirmed_count, 1);
-    assert.equal(journal.inconclusive_count, 1);
+    assert.equal(journal.inconclusive_count, 2);
     const serialized = JSON.stringify([...arc, ...durable]);
     assert.equal(serialized.includes('must never enter marker output'), false);
     assert.equal(serialized.includes('private memory text'), false);

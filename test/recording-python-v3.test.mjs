@@ -46,6 +46,14 @@ test('composed recorder closes its protocol pipe and records durable-state marke
             evidence: [{ id: 'evidence-not-exact' }], missingEvidenceRefs: [],
           },
         },
+        {
+          id: 'attempt-contradictory', proposalId: 'proposal-contradictory',
+          evaluation: {
+            correctness: false,
+            predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+            evidence: [{ id: 'evidence-000002-bbbbbbbbbbbb' }], missingEvidenceRefs: [],
+          },
+        },
       ],
       notes: ['private durable note'],
     }));
@@ -73,10 +81,10 @@ test('composed recorder closes its protocol pipe and records durable-state marke
     assert.equal(snapshot.action_semantics_count, 1);
     assert.equal(snapshot.note_count, 1);
     assert.equal(journal.proposal_count, 1);
-    assert.equal(journal.evaluation_count, 2);
+    assert.equal(journal.evaluation_count, 3);
     assert.equal(journal.confirmed_count, 1);
     assert.equal(journal.contradicted_count, 0);
-    assert.equal(journal.inconclusive_count, 1);
+    assert.equal(journal.inconclusive_count, 2);
     assert.equal(JSON.stringify(records).includes('private durable note'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

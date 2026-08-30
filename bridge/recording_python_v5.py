@@ -318,6 +318,13 @@ def evaluation_outcome(record: Any) -> str:
         return "expired" if declared in {None, "expired"} else "inconclusive"
     if declared == "expired":
         return "expired"
+    if evaluation.get("correctness") is False:
+        return "inconclusive"
+    if (
+        evaluation.get("proposalId") is not None
+        and evaluation.get("proposalId") != record.get("proposalId")
+    ):
+        return "inconclusive"
     checks = evaluation.get("predictionChecks")
     evidence = evaluation.get("evidence")
     missing = evaluation.get("missingEvidenceRefs")

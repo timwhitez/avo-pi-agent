@@ -65,6 +65,7 @@ function evidenceOutcome(record, evaluation) {
     return declared === undefined || declared === 'expired' ? 'expired' : 'inconclusive';
   }
   if (declared === 'expired') return 'expired';
+  if (evaluation.correctness === false) return 'inconclusive';
   if (evaluation.proposalId && evaluation.proposalId !== record.proposalId) return 'inconclusive';
   const checks = evaluation.predictionChecks;
   const evidence = evaluation.evidence;

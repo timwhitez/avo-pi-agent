@@ -39,6 +39,17 @@ test('Mission Control never upgrades evidence-free legacy correctness to confirm
   assert.equal(legacy.evaluation.evidenceBoundaryValid, false);
   assert.match(legacy.evaluation.reasons.join(' '), /complete exact evidence is absent/);
   assert.equal('accepted' in legacy, false);
+
+  const contradictory = hypothesisEvaluationView({
+    id: 'attempt-2', proposalId: 'proposal-2',
+    evaluation: {
+      correctness: false,
+      predictionChecks: { totalClaims: 1, matchedClaims: 1, unmatchedPredictions: [] },
+      evidence: [{ id: 'evidence-000002-bbbbbbbbbbbb' }],
+      missingEvidenceRefs: [],
+    },
+  });
+  assert.equal(contradictory.outcome, 'inconclusive');
 });
 
 test('Mission Control shows only complete and internally consistent evidence as conclusive', () => {
@@ -53,6 +64,12 @@ test('Mission Control shows only complete and internally consistent evidence as 
     evaluation: completeEvaluation({ outcome: 'contradicted' }),
   });
   assert.equal(inconsistent.outcome, 'inconclusive');
+
+  const proposalMismatch = hypothesisEvaluationView({
+    id: 'evaluation-3', proposalId: 'proposal-3',
+    evaluation: completeEvaluation({ proposalId: 'proposal-other' }),
+  });
+  assert.equal(proposalMismatch.outcome, 'inconclusive');
 
   const view = extractHypothesisJournal([{
     gameId: 'demo',
