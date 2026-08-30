@@ -391,6 +391,12 @@ function validateSequenceTelemetry(value, fail) {
       || value.sequenceCancellations > value.sequenceActionsSkipped) {
     fail('sequenceCancellations exceeds sequence or skipped-action counts');
   }
+  if (value.sequenceActionsSkipped > value.sequenceCancellations * MAX_SEQUENCE_ACTIONS) {
+    fail(`sequenceActionsSkipped exceeds ${MAX_SEQUENCE_ACTIONS} actions per cancellation`);
+  }
+  if (value.actionSequences - value.sequenceCancellations > value.sequenceActionsExecuted) {
+    fail('non-cancelled sequences require at least one executed action');
+  }
   if ((value.actionSequences === 0 && value.sequenceActionsRequested !== 0)
       || (value.actionSequences > 0 && value.sequenceActionsRequested < value.actionSequences)) {
     fail('actionSequences is inconsistent with requested actions');

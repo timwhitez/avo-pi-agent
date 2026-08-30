@@ -120,6 +120,21 @@ test('preserves controller telemetry and validates total environment-action acco
     }),
     /exceeds 20 actions per sequence/,
   );
+  assert.throws(
+    () => normalizeGameRecord({ ...record, sequenceCancellations: 0 }),
+    /exceeds 20 actions per cancellation/,
+  );
+  assert.throws(
+    () => normalizeGameRecord({
+      ...record,
+      actionSequences: 2,
+      sequenceActionsRequested: 2,
+      sequenceActionsExecuted: 0,
+      sequenceActionsSkipped: 2,
+      sequenceCancellations: 1,
+    }),
+    /non-cancelled sequences require/,
+  );
   const incompleteSequenceTelemetry = { ...record };
   delete incompleteSequenceTelemetry.sequenceActionsSkipped;
   assert.throws(

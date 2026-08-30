@@ -256,7 +256,7 @@ export class AvoArcAgent {
       {
         name: 'act_sequence',
         label: 'Execute a bounded gameplay action sequence',
-        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or environment failure. Use single-step act while uncertain.',
+        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or execution failure. Use single-step act while uncertain.',
         parameters: {
           type: 'object',
           required: ['steps'],
@@ -471,7 +471,7 @@ export class AvoArcAgent {
     ];
   }
 
-  async act({ action, x, y, reasoning = '' } = {}) {
+  async act({ action, x, y, reasoning = '' } = {}, trace = null) {
     if (this.finished || this.actions >= this.config.maxActions) {
       return this.toolResult('No action taken: run is already complete.', { frame: this.frame }, true);
     }
@@ -501,12 +501,20 @@ export class AvoArcAgent {
     }
 
     const previousFrame = this.frame;
+    if (trace) trace.phase = 'environment';
     const raw = await this.environment.step(action, data, { text: reasoning });
-    return this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
+    if (trace) trace.phase = 'transition';
+    const result = this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
+    if (trace) trace.phase = 'complete';
+    return result;
   }
 
-  async actSequence({ steps } = {}) {
-    const requested = normalizeActionSequence(steps);
+  async actSequence(input = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some((key) => key !== 'steps')) {
+      throw new Error('act_sequence input is malformed');
+    }
+    const requested = normalizeActionSequence(input.steps);
     this.actionSequences += 1;
     this.sequenceActionsRequested += requested.length;
 
@@ -518,15 +526,34 @@ export class AvoArcAgent {
 
     for (const [index, step] of requested.entries()) {
       const before = this.frame;
+      const beforeActions = this.actions;
+      const beforeEvidenceSequence = this.evidenceSequence;
+      const trace = { phase: 'guard' };
       let result;
       try {
-        result = await this.act(step);
+        result = await this.act(step, trace);
       } catch {
-        stopReason = 'ENVIRONMENT_ERROR';
-        this.executionError = 'action sequence environment failure';
+        const evidence = this.evidenceLedger.at(-1);
+        const durableTransition = trace.phase === 'transition'
+          && this.actions === beforeActions + 1
+          && this.evidenceSequence === beforeEvidenceSequence + 1
+          && evidence?.type === 'environment-action'
+          && evidence.action === step.action
+          && evidence.actionIndex === this.actions;
+        if (durableTransition) {
+          executed.push(sequenceExecutedEntry(index, step, before, this.frame, evidence.id));
+          stopReason = 'INTERNAL_ERROR';
+          appendSkipped(skipped, requested, index + 1, stopReason);
+          this.executionError = 'action sequence post-transition failure';
+        } else {
+          stopReason = trace.phase === 'environment' ? 'ENVIRONMENT_ERROR' : 'INTERNAL_ERROR';
+          appendSkipped(skipped, requested, index, stopReason);
+          this.executionError = trace.phase === 'environment'
+            ? 'action sequence environment failure'
+            : 'action sequence transition failure';
+        }
         this.finished = true;
         terminate = true;
-        appendSkipped(skipped, requested, index, stopReason);
         break;
       }
 
@@ -538,27 +565,16 @@ export class AvoArcAgent {
         break;
       }
 
-      const levelDelta = this.frame.levelsCompleted - before.levelsCompleted;
-      const mismatches = expectationMismatches(step.expected, before, this.frame);
-      executed.push({
-        index,
-        action: step.action,
-        data: actionData(step),
-        evidenceRef: result.details.evidenceRef,
-        state: this.frame.state,
-        levelsCompleted: this.frame.levelsCompleted,
-        levelDelta,
-        afterHash: frameHash(this.frame),
-        expectationMismatches: mismatches,
-      });
+      const entry = sequenceExecutedEntry(index, step, before, this.frame, result.details.evidenceRef);
+      executed.push(entry);
 
       const lifecycle = episodeState(this.frame);
       if (lifecycle === 'WIN') stopReason = 'WIN';
       else if (lifecycle === 'GAME_OVER') stopReason = 'GAME_OVER';
       else if (lifecycle === 'ERROR') stopReason = 'ERROR';
-      else if (levelDelta > 0) stopReason = 'LEVEL_PROGRESS';
+      else if (entry.levelDelta > 0) stopReason = 'LEVEL_PROGRESS';
       else if (this.actions >= this.config.maxActions) stopReason = 'ACTION_BUDGET_EXHAUSTED';
-      else if (mismatches.length) stopReason = 'EXPECTATION_MISMATCH';
+      else if (entry.expectationMismatches.length) stopReason = 'EXPECTATION_MISMATCH';
       else continue;
 
       appendSkipped(skipped, requested, index + 1, stopReason);
@@ -573,7 +589,7 @@ export class AvoArcAgent {
     if (skipped.length) this.sequenceCancellations += 1;
     const expectationFailed = executed.some((entry) => entry.expectationMismatches.length > 0);
     const details = {
-      ok: !['ACTION_REJECTED', 'RUN_COMPLETE', 'ENVIRONMENT_ERROR'].includes(stopReason)
+      ok: !['ACTION_REJECTED', 'RUN_COMPLETE', 'ENVIRONMENT_ERROR', 'INTERNAL_ERROR'].includes(stopReason)
         && !expectationFailed,
       requested: requested.map((step, index) => ({ index, action: step.action, data: actionData(step) })),
       executed,
@@ -993,7 +1009,7 @@ export class AvoArcAgent {
 AVO contract:
 1. You control the whole long-horizon loop. Decide what prior memory, proposals, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
 2. Use direct interaction with compact typed previews, exact referenced text grids, and currently legal gameplay actions as the primary ARC policy. When a delta is truncated or the shape changes, use trajectory_read after/region/diff before relying on missing cells. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
-3. Gameplay actions and the separate reset controller both consume environment actions. Use one act while uncertain; act_sequence may execute a tested 1–20 step plan but cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or environment failure. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
+3. Gameplay actions and the separate reset controller both consume environment actions. Use one act while uncertain; act_sequence may execute a tested 1–20 step plan but cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or execution failure. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
 5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
@@ -1103,7 +1119,8 @@ function normalizeActionExpectation(value, index) {
         || /[\r\n\0]/.test(value.state))) {
     throw new Error(`act_sequence step ${index} expected.state is invalid`);
   }
-  if (value.afterHash !== undefined && !/^[a-f0-9]{16}$/.test(String(value.afterHash))) {
+  if (value.afterHash !== undefined
+      && (typeof value.afterHash !== 'string' || !/^[a-f0-9]{16}$/.test(value.afterHash))) {
     throw new Error(`act_sequence step ${index} expected.afterHash is invalid`);
   }
   return structuredClone(value);
@@ -1134,6 +1151,20 @@ function expectationMismatches(expected, before, after) {
     }
   }
   return mismatches;
+}
+
+function sequenceExecutedEntry(index, step, before, after, evidenceRef) {
+  return {
+    index,
+    action: step.action,
+    data: actionData(step),
+    evidenceRef,
+    state: after.state,
+    levelsCompleted: after.levelsCompleted,
+    levelDelta: after.levelsCompleted - before.levelsCompleted,
+    afterHash: frameHash(after),
+    expectationMismatches: expectationMismatches(step.expected, before, after),
+  };
 }
 
 function actionData(step) {

@@ -96,7 +96,8 @@ restricted to offline deterministic tests. After a Pi prompt settles, the
 wrapper queues a neutral follow-up while the run remains open. An active
 episode may take one gameplay action or a bounded sequence routed through the
 same single-step guard; sequences cancel their unexecuted tail on objective
-progress, terminal state, rejection, failed expectation or exhausted budget.
+progress, terminal state, rejection, failed expectation, exhausted budget or
+execution failure.
 `GAME_OVER` or `ERROR` ends that episode,
 so only controller reset or explicit finish remains legal. The run stops on:
 

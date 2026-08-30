@@ -124,23 +124,89 @@ test('an unavailable later action preserves the executed prefix and marks the co
   }
 });
 
-test('terminal, budget, expectation, and environment failures each stop before the remaining tail', async () => {
+test('an internal failure after durable transition preserves the executed prefix and fails closed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-action-sequence-internal-'));
+  let calls = 0;
+  const environment = {
+    async start() { return frame(); },
+    async step() {
+      calls += 1;
+      return frame({ cell: calls });
+    },
+  };
+  try {
+    const agent = makeAgent(root, environment);
+    await agent.initialize();
+    agent.supervisor.observe = () => { throw new Error('private supervisor detail'); };
+    const result = await agent.actSequence({
+      steps: [{ action: 'ACTION1' }, { action: 'ACTION2' }],
+    });
+    assert.equal(result.details.stopReason, 'INTERNAL_ERROR');
+    assert.equal(result.details.ok, false);
+    assert.equal(result.terminate, true);
+    assert.equal(calls, 1);
+    assert.equal(agent.actions, 1);
+    assert.equal(agent.evidenceLedger.length, 2);
+    assert.deepEqual(result.details.executed.map((entry) => entry.index), [0]);
+    assert.deepEqual(result.details.skipped.map((entry) => entry.index), [1]);
+    assert.match(result.details.executed[0].evidenceRef, /^evidence-/);
+    assert.equal(result.details.evidenceRef, result.details.executed[0].evidenceRef);
+    assert.equal(agent.executionError, 'action sequence post-transition failure');
+    assert.doesNotMatch(result.text, /private supervisor detail/);
+    assert.equal(agent.sequenceActionsExecuted, 1);
+    assert.equal(agent.sequenceActionsSkipped, 1);
+    assert.equal(agent.sequenceCancellations, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('sequence completion and every lifecycle or failure stop branch preserve the exact tail', async () => {
   const scenarios = [
     {
-      name: 'terminal',
+      name: 'win',
+      next: () => frame({ cell: 1, state: 'WIN', levels: 3 }),
+      maxActions: 20,
+      reason: 'WIN',
+      calls: 1,
+      executed: 1,
+      skipped: 1,
+      terminate: true,
+      ok: true,
+    },
+    {
+      name: 'game-over',
       next: () => frame({ cell: 1, state: 'GAME_OVER' }),
-      expected: null,
       maxActions: 20,
       reason: 'GAME_OVER',
-      fatal: false,
+      calls: 1,
+      executed: 1,
+      skipped: 1,
+      terminate: false,
+      ok: true,
+    },
+    {
+      name: 'error-state',
+      next: () => frame({ cell: 1, state: 'ERROR' }),
+      maxActions: 20,
+      reason: 'ERROR',
+      calls: 1,
+      executed: 1,
+      skipped: 1,
+      terminate: false,
+      ok: true,
+      recover: true,
     },
     {
       name: 'budget',
       next: () => frame({ cell: 1 }),
-      expected: null,
       maxActions: 1,
       reason: 'ACTION_BUDGET_EXHAUSTED',
-      fatal: false,
+      calls: 1,
+      executed: 1,
+      skipped: 1,
+      terminate: true,
+      ok: true,
     },
     {
       name: 'expectation',
@@ -148,15 +214,34 @@ test('terminal, budget, expectation, and environment failures each stop before t
       expected: { changed: false },
       maxActions: 20,
       reason: 'EXPECTATION_MISMATCH',
-      fatal: false,
+      calls: 1,
+      executed: 1,
+      skipped: 1,
+      terminate: false,
+      ok: false,
     },
     {
       name: 'environment',
       next: () => { throw new Error('private environment detail'); },
-      expected: null,
       maxActions: 20,
       reason: 'ENVIRONMENT_ERROR',
-      fatal: true,
+      calls: 1,
+      executed: 0,
+      skipped: 2,
+      terminate: true,
+      ok: false,
+      environmentFailure: true,
+    },
+    {
+      name: 'complete',
+      next: () => frame({ cell: 1 }),
+      maxActions: 20,
+      reason: 'SEQUENCE_COMPLETE',
+      calls: 2,
+      executed: 2,
+      skipped: 0,
+      terminate: false,
+      ok: true,
     },
   ];
 
@@ -169,6 +254,7 @@ test('terminal, budget, expectation, and environment failures each stop before t
         calls += 1;
         return scenario.next();
       },
+      async reset() { return frame({ cell: 9 }); },
     };
     try {
       const agent = makeAgent(root, environment, { maxActions: scenario.maxActions });
@@ -179,15 +265,20 @@ test('terminal, budget, expectation, and environment failures each stop before t
           { action: 'ACTION2' },
         ],
       });
-      assert.equal(calls, 1, scenario.name);
+      assert.equal(calls, scenario.calls, scenario.name);
       assert.equal(result.details.stopReason, scenario.reason, scenario.name);
-      assert.equal(result.details.skipped.length, scenario.fatal ? 2 : 1, scenario.name);
-      assert.equal(result.details.executed.length, scenario.fatal ? 0 : 1, scenario.name);
-      assert.equal(result.terminate, scenario.fatal || scenario.reason === 'ACTION_BUDGET_EXHAUSTED');
-      assert.equal(result.details.ok, scenario.reason !== 'EXPECTATION_MISMATCH' && !scenario.fatal);
-      if (scenario.fatal) {
+      assert.equal(result.details.skipped.length, scenario.skipped, scenario.name);
+      assert.equal(result.details.executed.length, scenario.executed, scenario.name);
+      assert.equal(result.terminate, scenario.terminate, scenario.name);
+      assert.equal(result.details.ok, scenario.ok, scenario.name);
+      if (scenario.environmentFailure) {
         assert.equal(agent.executionError, 'action sequence environment failure');
         assert.doesNotMatch(JSON.stringify(result), /private environment detail/);
+      }
+      if (scenario.recover) {
+        const reset = await agent.reset({ rationale: 'recover from sequence ERROR' });
+        assert.equal(reset.details.ok, true);
+        assert.equal(reset.details.frame.state, 'PLAYING');
       }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
@@ -220,6 +311,16 @@ test('act_sequence schema and direct guard reject malformed or oversized batches
     await assert.rejects(
       agent.actSequence({ steps: [{ action: 'ACTION1' }, { action: 'ACTION2', unexpected: true }] }),
       /step 1 is malformed/,
+    );
+    await assert.rejects(
+      agent.actSequence({
+        steps: [{ action: 'ACTION1', expected: { afterHash: 1234567890123456 } }],
+      }),
+      /expected\.afterHash is invalid/,
+    );
+    await assert.rejects(
+      agent.actSequence({ steps: [{ action: 'ACTION1' }], unexpected: true }),
+      /input is malformed/,
     );
     assert.equal(calls, 0);
     assert.equal(agent.actionSequences, 0);
