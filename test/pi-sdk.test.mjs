@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
+import { policySystemPrompt, policyToolContract } from '../src/core/policy-profile.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 
 test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools', async () => {
@@ -109,6 +111,33 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
       },
       maxOuterTurns: 1001,
     }, { onEvent: (event) => events.push(event) });
+    const productionTools = effectiveAvoTools('files-only', 'current-v1');
+    const productionToolContract = policyToolContract(productionTools);
+    const guardedRun = (tools) => loop.run({
+      systemPrompt: policySystemPrompt('current-v1'),
+      initialPrompt: 'must not reach provider',
+      shouldStop: () => true,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'finish',
+      }),
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      productionToolContract,
+      tools,
+    });
+    await assert.rejects(
+      guardedRun(productionTools.filter((tool) => tool.name !== 'trajectory_read')),
+      /prompt or tools differ/,
+    );
+    await assert.rejects(
+      guardedRun(productionTools.map((tool) => (
+        tool.name === 'act'
+          ? { ...tool, parameters: { type: 'object', properties: {}, additionalProperties: false } }
+          : tool
+      ))),
+      /prompt or tools differ/,
+    );
     const result = await loop.run({
       systemPrompt: 'system', initialPrompt: 'start', shouldStop: () => false,
       runtimeStatus: () => {

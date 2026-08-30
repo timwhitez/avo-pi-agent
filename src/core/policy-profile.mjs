@@ -70,6 +70,15 @@ export function filterToolsForPolicy(
   });
 }
 
+export function policyToolContract(tools) {
+  return tools.map(({ name, label, description, parameters }) => ({
+    name,
+    label,
+    description,
+    parameters,
+  }));
+}
+
 export function policyInitialPrompt({
   policyProfile = DEFAULT_POLICY_PROFILE,
   gameId,

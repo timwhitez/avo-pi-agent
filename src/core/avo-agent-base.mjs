@@ -9,8 +9,10 @@ import {
   normalizePolicyProfile,
   policyInitialPrompt,
   policySystemPrompt,
+  policyToolContract,
   policyUsesStrategy,
 } from './policy-profile.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
 import { WorkspaceSandbox } from './workspace.mjs';
 import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
 import {
@@ -51,6 +53,10 @@ export function effectiveAvoTools(workspaceMode = 'files-only', policyProfile) {
 
 export function effectiveAvoToolNames(workspaceMode = 'files-only', policyProfile) {
   return effectiveAvoTools(workspaceMode, policyProfile).map((tool) => tool.name);
+}
+
+export function effectiveAvoToolContract(workspaceMode = 'files-only', policyProfile) {
+  return policyToolContract(effectiveAvoTools(workspaceMode, policyProfile));
 }
 
 export class AvoArcAgent {
@@ -1082,7 +1088,13 @@ export class AvoArcAgent {
   }
 
   exposedTools() {
-    return filterToolsForPolicy(this.tools(), this.workspace.mode, this.policyProfile);
+    const tools = filterToolsForPolicy(this.tools(), this.workspace.mode, this.policyProfile);
+    if (canonicalJson(policyToolContract(tools)) !== canonicalJson(
+      effectiveAvoToolContract(this.workspace.mode, this.policyProfile),
+    )) {
+      throw new Error('runtime tool contract differs from the sealed production policy profile');
+    }
+    return tools;
   }
 
   systemPrompt() {
@@ -1106,9 +1118,14 @@ export class AvoArcAgent {
       frameDescription: this.describe(null, initialEvidence),
       relevantMemory: initialMemory,
     });
+    const tools = this.exposedTools();
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
-      tools: this.exposedTools(),
+      tools,
+      productionToolContract: effectiveAvoToolContract(
+        this.workspace.mode,
+        this.policyProfile,
+      ),
       workspaceMode: this.workspace.mode,
       policyProfile: this.policyProfile,
       initialPrompt,

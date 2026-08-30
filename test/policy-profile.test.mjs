@@ -6,7 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { getRuntimeConfig } from '../src/config.mjs';
-import { AvoArcAgent, effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
+import {
+  AvoArcAgent,
+  effectiveAvoToolContract,
+  effectiveAvoToolNames,
+} from '../src/core/avo-agent-base.mjs';
 import {
   POLICY_PROFILE_NAMES,
   normalizePolicyProfile,
@@ -150,6 +154,10 @@ test('minimal production agent injects no memory or supervisor strategy', async 
       payload.tools.map((tool) => tool.name),
       effectiveAvoToolNames('files-only', 'minimal-v1'),
     );
+    assert.deepEqual(
+      payload.productionToolContract,
+      effectiveAvoToolContract('files-only', 'minimal-v1'),
+    );
     assert.doesNotMatch(
       JSON.stringify(payload.tools.map(({ name, label, description }) => ({
         name, label, description,
@@ -165,6 +173,65 @@ test('minimal production agent injects no memory or supervisor strategy', async 
     assert.equal(agent.memory.snapshot().supervisorInterventions.length, 0);
     assert.equal(result.policyProfile, 'minimal-v1');
     assert.equal(result.memoryClaimsSurfaced, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('production policy guard rejects missing tools and schema drift before Pi handoff', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-policy-tool-drift-'));
+  let handoffs = 0;
+  let actions = 0;
+  const frame = {
+    game_id: 'tool-drift', frame: [[0]], state: 'PLAYING', levels_completed: 0,
+    win_levels: 1, available_actions: ['ACTION1'], guid: 'tool-drift-guid',
+  };
+  const config = {
+    maxActions: 5,
+    stallWindow: 2,
+    policyProfile: 'current-v1',
+    memoryDir: path.join(root, 'memory'),
+    workspaceDir: path.join(root, 'workspace'),
+    workspaceMode: 'files-only',
+  };
+  const loop = {
+    kind: 'pi-sdk',
+    async run() { handoffs += 1; return { error: null }; },
+  };
+  const environment = {
+    async start() { return frame; },
+    async step() { actions += 1; return frame; },
+  };
+  class MutatedAgent extends AvoArcAgent {
+    constructor(options, mutate) {
+      super(options);
+      this.mutateTools = mutate;
+    }
+
+    tools() {
+      return this.mutateTools(super.tools());
+    }
+  }
+  const options = {
+    gameId: 'tool-drift', environment, loop, config, captureScorecard: false,
+  };
+  try {
+    await assert.rejects(
+      new MutatedAgent(options, (tools) => tools.filter(
+        (tool) => tool.name !== 'trajectory_read',
+      )).run(),
+      /runtime tool contract differs/,
+    );
+    await assert.rejects(
+      new MutatedAgent(options, (tools) => tools.map((tool) => (
+        tool.name === 'act'
+          ? { ...tool, parameters: { ...tool.parameters, required: [] } }
+          : tool
+      ))).run(),
+      /runtime tool contract differs/,
+    );
+    assert.equal(handoffs, 0);
+    assert.equal(actions, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

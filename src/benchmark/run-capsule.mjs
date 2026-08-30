@@ -7,7 +7,7 @@ import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-response
 
 import {
   AvoArcAgent,
-  effectiveAvoTools,
+  effectiveAvoToolContract,
 } from '../core/avo-agent-base.mjs';
 import {
   normalizePolicyProfile,
@@ -359,8 +359,7 @@ export function buildRunCapsule({
 }
 
 function canonicalToolSchemas(workspaceMode, policyProfile) {
-  return effectiveAvoTools(workspaceMode, policyProfile)
-    .map(({ name, label, description, parameters }) => ({ name, label, description, parameters }));
+  return effectiveAvoToolContract(workspaceMode, policyProfile);
 }
 
 function initialPromptTemplateSha256(policyProfile) {

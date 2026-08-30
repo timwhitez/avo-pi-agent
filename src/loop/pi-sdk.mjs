@@ -4,6 +4,7 @@ import {
   filterToolsForPolicy,
   normalizePolicyProfile,
   policySystemPrompt,
+  policyToolContract,
 } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import {
@@ -154,6 +155,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       runtimeStatus,
       workspaceMode: initializedWorkspaceMode,
       policyProfile: initializedPolicyProfile,
+      productionToolContract,
     }) {
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
@@ -174,8 +176,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }
       if (initializedPolicyProfile) {
         const permittedTools = filterToolsForPolicy(tools, workspaceMode, policyProfile);
-        if (canonicalJson(tools.map((tool) => tool.name))
-              !== canonicalJson(permittedTools.map((tool) => tool.name))
+        const actualToolContract = canonicalJson(policyToolContract(tools));
+        if (!Array.isArray(productionToolContract)
+            || actualToolContract !== canonicalJson(policyToolContract(permittedTools))
+            || actualToolContract !== canonicalJson(productionToolContract)
             || systemPrompt !== policySystemPrompt(policyProfile)) {
           throw new Error('Pi production loop prompt or tools differ from the initialized policy profile');
         }
