@@ -230,6 +230,15 @@ test('production policy guard rejects missing tools and schema drift before Pi h
       ))).run(),
       /runtime tool contract differs/,
     );
+    await assert.rejects(
+      new MutatedAgent(options, (tools) => {
+        const sequence = tools.find((tool) => tool.name === 'act_sequence');
+        sequence.parameters.properties.steps.items.properties.expected
+          .properties.changed.type = 'string';
+        return tools;
+      }).run(),
+      /read only|Cannot assign/,
+    );
     assert.equal(handoffs, 0);
     assert.equal(actions, 0);
   } finally {

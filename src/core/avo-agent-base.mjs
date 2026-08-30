@@ -45,7 +45,7 @@ const ACTION_EXPECTATION_SCHEMA = {
 
 export function effectiveAvoTools(workspaceMode = 'files-only', policyProfile) {
   return filterToolsForPolicy(
-    AvoArcAgent.prototype.tools.call({}),
+    SEALED_AVO_TOOLS,
     workspaceMode,
     policyProfile,
   );
@@ -1175,6 +1175,8 @@ export class AvoArcAgent {
   }
 }
 
+const SEALED_AVO_TOOLS = deepFreeze(AvoArcAgent.prototype.tools.call({}));
+
 function normalizeActionSequence(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ACTION_SEQUENCE) {
     throw new Error(`act_sequence steps must contain 1 through ${MAX_ACTION_SEQUENCE} items`);
@@ -1410,4 +1412,10 @@ export function episodeState(frame) {
 
 function isWin(frame) {
   return episodeState(frame) === 'WIN';
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
 }
