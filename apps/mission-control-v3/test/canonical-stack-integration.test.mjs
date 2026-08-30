@@ -36,6 +36,7 @@ test('every summary delta stays null unless both values are strictly numeric', (
         diagnosticScore: [],
         games: null,
         wins: true,
+        levelsCompleted: false,
         totalLevels: {},
         totalActions: '',
         openFindings: [0],
@@ -47,6 +48,7 @@ test('every summary delta stays null unless both values are strictly numeric', (
         diagnosticScore: 2,
         games: 25,
         wins: 20,
+        levelsCompleted: 75,
         totalLevels: 100,
         totalActions: 500,
         openFindings: 0,
@@ -55,13 +57,14 @@ test('every summary delta stays null unless both values are strictly numeric', (
     delta: {
       games: 25,
       wins: 19,
+      levelsCompleted: 75,
       totalLevels: 100,
       totalActions: 500,
       openFindings: 0,
     },
   });
   for (const field of [
-    'officialScore', 'diagnosticScore', 'games', 'wins', 'totalLevels', 'totalActions', 'openFindings',
+    'officialScore', 'diagnosticScore', 'games', 'wins', 'levelsCompleted', 'totalLevels', 'totalActions', 'openFindings',
   ]) {
     assert.equal(comparison.delta[field], null, `${field} must remain unavailable`);
   }
@@ -73,6 +76,7 @@ test('every summary delta stays null unless both values are strictly numeric', (
         diagnosticScore: -1,
         games: 0,
         wins: 0,
+        levelsCompleted: 0,
         totalLevels: 0,
         totalActions: 0,
         openFindings: 0,
@@ -84,6 +88,7 @@ test('every summary delta stays null unless both values are strictly numeric', (
         diagnosticScore: 2,
         games: 25,
         wins: 20,
+        levelsCompleted: 75,
         totalLevels: 100,
         totalActions: 500,
         openFindings: 0,
@@ -95,6 +100,7 @@ test('every summary delta stays null unless both values are strictly numeric', (
   assert.equal(valid.delta.diagnosticScore, 3);
   assert.equal(valid.delta.games, 25);
   assert.equal(valid.delta.wins, 20);
+  assert.equal(valid.delta.levelsCompleted, 75);
   assert.equal(valid.delta.totalLevels, 100);
   assert.equal(valid.delta.totalActions, 500);
   assert.equal(valid.delta.openFindings, 0);

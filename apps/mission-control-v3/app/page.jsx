@@ -298,7 +298,7 @@ export default function Page() {
               <section className="overview-grid" aria-label="Run summary">
                 <Metric label="Game" value={selected?.currentGame || '—'} />
                 <Metric label="Progress" value={`${selected?.progress?.gameIndex || 0}/${selected?.progress?.gameTotal || 0}`} />
-                <Metric label="Levels" value={`${selected?.progress?.levelsCompleted || 0}/${selected?.progress?.winLevels || 0}`} />
+                <Metric label="Levels" value={`${selected?.progress?.levelsCompleted ?? 0}/${selected?.progress?.totalLevels ?? '?'}`} />
                 <Metric label="Actions" value={selected?.progress?.actions ?? 0} />
               </section>
 

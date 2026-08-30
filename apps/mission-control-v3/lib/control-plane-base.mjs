@@ -75,7 +75,13 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     cursor: 0,
     events: [],
     currentGame: null,
-    progress: { gameIndex: 0, gameTotal: options.games.length || 25, actions: 0, levelsCompleted: 0, winLevels: 0 },
+    progress: {
+      gameIndex: 0,
+      gameTotal: options.games.length || 25,
+      actions: 0,
+      levelsCompleted: 0,
+      totalLevels: null,
+    },
     summary: null,
     reportStatus: null,
     reportEvidence: null,
@@ -233,6 +239,7 @@ export function compareRuns(baselineId, candidateId) {
       diagnosticScore: metricDelta(a?.diagnosticScore, b?.diagnosticScore),
       games: metricDelta(a?.games, b?.games),
       wins: metricDelta(a?.wins, b?.wins),
+      levelsCompleted: metricDelta(a?.levelsCompleted, b?.levelsCompleted),
       totalLevels: metricDelta(a?.totalLevels, b?.totalLevels),
       totalActions: metricDelta(a?.totalActions, b?.totalActions),
       openFindings: metricDelta(a?.openFindings, b?.openFindings),
@@ -359,7 +366,7 @@ function signalTreeOrThrow(child, signal) {
   }
 }
 
-function ingestProcessLine(run, line, isError, { truncated = false } = {}) {
+export function ingestProcessLine(run, line, isError, { truncated = false } = {}) {
   const text = String(line || '').trim();
   if (!text) return;
   if (truncated) {
@@ -377,7 +384,7 @@ function ingestProcessLine(run, line, isError, { truncated = false } = {}) {
       gameTotal: Number(started[2]),
       actions: 0,
       levelsCompleted: 0,
-      winLevels: 0,
+      totalLevels: null,
     };
     emit(run, 'game.started', {
       gameId: run.currentGame,
@@ -387,20 +394,21 @@ function ingestProcessLine(run, line, isError, { truncated = false } = {}) {
     });
     return;
   }
-  const finished = text.match(/^([a-z0-9]+):\s+state=([^\s]+)\s+levels=(\d+)\/(\d+)\s+actions=(\d+)(?:\/(\d+))?/i);
+  const finished = text.match(/^([a-z0-9]+):\s+state=([^\s]+)\s+levels=(\d+)\/(\d+|\?)\s+actions=(\d+)(?:\/(\d+))?/i);
   if (finished) {
+    const totalLevels = finished[4] === '?' ? null : Number(finished[4]);
     run.currentGame = finished[1];
     run.progress = {
       ...run.progress,
       actions: Number(finished[5]),
       levelsCompleted: Number(finished[3]),
-      winLevels: Number(finished[4]),
+      totalLevels,
     };
     emit(run, 'game.finished', {
       gameId: finished[1],
       state: finished[2],
       levelsCompleted: Number(finished[3]),
-      winLevels: Number(finished[4]),
+      totalLevels,
       actions: Number(finished[5]),
       budget: Number(finished[6] || run.actionBudget),
     });

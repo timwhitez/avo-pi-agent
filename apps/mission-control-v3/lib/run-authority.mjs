@@ -1,6 +1,15 @@
 import { finiteNumberOrNull, nonNegativeIntegerOrNull } from '../../../src/local/numeric.mjs';
+import {
+  aggregateGameMetrics,
+  normalizeGameRecord,
+  validateProductionLoops,
+} from '../../../src/benchmark/report.mjs';
 import { evaluatePublicRunCapsule } from '../../../src/benchmark/run-capsule-authority.mjs';
-import { evaluateScorecardCoverage } from '../../../src/benchmark/scorecard-evidence.mjs';
+import {
+  SCORECARD_EVIDENCE_SCHEMA,
+  evaluateScorecardCoverage,
+  reconcileExactScorecardProgress,
+} from '../../../src/benchmark/scorecard-evidence.mjs';
 
 export const RUN_MODES = Object.freeze(['diagnostic', 'competition']);
 export const REASONING_LEVELS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -47,6 +56,7 @@ export function summarizeMissionControlReport(report, mode, { privateCapsuleEvid
       scoreOrigin: String(summary.diagnosticScoreOrigin || 'diagnostic-unavailable'),
       games: nonNegativeIntegerOrNull(summary.games),
       wins: nonNegativeIntegerOrNull(summary.wins),
+      levelsCompleted: nonNegativeIntegerOrNull(summary.totalLevelsCompleted),
       totalLevels: nonNegativeIntegerOrNull(summary.totalLevels),
       totalActions: nonNegativeIntegerOrNull(summary.totalActions),
       openFindings: nonNegativeIntegerOrNull(report?.openFindings),
@@ -70,6 +80,7 @@ export function summarizeMissionControlReport(report, mode, { privateCapsuleEvid
     runClass: authority.runClass,
     games: nonNegativeIntegerOrNull(report?.completeness?.actualCount),
     wins: nonNegativeIntegerOrNull(aggregates.wins),
+    levelsCompleted: nonNegativeIntegerOrNull(aggregates.levelsCompleted),
     totalLevels: nonNegativeIntegerOrNull(aggregates.totalLevels),
     totalActions: nonNegativeIntegerOrNull(aggregates.totalActions),
     openFindings: nonNegativeIntegerOrNull(report?.openFindings),
@@ -82,18 +93,37 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
   const provenance = recordOrEmpty(report?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
   const loop = recordOrEmpty(report?.loopAttestation);
+  const aggregates = recordOrEmpty(report?.aggregates);
   const score = finiteNumberOrNull(report?.officialScore?.value);
   const origin = String(report?.officialScore?.origin || 'unavailable');
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
+  const rawGames = Array.isArray(report?.games) ? report.games : [];
+  let games = [];
+  let computedLoop = null;
+  let computedAggregates = null;
+  try {
+    games = rawGames.map((game, index) => normalizeGameRecord(
+      game,
+      `benchmark game ${index}`,
+    ));
+    computedLoop = validateProductionLoops(games, expectedCount);
+    computedAggregates = aggregateGameMetrics(games);
+  } catch (error) {
+    reasons.push(`production game records are invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, {
     privateCapsuleEvidence,
     expectedRunId: report?.runId,
     benchmarkReport: report,
   });
-  const scorecardAuthority = evaluateScorecardCoverage(report?.scorecardEvidence, report?.games);
+  const scorecardAuthority = evaluateScorecardCoverage(
+    report?.scorecardEvidence,
+    games.length ? games : rawGames,
+  );
 
+  requireCondition(report?.schemaVersion === 2, 'benchmark report schema is not v2', reasons);
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
   requireCondition(
     typeof report?.runId === 'string' && report.runId === provenance.runId,
@@ -103,7 +133,17 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);
   requireCondition(expectedCount !== null && expectedCount > 0, 'expected public game count is absent or invalid', reasons);
   requireCondition(actualCount !== null && actualCount === expectedCount, 'actual public game count differs from expected', reasons);
-  requireCondition(loop.complete === true && loop.loop === 'pi-sdk', 'production Pi loop attestation failed', reasons);
+  requireCondition(computedLoop !== null, 'production game record validation failed', reasons);
+  if (computedLoop) {
+    for (const [field, value] of Object.entries(computedLoop)) {
+      requireCondition(loop[field] === value, `production Pi loop ${field} attestation differs from game records`, reasons);
+    }
+  }
+  if (computedAggregates) {
+    for (const [field, value] of Object.entries(computedAggregates)) {
+      requireCondition(aggregates[field] === value, `benchmark aggregate ${field} differs from game records`, reasons);
+    }
+  }
   requireCondition(score !== null, 'official score is absent or non-numeric', reasons);
   requireCondition(isOfficialScoreOrigin(origin), 'score origin is not an accepted official scorecard field', reasons);
   requireCondition(
@@ -113,6 +153,29 @@ export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvide
     scorecardAuthority.rejectionReason || 'scorecard session/execution coverage is not exact',
     reasons,
   );
+  requireCondition(
+    Array.isArray(report?.scorecardEvidence)
+      && report.scorecardEvidence.length === 1
+      && report.scorecardEvidence[0]?.schema === SCORECARD_EVIDENCE_SCHEMA,
+    'official authority requires current scorecard evidence schema',
+    reasons,
+  );
+  if (computedLoop && scorecardAuthority.coverage.exact) {
+    try {
+      const reconciled = reconcileExactScorecardProgress(scorecardAuthority.scorecards, games);
+      requireCondition(
+        reconciled.every((record, index) => (
+          record.levelsCompleted === games[index].levelsCompleted
+          && record.totalLevels === games[index].totalLevels
+          && record.won === games[index].won
+        )),
+        'published game progress omits authoritative scorecard metadata',
+        reasons,
+      );
+    } catch (error) {
+      reasons.push(`scorecard progress reconciliation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   requireCondition(
     score !== null
       && score === scorecardAuthority.officialScore.value
