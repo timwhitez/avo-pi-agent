@@ -161,6 +161,48 @@ test('an internal failure after durable transition preserves the executed prefix
   }
 });
 
+test('a failed evidence append cannot claim an executed sequence transition after restart', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-action-sequence-evidence-failure-'));
+  let calls = 0;
+  const environment = {
+    async start() { return frame(); },
+    async step() {
+      calls += 1;
+      return frame({ cell: calls });
+    },
+  };
+  try {
+    const agent = makeAgent(root, environment);
+    await agent.initialize();
+    const initialRef = agent.trajectoryEvidence().lastEvidenceRef;
+    agent.evidenceStore.append = () => { throw new Error('private persistence detail'); };
+
+    const result = await agent.actSequence({
+      steps: [{ action: 'ACTION1' }, { action: 'ACTION2' }],
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(result.details.stopReason, 'INTERNAL_ERROR');
+    assert.equal(result.terminate, true);
+    assert.deepEqual(result.details.executed, []);
+    assert.deepEqual(result.details.skipped.map((entry) => entry.index), [0, 1]);
+    assert.equal(result.details.skipped[0].evidenceRef, null);
+    assert.equal(result.details.evidenceRef, initialRef);
+    assert.equal(agent.evidenceLedger.length, 1);
+    assert.equal(agent.evidenceSequence, 1);
+    assert.equal(agent.currentObservationRef, initialRef);
+    assert.equal(agent.trajectoryEvidence().eventCount, 1);
+    assert.doesNotMatch(JSON.stringify(result), /private persistence detail/);
+
+    const restarted = makeAgent(root, environment);
+    assert.equal(restarted.trajectoryEvidence().eventCount, 1);
+    assert.equal(restarted.trajectoryEvidence().lastEvidenceRef, initialRef);
+    assert.deepEqual(restarted.evidenceLedger.map((entry) => entry.id), [initialRef]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('sequence completion and every lifecycle or failure stop branch preserve the exact tail', async () => {
   const scenarios = [
     {

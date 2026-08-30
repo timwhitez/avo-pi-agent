@@ -30,14 +30,35 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
   }
 
   recordEvidence(input) {
-    const transient = super.recordEvidence(input);
-    const event = this.evidenceStore.append(transient);
-    if (event.id !== transient.id || event.digest !== transient.digest) {
-      throw new Error('durable trajectory identity differs from the production event');
+    const previous = {
+      ledger: this.evidenceLedger.slice(),
+      sequence: this.evidenceSequence,
+      observationId: this.currentObservationId,
+      observationRef: this.currentObservationRef,
+    };
+    let transient;
+    try {
+      transient = super.recordEvidence(input);
+      const event = this.evidenceStore.append(transient);
+      if (event.id !== transient.id || event.digest !== transient.digest) {
+        throw new Error('durable trajectory identity differs from the production event');
+      }
+      this.evidenceLedger = this.evidenceStore.events.slice();
+      this.evidenceSequence = this.evidenceStore.sequence;
+      return event;
+    } catch (error) {
+      const persisted = transient && this.evidenceStore.get(transient.id);
+      if (persisted?.digest === transient.digest) {
+        this.evidenceLedger = this.evidenceStore.events.slice();
+        this.evidenceSequence = this.evidenceStore.sequence;
+      } else {
+        this.evidenceLedger = previous.ledger;
+        this.evidenceSequence = previous.sequence;
+        this.currentObservationId = previous.observationId;
+        this.currentObservationRef = previous.observationRef;
+      }
+      throw error;
     }
-    this.evidenceLedger = this.evidenceStore.events.slice();
-    this.evidenceSequence = this.evidenceStore.sequence;
-    return event;
   }
 
   trajectoryEvidence() {
