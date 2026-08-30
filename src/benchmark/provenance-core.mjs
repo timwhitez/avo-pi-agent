@@ -181,6 +181,7 @@ export async function discoverPublicGames({ python = '.venv/bin/python', cwd = p
       gameId: full.split('-')[0],
       versionedGameId: full,
       title: envInfo.title ?? null,
+      baseline_actions: envInfo.baseline_actions ?? null,
     };
   });
   if (games.length === 0) throw new Error('official runtime returned no public games');

@@ -47,6 +47,12 @@ function records(ids = ['g1-v1', 'g2-v1'], cardId = 'card-a') {
   return ids.map((versionedGameId, index) => ({
     gameId: versionedGameId.split('-')[0],
     versionedGameId,
+    actions: 3,
+    gameplayActions: 3,
+    resets: 0,
+    rejectedCommands: 0,
+    fullResets: 0,
+    episodeId: 'episode-000001',
     executions: [{
       versionedGameId,
       executionIdSha256: hashExecutionId(`${cardId}-run-${index}`),
@@ -137,6 +143,8 @@ test('binds SDK-reused GUIDs by their per-game occurrence', () => {
     executionIdSha256: expected[0].executions[0].executionIdSha256,
     executionOccurrence: 1,
   });
+  expected[0].actions = 6;
+  expected[0].gameplayActions = 6;
   assert.equal(evaluateScorecardCoverage([evidence], expected).scoreStatus, 'official');
 
   const skipped = structuredClone(evidence);
@@ -145,6 +153,17 @@ test('binds SDK-reused GUIDs by their per-game occurrence', () => {
     evaluateScorecardCoverage([skipped], expected).rejectionReason,
     /occurrences are not contiguous/,
   );
+});
+
+test('exact execution coverage also requires per-game action and reset totals', () => {
+  const evidence = normalizeScorecardSnapshot(snapshot());
+  for (const field of ['actions', 'resets']) {
+    const published = records();
+    published[0][field] += 1;
+    const result = evaluateScorecardCoverage([evidence], published);
+    assert.equal(result.scoreStatus, 'rejected');
+    assert.match(result.rejectionReason, /action or reset totals differ/);
+  }
 });
 
 test('published score extraction requires exact shared authority without coercion', () => {

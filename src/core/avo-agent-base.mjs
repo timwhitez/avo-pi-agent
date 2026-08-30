@@ -1133,6 +1133,15 @@ export class AvoArcAgent {
       runtimeStatus: () => this.runtimeStatus(),
     });
     const forwardingLifecycle = await this.forwardingLifecycleTelemetry();
+    const mechanismMetrics = this.lastResult?.mechanismMetrics
+      ? {
+          ...this.lastResult.mechanismMetrics,
+          supervisorInterventions: this.strategyEnabled ? this.supervisor.history(100).length : 0,
+          actionBudgetExhaustions: this.actions >= this.config.maxActions
+            && !this.finished
+            && !isWin(this.frame) ? 1 : 0,
+        }
+      : null;
     return {
       gameId: this.gameId,
       policyProfile: this.policyProfile,
@@ -1161,6 +1170,8 @@ export class AvoArcAgent {
       won: isWin(this.frame),
       loop: this.loop.kind,
       error: this.executionError ?? this.lastResult?.error ?? null,
+      outerTurns: this.lastResult?.outerTurns ?? null,
+      mechanismMetrics,
       hypothesisJournal: {
         proposals: this.memory.journal.proposals.length,
         pending: this.memory.journal.pendingProposals().length,

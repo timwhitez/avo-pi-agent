@@ -270,6 +270,21 @@ test('cold starts create empty run-owned state while warm starts name and hash i
   assert.equal(fs.readFileSync(path.join(warm.memoryDir, 'state.json'), 'utf8'), '{"level":1}\n');
 });
 
+test('same-capsule recovery reuses its sealed trajectory starts', () => {
+  const original = capsule();
+  const memoryDir = temporaryRoot();
+  try {
+    fs.writeFileSync(path.join(memoryDir, 'current-run-evidence.json'), '{}\n');
+    const recovered = capsule({
+      memoryDir,
+      resumeCapsule: original,
+    });
+    assert.equal(recovered.capsuleHash, original.capsuleHash);
+  } finally {
+    fs.rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
 test('resume rejects symlinked state ancestry and migrated capsules seal the actual start state', () => {
   const root = temporaryRoot();
   const privateDir = path.join(root, 'runs', 'private', 'run-z');

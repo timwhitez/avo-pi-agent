@@ -114,23 +114,70 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   const streamTimeoutMs = positiveEnvInt('AVO_PROVIDER_STREAM_TIMEOUT_MS', 20 * 60 * 1000);
   const streamMaxRetries = positiveEnvInt('AVO_PROVIDER_STREAM_MAX_RETRIES', 4);
   let providerRequestSequence = 0;
+  let activeTelemetry = null;
+  const emitEvent = (event) => {
+    if (activeTelemetry) {
+      recordPiLifecycleTelemetry(activeTelemetry, event);
+      if (event?.type === 'avo_context_compaction') {
+        activeTelemetry.contextCompactions += 1;
+        if (event.mode === 'tool_result_truncation') activeTelemetry.toolResultTruncations += 1;
+      }
+      if (event?.type === 'message_end' && event.message?.role === 'assistant') {
+        const startedAt = activeTelemetry.requestStarts.shift();
+        if (startedAt !== undefined) activeTelemetry.modelLatencyMs += Math.max(0, Date.now() - startedAt);
+        const request = activeTelemetry.pendingModelRequests.shift();
+        if (request
+            && (event.message.stopReason === 'error' || event.message.errorMessage)
+            && request.lastHttpFailed !== true) {
+          activeTelemetry.providerStreamErrors += 1;
+        }
+      }
+    }
+    onEvent(event);
+  };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
     const priorOnPayload = options?.onPayload;
+    const telemetry = activeTelemetry;
+    if (telemetry) {
+      telemetry.modelCalls += 1;
+      telemetry.requestStarts.push(Date.now());
+    }
+    const request = telemetry ? { lastHttpFailed: false } : null;
+    if (request) telemetry.pendingModelRequests.push(request);
+    const baseFetch = options?.fetch || globalThis.fetch;
+    const measuredFetch = async (...args) => {
+      if (telemetry) telemetry.providerHttpRequests += 1;
+      try {
+        const response = await baseFetch(...args);
+        if (request) request.lastHttpFailed = response?.ok === false;
+        if (telemetry && response?.ok === false) {
+          telemetry.providerHttpErrors += 1;
+        }
+        return response;
+      } catch (error) {
+        if (telemetry) {
+          telemetry.providerHttpErrors += 1;
+          request.lastHttpFailed = true;
+        }
+        throw error;
+      }
+    };
     return models.streamSimple.call(models, model, context, {
       ...options,
       cacheRetention: capabilities.cache.retention,
       timeoutMs: streamTimeoutMs,
       maxRetries: streamMaxRetries,
+      fetch: measuredFetch,
       onPayload: async (payload, currentModel) => {
-        const telemetry = providerRequestTelemetry(payload, {
+        const requestTelemetry = providerRequestTelemetry(payload, {
           capabilities,
           expectedModel: config.provider.model,
           reasoningEffort: config.provider.reasoningEffort,
           requestSequence,
           streamMaxRetries,
         });
-        onEvent(telemetry);
+        emitEvent(requestTelemetry);
         return priorOnPayload ? priorOnPayload(payload, currentModel) : undefined;
       },
     });
@@ -139,7 +186,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
     maxTokens: transcriptMaxTokens(capabilities, process.env.AVO_TRANSCRIPT_MAX_TOKENS),
-    onCompaction: onEvent,
+    onCompaction: emitEvent,
   };
   // A single fat read (full journal, a whole workspace file) kept verbatim in
   // the recent window can exceed the provider context by itself.
@@ -189,6 +236,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         || (tool.name === 'workspace_python' && workspaceMode !== 'isolated-python'))) {
         throw new Error('Pi production loop tools differ from the initialized workspace capability');
       }
+      if (activeTelemetry) throw new Error('Pi production loop cannot run one adapter concurrently');
+      const runTelemetry = createRunTelemetry();
+      activeTelemetry = runTelemetry;
+      try {
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
       const piTools = tools.map((tool) => ({
         ...piToolContract(tool, Type),
@@ -202,7 +253,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
               .replace('{maxChars}', String(maxToolResultChars))
               .replace('{recoveryHint}', () => toolRecoveryHint(tool.name, result.details));
             text = `${text.slice(0, maxToolResultChars)}\n${notice}`;
-            onEvent({
+            emitEvent({
               type: 'avo_context_compaction',
               mode: 'tool_result_truncation',
               templateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
@@ -222,6 +273,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }));
       const transcriptOptions = {
         ...transcriptBounds,
+        onCompaction: emitEvent,
         estimateContextTokens: (messages) => estimateContextTokens({
           systemPrompt: effectiveSystemPrompt,
           messages,
@@ -250,10 +302,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           outerTurns,
           maxOuterTurns: config.maxOuterTurns,
           policyProfile,
-          onEvent,
+          onEvent: emitEvent,
         }),
       });
-      agent.subscribe((event) => onEvent(event));
+      agent.subscribe(emitEvent);
       await agent.prompt(initialPrompt);
       // Provider-side stream drops surface as session errors. Recovering the
       // turn in place keeps every prior action; a whole-game retry would
@@ -280,24 +332,167 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           outerTurns,
           maxOuterTurns: config.maxOuterTurns,
           policyProfile,
-          onEvent,
+          onEvent: emitEvent,
           timestamp: Date.now() + outerTurns,
         });
         await agent.continue();
         outerTurns += 1;
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
+      const messages = agent.state.messages;
       return {
-        messages: agent.state.messages,
+        messages,
         error: agent.state.errorMessage || (exhaustedOuterTurns
           ? `Pi outer-turn budget exhausted at ${outerTurns} turns before the ARC run reached a terminal condition`
           : null),
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,
+        mechanismMetrics: finishRunTelemetry(runTelemetry, messages, {
+          transientRecoveries,
+          exhaustedOuterTurns,
+        }),
       };
+      } finally {
+        if (activeTelemetry === runTelemetry) activeTelemetry = null;
+      }
     },
   };
+}
+
+export function createRunTelemetry() {
+  return {
+    modelCalls: 0,
+    modelLatencyMs: 0,
+    providerHttpRequests: 0,
+    providerHttpErrors: 0,
+    providerStreamErrors: 0,
+    toolCalls: 0,
+    toolFailures: 0,
+    contextCompactions: 0,
+    toolResultTruncations: 0,
+    evidenceRetrievals: 0,
+    observeCalls: 0,
+    trajectoryReadCalls: 0,
+    actCalls: 0,
+    actionSequenceCalls: 0,
+    resetCalls: 0,
+    finishCalls: 0,
+    memoryCalls: 0,
+    journalCalls: 0,
+    workspaceCalls: 0,
+    workspaceFailures: 0,
+    requestStarts: [],
+    pendingModelRequests: [],
+    startedToolCallIds: new Set(),
+    startedToolNames: new Map(),
+    finishedToolCallIds: new Set(),
+  };
+}
+
+export function recordPiLifecycleTelemetry(telemetry, event) {
+  if (event?.type === 'tool_execution_start') {
+    const id = String(event.toolCallId || '');
+    if (!id || telemetry.startedToolCallIds.has(id)) return;
+    telemetry.startedToolCallIds.add(id);
+    telemetry.startedToolNames.set(id, String(event.toolName || ''));
+    countToolCall(telemetry, String(event.toolName || ''));
+    return;
+  }
+  if (event?.type !== 'tool_execution_end') return;
+  const id = String(event.toolCallId || '');
+  if (!id || telemetry.finishedToolCallIds.has(id)) return;
+  telemetry.finishedToolCallIds.add(id);
+  const toolName = telemetry.startedToolNames.get(id) || String(event.toolName || '');
+  const unsuccessful = event.result?.details?.ok === false;
+  if (toolName.startsWith('workspace_') && (event.isError === true || unsuccessful)) {
+    telemetry.workspaceFailures += 1;
+  }
+  if (event.isError === true) {
+    telemetry.toolFailures += 1;
+    return;
+  }
+  if (!unsuccessful) countSuccessfulInterfaceCall(telemetry, toolName);
+}
+
+function countToolCall(telemetry, name) {
+  telemetry.toolCalls += 1;
+  if (name === 'observe' || name === 'trajectory_read') telemetry.evidenceRetrievals += 1;
+  if (name === 'memory_read' || name === 'memory_update') telemetry.memoryCalls += 1;
+  if (name === 'journal_read' || name === 'hypothesis_propose' || name === 'hypothesis_evaluate') {
+    telemetry.journalCalls += 1;
+  }
+  if (name.startsWith('workspace_')) telemetry.workspaceCalls += 1;
+}
+
+function countSuccessfulInterfaceCall(telemetry, name) {
+  const field = {
+    observe: 'observeCalls',
+    trajectory_read: 'trajectoryReadCalls',
+    act: 'actCalls',
+    act_sequence: 'actionSequenceCalls',
+    reset: 'resetCalls',
+    finish: 'finishCalls',
+  }[name];
+  if (field) telemetry[field] += 1;
+}
+
+export function finishRunTelemetry(telemetry, messages, { transientRecoveries, exhaustedOuterTurns }) {
+  const now = Date.now();
+  while (telemetry.requestStarts.length) {
+    telemetry.modelLatencyMs += Math.max(0, now - telemetry.requestStarts.shift());
+  }
+  while (telemetry.pendingModelRequests.length) {
+    if (telemetry.pendingModelRequests.shift().lastHttpFailed !== true) telemetry.providerStreamErrors += 1;
+  }
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+  };
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role !== 'assistant') continue;
+    const observed = message.usage || {};
+    usage.inputTokens += safeUsage(observed.input);
+    usage.outputTokens += safeUsage(observed.output);
+    usage.cacheReadTokens += safeUsage(observed.cacheRead);
+    usage.cacheWriteTokens += safeUsage(observed.cacheWrite);
+    usage.reasoningTokens += safeUsage(observed.reasoning);
+    usage.totalTokens += safeUsage(observed.totalTokens);
+  }
+  return Object.freeze({
+    modelCalls: telemetry.modelCalls,
+    ...usage,
+    modelLatencyMs: telemetry.modelLatencyMs,
+    providerHttpRequests: telemetry.providerHttpRequests,
+    providerRetries: Math.max(0, telemetry.providerHttpRequests - telemetry.modelCalls) + transientRecoveries,
+    providerErrors: telemetry.providerHttpErrors + telemetry.providerStreamErrors,
+    toolCalls: telemetry.toolCalls,
+    toolFailures: telemetry.toolFailures,
+    contextCompactions: telemetry.contextCompactions,
+    toolResultTruncations: telemetry.toolResultTruncations,
+    evidenceRetrievals: telemetry.evidenceRetrievals,
+    observeCalls: telemetry.observeCalls,
+    trajectoryReadCalls: telemetry.trajectoryReadCalls,
+    actCalls: telemetry.actCalls,
+    actionSequenceCalls: telemetry.actionSequenceCalls,
+    resetCalls: telemetry.resetCalls,
+    finishCalls: telemetry.finishCalls,
+    memoryCalls: telemetry.memoryCalls,
+    journalCalls: telemetry.journalCalls,
+    supervisorInterventions: 0,
+    workspaceCalls: telemetry.workspaceCalls,
+    workspaceFailures: telemetry.workspaceFailures,
+    actionBudgetExhaustions: 0,
+    outerTurnBudgetExhaustions: exhaustedOuterTurns ? 1 : 0,
+  });
+}
+
+function safeUsage(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export function effectivePiSystemPrompt(systemPrompt, workspaceMode = 'files-only') {

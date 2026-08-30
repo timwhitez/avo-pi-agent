@@ -49,9 +49,11 @@ export function projectPublicRunCapsule(capsule, {
       scorecardBinding: definition.runtime.scorecardBinding,
       providerStreamTimeoutMs: definition.runtime.providerStreamTimeoutMs,
       providerStreamMaxRetries: definition.runtime.providerStreamMaxRetries,
+      actionBudgetPolicy: definition.runtime.actionBudgetPolicy,
       config: definition.runtime.config,
     },
     task: definition.task,
+    experiment: publicExperimentBinding(definition.experiment),
     modelCapabilityStatus: definition.modelInterface.capabilityStatus,
     modelInterface: {
       implementationSha256: definition.modelInterface.implementationSha256,
@@ -69,6 +71,16 @@ export function projectPublicRunCapsule(capsule, {
     ...published,
     commitmentSha256: sha256(canonicalJson(published)),
   });
+}
+
+function publicExperimentBinding(value) {
+  if (!value) return null;
+  const {
+    providerEndpointSha256: _providerEndpointSha256,
+    providerModelSha256: _providerModelSha256,
+    ...published
+  } = value;
+  return published;
 }
 
 function requiredSha(value) {
