@@ -23,6 +23,7 @@ export function projectPublicRunCapsule(capsule, {
     componentSetSha256: definition.components.setSha256,
     prompts: definition.prompts,
     toolSchemaSha256: definition.tools.schemaSha256,
+    providerToolSchemaSha256: definition.tools.providerSchemaSha256,
     nodeDependencySha256: definition.runtime.dependencies.nodeSha256,
     nodeDependencies: definition.runtime.dependencies.nodeTree || null,
     pythonDependencySha256: definition.runtime.dependencies.pythonSha256,

@@ -314,6 +314,63 @@ test('token bound preserves one original task and one replaceable runtime status
   assert.doesNotMatch(statuses[0].content[0].text, /continue|exhaust/i);
 });
 
+test('production Pi context usage compacts short text whose provider usage is already over budget', async () => {
+  const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
+  const { estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry));
+  const messages = [
+    user(0),
+    {
+      role: 'assistant',
+      provider: 'runtime-responses',
+      api: 'openai-responses',
+      model: 'production-model',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: {
+        input: 70_000,
+        output: 20_000,
+        cacheRead: 20_000,
+        cacheWrite: 1_000,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'stop',
+      timestamp: 1,
+    },
+  ];
+  const compactions = [];
+  const bounded = boundTranscript(messages, {
+    maxTokens: 99_200,
+    estimateContextTokens: (value) => estimateContextTokens({
+      systemPrompt: 'system',
+      messages: value,
+      tools: [],
+    }).tokens,
+    onCompaction: (event) => compactions.push(event),
+  });
+  assert.deepEqual(bounded.filter((message) => message.role === 'assistant'), []);
+  assert.ok(compactions.some((event) => event.mode === 'hard'));
+});
+
+test('production Pi context estimator includes system prompt and complete tools before first usage', async () => {
+  const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
+  const { estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry));
+  const estimate = (messages) => estimateContextTokens({
+    systemPrompt: 's'.repeat(400),
+    messages,
+    tools: [{
+      name: 'observe',
+      label: 'Observe',
+      description: 'd'.repeat(400),
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    }],
+  }).tokens;
+  assert.ok(estimate([]) > 100);
+  assert.throws(
+    () => boundTranscript([user(0)], { maxTokens: 100, estimateContextTokens: estimate }),
+    /cannot preserve the original task/,
+  );
+});
+
 test('overflow severing a call/output pair drops the orphaned output (provider-pairing invariant)', async () => {
   const shared = await import('../node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js');
   const model = {

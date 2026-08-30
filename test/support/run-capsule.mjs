@@ -121,6 +121,7 @@ export function runCapsuleProvenanceFixture({
   const salt = digestText(runId);
   const capabilities = providerCapabilities('high');
   const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
+  const providerToolSchemaSha256 = 'f'.repeat(64);
   return {
     runId,
     gitSha: '1'.repeat(40),
@@ -145,6 +146,7 @@ export function runCapsuleProvenanceFixture({
     piStreamPreflight: {
       ok: true,
       capabilityManifestSha256,
+      productionToolSchemaSha256: providerToolSchemaSha256,
       productionToolSchemaVerified: true,
       requestedVsEffectiveVerified: true,
       multiTurnContinuationVerified: true,
@@ -153,13 +155,14 @@ export function runCapsuleProvenanceFixture({
     modelCapabilities: {
       capabilityStatus: 'configured-with-bounded-probes',
       manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256,
       requested: {
         wireApi: 'responses',
         reasoningEffort: 'high',
         inputModalities: ['text'],
         streaming: true,
         toolCalling: true,
-        parallelToolCalls: false,
+        parallelToolCalls: 'provider-default-unspecified',
       },
       effective: capabilities,
       probes: {
@@ -182,6 +185,7 @@ export function runCapsuleProvenanceFixture({
 function privateRunCapsuleFixture(runId, versionedGameIds) {
   const capabilities = providerCapabilities('high');
   const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
+  const providerToolSchemaSha256 = 'f'.repeat(64);
   const initialState = {
     mode: 'cold-start',
     snapshotName: 'cold-test-run',
@@ -213,6 +217,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
     },
     tools: {
       schemaSha256: 'a'.repeat(64),
+      providerSchemaSha256: providerToolSchemaSha256,
       enabled: ['observe', 'act'],
       executionMode: 'sequential',
     },
@@ -224,6 +229,8 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       recentToolResults: 6,
       maxMessages: 160,
       maxTokens: 99_200,
+      staticContextTokens: 3_000,
+      contextEstimator: '@earendil-works/pi-ai@0.84.2 estimateContextTokens',
       maxToolResultChars: 24_000,
     },
     modelInterface: {
@@ -237,7 +244,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       requestedCapabilities: {
         streaming: true,
         toolCalling: true,
-        parallelToolCalls: false,
+        parallelToolCalls: 'provider-default-unspecified',
         inputModalities: ['text'],
         reasoningEffort: 'high',
       },
@@ -251,6 +258,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
         requestedVsEffectiveVerified: true,
         multiTurnContinuationVerified: true,
         largeToolResultVerified: true,
+        productionToolSchemaSha256: providerToolSchemaSha256,
         capabilityManifestSha256,
       },
       samplingParameters: {

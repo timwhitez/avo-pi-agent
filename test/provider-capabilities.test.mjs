@@ -99,18 +99,24 @@ test('production request telemetry proves requested versus effective settings wi
       { role: 'user', content: [{ type: 'input_text', text: 'go' }] },
     ],
     stream: true,
+    model: 'production-model',
     max_output_tokens: 16_000,
     reasoning: { effort: 'max' },
     tools: [{ type: 'function', name: 'observe' }],
   };
   const telemetry = providerRequestTelemetry(payload, {
     capabilities,
+    expectedModel: 'production-model',
     reasoningEffort: 'max',
     requestSequence: 1,
     streamMaxRetries: 4,
   });
   assert.equal(telemetry.effective.systemPromptRole, 'developer');
   assert.equal(telemetry.effective.maxOutputTokens, 16_000);
+  assert.match(telemetry.effective.modelFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(telemetry.requested.parallelToolCalls, 'provider-default-unspecified');
+  assert.equal(telemetry.effective.providerParallelToolCalls, 'provider-default-unspecified');
+  assert.equal(telemetry.effective.agentToolExecution, 'sequential');
   assert.deepEqual(telemetry.effective.inputModalities, ['text']);
   assert.ok(telemetry.effective.inputChars > 0);
   assert.equal(telemetry.retry.idempotencyKey, false);
@@ -119,8 +125,29 @@ test('production request telemetry proves requested versus effective settings wi
   assert.throws(
     () => providerRequestTelemetry({ ...payload, max_output_tokens: 64_000 }, {
       capabilities,
+      expectedModel: 'production-model',
       reasoningEffort: 'max',
       requestSequence: 2,
+      streamMaxRetries: 4,
+    }),
+    /contradicts/,
+  );
+  assert.throws(
+    () => providerRequestTelemetry({ ...payload, model: 'wrong-model' }, {
+      capabilities,
+      expectedModel: 'production-model',
+      reasoningEffort: 'max',
+      requestSequence: 3,
+      streamMaxRetries: 4,
+    }),
+    /contradicts/,
+  );
+  assert.throws(
+    () => providerRequestTelemetry({ ...payload, max_output_tokens: 15_999 }, {
+      capabilities,
+      expectedModel: 'production-model',
+      reasoningEffort: 'max',
+      requestSequence: 4,
       streamMaxRetries: 4,
     }),
     /contradicts/,

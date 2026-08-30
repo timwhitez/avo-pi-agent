@@ -78,6 +78,9 @@ Provider protocol smoke test:
 npm run provider:check
 ```
 
+This verifies the exact converted production tool schema and a random nonce at
+the tail of a 16K tool result; truncated results fail closed.
+
 Discover the official public games through the installed ARC runtime:
 
 ```bash

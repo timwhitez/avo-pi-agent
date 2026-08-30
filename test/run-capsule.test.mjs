@@ -13,6 +13,7 @@ import {
   assertRunStateMatchesInitial,
   hashDirectoryTree,
   inspectDependencyClosure,
+  productionProviderToolSchemaDigest,
   inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
@@ -83,6 +84,7 @@ function runtimeConfig(overrides = {}) {
 function providerProvenance(runId, config) {
   const salt = crypto.createHash('sha256').update(runId).digest('hex');
   const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(config.workspaceMode);
   return {
     providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
@@ -99,6 +101,7 @@ function providerProvenance(runId, config) {
     piStreamPreflight: {
       ok: true,
       capabilityManifestSha256,
+      productionToolSchemaSha256: providerToolSchemaSha256,
       productionToolSchemaVerified: true,
       requestedVsEffectiveVerified: true,
       multiTurnContinuationVerified: true,
@@ -107,13 +110,14 @@ function providerProvenance(runId, config) {
     modelCapabilities: {
       capabilityStatus: 'configured-with-bounded-probes',
       manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256,
       requested: {
         wireApi: 'responses',
         reasoningEffort: config.provider.reasoningEffort,
         inputModalities: ['text'],
         streaming: true,
         toolCalling: true,
-        parallelToolCalls: false,
+        parallelToolCalls: 'provider-default-unspecified',
       },
       effective: config.provider.capabilities,
       probes: {
@@ -174,6 +178,16 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.match(baseline.definition.transcript.toolResultElisionTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.transcript.toolResultTruncationTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.transcript.thinkingElisionPolicySha256, /^[a-f0-9]{64}$/);
+  assert.ok(baseline.definition.transcript.staticContextTokens > 0);
+  assert.equal(
+    baseline.definition.transcript.contextEstimator,
+    '@earendil-works/pi-ai@0.84.2 estimateContextTokens',
+  );
+  assert.match(baseline.definition.tools.providerSchemaSha256, /^[a-f0-9]{64}$/);
+  assert.equal(
+    baseline.definition.modelInterface.attestation.productionToolSchemaSha256,
+    baseline.definition.tools.providerSchemaSha256,
+  );
   assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
   for (const file of [
     'src/core/durable-avo-agent.mjs',
@@ -391,6 +405,7 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.equal(published.modelCapabilityStatus, 'configured-with-bounded-probes');
   assert.equal(published.modelInterface.effectiveCapabilityManifest.limits.contextWindowTokens, 128_000);
   assert.equal(published.modelInterface.effectiveCapabilityManifest.visualObservation.enabled, false);
+  assert.equal(published.providerToolSchemaSha256, published.modelInterface.attestation.productionToolSchemaSha256);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
   const changedComponent = structuredClone(published);

@@ -27,9 +27,13 @@ protocol. These values are operator declarations, not inferred model names.
 The bounded preflight verifies the requested reasoning/role/output request and
 the production streaming/tool path; it records, but does not pretend to probe,
 the full context ceiling. Contradictions fail before an ARC game starts.
-The transcript ceiling is the lower of 120,000 tokens and the declared context
-window minus the declared output ceiling and a 10% (minimum 4,096-token) safety
-reserve. An explicit `AVO_TRANSCRIPT_MAX_TOKENS` above that bound is rejected.
+The input-context ceiling is the lower of 120,000 tokens and the declared
+context window minus the declared output ceiling and a 10% (minimum
+4,096-token) safety reserve. The production Pi estimator counts the effective
+system prompt, complete converted tool schemas, and messages; after a response,
+its latest valid provider usage plus the estimated tail becomes authoritative.
+An explicit `AVO_TRANSCRIPT_MAX_TOKENS` above that total-context bound is
+rejected, and any adapter attempt to silently reduce the output ceiling fails.
 
 The legacy `AVO_PROVIDER_*` family is not consumed or aliased by the current
 runtime. Supplying only that family makes the real-provider preflight fail
@@ -78,9 +82,9 @@ publication, or client-side frontend configuration.
    portable/test mode;
 2. issue a real `/responses` request and require a response ID plus model output
    satisfying a fresh challenge-bound attestation;
-3. require real Pi SDK streaming turns over the complete production tool schema,
-   a large tool result, and tool-result continuation in the same filtered
-   Agent-child environment;
+3. require real Pi SDK streaming turns over the exact ordered production tool
+   schema, a 16K tool result with a random nonce at its tail, and exact
+   continuation in the same filtered Agent-child environment;
 4. inspect the installed `arc-agi` and `arcengine` module paths and package
    versions, rejecting local/mock paths;
 5. dynamically discover and freeze the complete public game set;

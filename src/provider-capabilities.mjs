@@ -91,15 +91,15 @@ export function providerCapabilitiesFromEnvironment(env = process.env, {
     tools: {
       calling: true,
       executionMode: 'sequential',
-      parallelCalls: false,
+      providerParallelCalls: 'provider-default-unspecified',
     },
     visualObservation: {
       enabled: false,
       reason: 'no production image observation producer',
     },
     tokenizer: {
-      transcriptEstimator: '@earendil-works/pi-ai estimateTokens heuristic',
-      responseAccounting: 'provider-reported usage when present',
+      contextEstimator: '@earendil-works/pi-ai@0.84.2 estimateContextTokens',
+      responseAccounting: 'latest valid provider totalTokens, else input + output + cacheRead + cacheWrite, then estimated tail',
     },
     cache: { retention: cacheRetention },
     retry: {

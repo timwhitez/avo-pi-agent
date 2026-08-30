@@ -111,6 +111,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(isSha256(prompts.compactionNoticeTemplateSha256), 'run capsule compaction-notice template digest is absent', reasons);
   requireCondition(prompts.developerPresent === false && prompts.developerSha256 === null, 'run capsule developer-prompt declaration is malformed', reasons);
   requireCondition(isSha256(capsule.toolSchemaSha256), 'run capsule tool-schema digest is absent', reasons);
+  requireCondition(isSha256(capsule.providerToolSchemaSha256), 'run capsule provider tool-schema digest is absent', reasons);
   requireCondition(isRecord(capsule.nodeDependencies), 'run capsule Node dependency manifest is absent', reasons);
   requireCondition(Array.isArray(capsule.pythonDependencies) && capsule.pythonDependencies.length > 0, 'run capsule Python dependency manifest is absent', reasons);
   requireCondition(
@@ -140,7 +141,12 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(isSha256(transcript.toolResultElisionTemplateSha256), 'run capsule tool-result-elision template digest is absent', reasons);
   requireCondition(isSha256(transcript.toolResultTruncationTemplateSha256), 'run capsule tool-result-truncation template digest is absent', reasons);
   requireCondition(isSha256(transcript.thinkingElisionPolicySha256), 'run capsule thinking-elision policy digest is absent', reasons);
-  requireCondition(['recentToolResults', 'maxMessages', 'maxTokens', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
+  requireCondition(['recentToolResults', 'maxMessages', 'maxTokens', 'staticContextTokens', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
+  requireCondition(
+    transcript.contextEstimator === '@earendil-works/pi-ai@0.84.2 estimateContextTokens',
+    'run capsule context estimator is absent or unknown',
+    reasons,
+  );
   const runtime = recordOrEmpty(capsule.runtime);
   requireCondition(/^v\d+\.\d+\.\d+/.test(String(runtime.node || '')), 'run capsule Node runtime version is absent', reasons);
   requireCondition(/^\d+\.\d+\.\d+/.test(String(runtime.npm || '')), 'run capsule npm runtime version is absent', reasons);
@@ -165,7 +171,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(
     model.requestedCapabilities?.streaming === true
       && model.requestedCapabilities?.toolCalling === true
-      && model.requestedCapabilities?.parallelToolCalls === false
+      && model.requestedCapabilities?.parallelToolCalls === 'provider-default-unspecified'
       && canonicalJson(model.requestedCapabilities?.inputModalities) === canonicalJson(['text'])
       && model.requestedCapabilities?.reasoningEffort === model.reasoningEffort,
     'run capsule requested model capabilities are malformed',
@@ -176,7 +182,7 @@ export function evaluatePublicRunCapsule(value, {
       && manifest.wireApi === 'responses'
       && manifest.tools?.calling === true
       && manifest.tools?.executionMode === 'sequential'
-      && manifest.tools?.parallelCalls === false
+      && manifest.tools?.providerParallelCalls === 'provider-default-unspecified'
       && manifest.visualObservation?.enabled === false
       && Array.isArray(manifest.inputModalities)
       && manifest.inputModalities.includes('text')
@@ -202,6 +208,12 @@ export function evaluatePublicRunCapsule(value, {
     reasons,
   );
   requireCondition(
+    transcript.staticContextTokens < transcript.maxTokens
+      && transcript.contextEstimator === manifest.tokenizer?.contextEstimator,
+    'run capsule static prefix or context estimator is inconsistent',
+    reasons,
+  );
+  requireCondition(
     attestation.providerFreshnessVersion === 3
       && attestation.providerRequestAccepted === true
       && attestation.piToolProtocolVerified === true
@@ -209,6 +221,8 @@ export function evaluatePublicRunCapsule(value, {
       && attestation.requestedVsEffectiveVerified === true
       && attestation.multiTurnContinuationVerified === true
       && attestation.largeToolResultVerified === true
+      && isSha256(attestation.productionToolSchemaSha256)
+      && attestation.productionToolSchemaSha256 === capsule.providerToolSchemaSha256
       && attestation.capabilityManifestSha256 === model.capabilityManifestSha256,
     'run capsule provider capability probes are incomplete',
     reasons,
@@ -252,6 +266,7 @@ function bindBenchmarkReport(definition, report, reasons) {
   requireCondition(
     provenance.modelCapabilities?.capabilityStatus === model.capabilityStatus
       && provenance.modelCapabilities?.manifestSha256 === model.capabilityManifestSha256
+      && provenance.modelCapabilities?.providerToolSchemaSha256 === model.attestation?.productionToolSchemaSha256
       && canonicalJson(provenance.modelCapabilities?.requested) === canonicalJson({
         wireApi: model.wireApi,
         reasoningEffort: model.reasoningEffort,

@@ -105,6 +105,8 @@ export function evaluateRoundAuthority({
       && isSha256(modelCapabilities.manifestSha256)
       && providerPreflight.capabilityManifestSha256 === modelCapabilities.manifestSha256
       && piStreamPreflight.capabilityManifestSha256 === modelCapabilities.manifestSha256
+      && isSha256(modelCapabilities.providerToolSchemaSha256)
+      && piStreamPreflight.productionToolSchemaSha256 === modelCapabilities.providerToolSchemaSha256
       && piStreamPreflight.ok === true
       && piStreamPreflight.productionToolSchemaVerified === true
       && piStreamPreflight.requestedVsEffectiveVerified === true

@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Type } from '@earendil-works/pi-ai';
+import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-responses-shared';
 
 import {
   AvoArcAgent,
@@ -19,7 +21,9 @@ import {
   TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
   boundTranscript,
   createPiSdkLoop,
+  estimateStaticPiContextTokens,
   effectivePiSystemPrompt,
+  piToolContract,
 } from '../loop/pi-sdk.mjs';
 import {
   assertProviderCapabilities,
@@ -247,6 +251,11 @@ export function buildRunCapsule({
     throw new Error('run provenance provider identity differs from the effective provider config');
   }
   const toolSchemas = canonicalToolSchemas(workspaceMode);
+  const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
+  const providerToolSchemas = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
   const systemPrompt = effectivePiSystemPrompt(
     AvoArcAgent.prototype.systemPrompt.call({}),
     workspaceMode,
@@ -269,6 +278,7 @@ export function buildRunCapsule({
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
+      providerSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
       enabled: toolSchemas.map((tool) => tool.name),
       executionMode: 'sequential',
     },
@@ -280,6 +290,8 @@ export function buildRunCapsule({
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
       maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
+      staticContextTokens: estimateStaticPiContextTokens(systemPrompt, piTools),
+      contextEstimator: providerCapabilities.tokenizer.contextEstimator,
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
     modelInterface: modelInterfaceDefinition({
@@ -288,6 +300,7 @@ export function buildRunCapsule({
       providerIdentity,
       reasoningEffort,
       providerCapabilities,
+      providerToolSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
     }),
     runtime: {
       node: process.version,
@@ -329,6 +342,15 @@ function canonicalToolSchemas(workspaceMode) {
     throw new Error('effective tool schema set differs from the production tool allowlist');
   }
   return schemas;
+}
+
+export function productionProviderToolSchemaDigest(workspaceMode = 'files-only') {
+  const piTools = canonicalToolSchemas(workspaceMode).map((tool) => piToolContract(tool, Type));
+  const providerTools = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
+  return sha256(canonicalJson(providerTools));
 }
 
 export function sealRunCapsule(definition, { createdAt = new Date().toISOString() } = {}) {
@@ -501,6 +523,11 @@ export function verifyRunCapsuleExecution({
   if (config) verifyEffectiveConfig(config, definition.runtime.config);
   const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
+  const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
+  const providerToolSchemas = convertResponsesTools(piTools, {
+    supportsStrictMode: false,
+    supportsOpenAIGrammarTools: false,
+  });
   const prompt = effectivePiSystemPrompt(
     AvoArcAgent.prototype.systemPrompt.call({}),
     definition.runtime.config.workspaceMode,
@@ -516,6 +543,7 @@ export function verifyRunCapsuleExecution({
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
+      providerSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
       enabled: toolSchemas.map((tool) => tool.name),
       executionMode: 'sequential',
     },
@@ -527,6 +555,8 @@ export function verifyRunCapsuleExecution({
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
       maxTokens: transcriptMaxTokens(providerCapabilities, env.AVO_TRANSCRIPT_MAX_TOKENS),
+      staticContextTokens: estimateStaticPiContextTokens(prompt, piTools),
+      contextEstimator: providerCapabilities.tokenizer.contextEstimator,
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
   };
@@ -541,6 +571,7 @@ export function verifyRunCapsuleExecution({
     providerIdentity,
     reasoningEffort: String(config?.provider?.reasoningEffort || ''),
     providerCapabilities,
+    providerToolSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
     attestation: definition.modelInterface.attestation,
   });
   if (canonicalJson(observedModelInterface) !== canonicalJson(definition.modelInterface)) {
@@ -686,13 +717,14 @@ function modelInterfaceDefinition({
   providerIdentity,
   reasoningEffort,
   providerCapabilities,
+  providerToolSchemaSha256,
   attestation = null,
 }) {
   const manifestSha256 = providerCapabilityDigest(providerCapabilities);
   const requestedCapabilities = {
     streaming: true,
     toolCalling: true,
-    parallelToolCalls: false,
+    parallelToolCalls: 'provider-default-unspecified',
     inputModalities: ['text'],
     reasoningEffort,
   };
@@ -703,6 +735,7 @@ function modelInterfaceDefinition({
     const piProbe = provenance.piStreamPreflight;
     const probesValid = declared?.capabilityStatus === 'configured-with-bounded-probes'
       && declared?.manifestSha256 === manifestSha256
+      && declared?.providerToolSchemaSha256 === providerToolSchemaSha256
       && canonicalJson(declared?.requested) === canonicalJson({ wireApi: 'responses', ...requestedCapabilities })
       && canonicalJson(declared?.effective) === canonicalJson(providerCapabilities)
       && Object.values(declared?.probes || {}).every((value) => value === true)
@@ -712,6 +745,7 @@ function modelInterfaceDefinition({
       && providerProbe?.capabilityManifestSha256 === manifestSha256
       && piProbe?.ok === true
       && piProbe?.capabilityManifestSha256 === manifestSha256
+      && piProbe?.productionToolSchemaSha256 === providerToolSchemaSha256
       && piProbe?.productionToolSchemaVerified === true
       && piProbe?.requestedVsEffectiveVerified === true
       && piProbe?.multiTurnContinuationVerified === true
@@ -725,6 +759,7 @@ function modelInterfaceDefinition({
       requestedVsEffectiveVerified: true,
       multiTurnContinuationVerified: true,
       largeToolResultVerified: true,
+      productionToolSchemaSha256: providerToolSchemaSha256,
       capabilityManifestSha256: manifestSha256,
     };
   }
@@ -736,6 +771,7 @@ function modelInterfaceDefinition({
     requestedVsEffectiveVerified: true,
     multiTurnContinuationVerified: true,
     largeToolResultVerified: true,
+    productionToolSchemaSha256: providerToolSchemaSha256,
     capabilityManifestSha256: manifestSha256,
   })) {
     throw new Error('provider capability attestation is absent or inconsistent');

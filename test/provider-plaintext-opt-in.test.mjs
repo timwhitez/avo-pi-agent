@@ -70,6 +70,7 @@ test('provenance records the transport decision without leaking the endpoint', (
   const games = [{ gameId: 'ls20', versionedGameId: 'ls20@1' }];
   const capabilities = providerCapabilities('max');
   const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
+  const productionToolSchemaSha256 = 'e'.repeat(64);
   const providerPreflight = {
     ok: true,
     outputVerified: true,
@@ -82,6 +83,7 @@ test('provenance records the transport decision without leaking the endpoint', (
   const piStreamPreflight = {
     ok: true,
     capabilityManifestSha256,
+    productionToolSchemaSha256,
     productionToolSchemaVerified: true,
     requestedVsEffectiveVerified: true,
     multiTurnContinuationVerified: true,

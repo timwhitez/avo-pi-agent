@@ -175,6 +175,7 @@ test('Responses preflight reports HTTP and timeout failures without provider pay
 test('provenance grants no-mock status only to nonce-bound v3 capability attestation', () => {
   const provider = config;
   const capabilityManifestSha256 = providerCapabilityDigest(provider.capabilities);
+  const productionToolSchemaSha256 = 'e'.repeat(64);
   const base = {
     provider,
     arcRuntime: { arcAgiVersion: '1.0.0', officialPackageAttested: true },
@@ -200,6 +201,7 @@ test('provenance grants no-mock status only to nonce-bound v3 capability attesta
     piStreamPreflight: {
       ok: true,
       capabilityManifestSha256,
+      productionToolSchemaSha256,
       productionToolSchemaVerified: true,
       requestedVsEffectiveVerified: true,
       multiTurnContinuationVerified: true,

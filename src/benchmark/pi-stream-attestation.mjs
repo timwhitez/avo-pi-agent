@@ -47,7 +47,9 @@ export function validatePiStreamAttestation(payload) {
     || payload.requestedVsEffectiveVerified !== true
     || payload.multiTurnContinuationVerified !== true
     || payload.largeToolResultVerified !== true
+    || payload.largeToolResultTruncated !== false
     || !isSha256(payload.capabilityManifestSha256)
+    || !isSha256(payload.productionToolSchemaSha256)
     || !Number.isSafeInteger(payload.productionToolCount)
     || payload.productionToolCount < 1
     || !Number.isSafeInteger(payload.providerRequestCount)
@@ -65,11 +67,13 @@ export function validatePiStreamAttestation(payload) {
     productionToolCount: positiveInteger(payload.productionToolCount),
     providerRequestCount: positiveInteger(payload.providerRequestCount),
     capabilityManifestSha256: payload.capabilityManifestSha256,
+    productionToolSchemaSha256: payload.productionToolSchemaSha256,
     productionToolSchemaVerified: true,
     requestedVsEffectiveVerified: true,
     multiTurnContinuationVerified: true,
     largeToolResultChars: positiveInteger(payload.largeToolResultChars),
     largeToolResultVerified: true,
+    largeToolResultTruncated: false,
     outerTurns: nonNegativeInteger(payload.outerTurns),
     elapsedMs: nonNegativeInteger(payload.elapsedMs),
   });

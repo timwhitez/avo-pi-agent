@@ -216,6 +216,9 @@ export function buildProvenance({ provider, providerPreflight, piStreamPreflight
   if (piStreamPreflight?.capabilityManifestSha256 !== capabilityManifestSha256) {
     throw new Error('Pi stream preflight capability manifest differs from provider configuration');
   }
+  if (!/^[a-f0-9]{64}$/.test(String(piStreamPreflight?.productionToolSchemaSha256 || ''))) {
+    throw new Error('Pi stream preflight production tool schema digest is absent');
+  }
   return {
     runId,
     gitSha,
@@ -234,13 +237,14 @@ export function buildProvenance({ provider, providerPreflight, piStreamPreflight
       schemaVersion: 1,
       capabilityStatus: 'configured-with-bounded-probes',
       manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256: piStreamPreflight.productionToolSchemaSha256,
       requested: {
         wireApi: 'responses',
         reasoningEffort: provider.reasoningEffort,
         inputModalities: ['text'],
         streaming: true,
         toolCalling: true,
-        parallelToolCalls: false,
+        parallelToolCalls: 'provider-default-unspecified',
       },
       effective: structuredClone(provider.capabilities),
       probes: {

@@ -1,8 +1,16 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { Type } from '@earendil-works/pi-ai';
+import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-responses-shared';
 import { getRuntimeConfig, loadLocalEnv } from '../src/config.mjs';
 import { AvoArcAgent, effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
-import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
+import { canonicalJson } from '../src/local/canonical-json.mjs';
+import {
+  createPiSdkLoop,
+  piToolContract,
+  providerModelFingerprint,
+} from '../src/loop/pi-sdk.mjs';
 
 loadLocalEnv();
 const config = getRuntimeConfig();
@@ -15,8 +23,9 @@ let finishCalls = 0;
 let completed = false;
 let timeout;
 const providerRequests = [];
-const continuationNonce = 'PI_CONTINUATION_OK';
+const continuationNonce = crypto.randomBytes(24).toString('hex');
 const largeToolResultChars = 16_384;
+let largeToolResultTruncated = false;
 
 try {
   timeout = setTimeout(() => {
@@ -36,6 +45,11 @@ try {
       const type = String(event?.type || 'unknown');
       eventCounts[type] = (eventCounts[type] || 0) + 1;
       if (type === 'avo_provider_request') providerRequests.push(event);
+      if (type === 'avo_context_compaction'
+          && event.mode === 'tool_result_truncation'
+          && event.toolName === 'observe') {
+        largeToolResultTruncated = true;
+      }
     },
   });
   const state = { observed: false, done: false };
@@ -50,7 +64,7 @@ try {
           observeCalls += 1;
           if (observeCalls !== 1) throw new Error('diagnostic observe repeated');
           state.observed = true;
-          const text = `continuation_nonce=${continuationNonce}\n${'x'.repeat(largeToolResultChars)}\nUse the continuation_nonce as the exact finish summary.`;
+          const text = `${'x'.repeat(largeToolResultChars)}\ncontinuation_nonce=${continuationNonce}`;
           return {
             text,
             details: { diagnostic: true, originalChars: text.length, contextExactEvidence: false },
@@ -72,6 +86,18 @@ try {
         throw new Error(`diagnostic called unexpected production tool: ${tool.name}`);
       },
     }));
+  const expectedProviderTools = convertResponsesTools(
+    tools.map((tool) => piToolContract(tool, Type)),
+    { supportsStrictMode: false, supportsOpenAIGrammarTools: false },
+  );
+  const expectedToolNames = expectedProviderTools.map((tool) => tool.name);
+  const expectedToolSchemaSha256 = crypto.createHash('sha256')
+    .update(canonicalJson(expectedProviderTools))
+    .digest('hex');
+  const expectedModelFingerprint = providerModelFingerprint(
+    config.provider.model,
+    config.provider.capabilities,
+  );
 
   const result = await loop.run({
     systemPrompt: 'You are a protocol diagnostic. Call observe exactly once. Read continuation_nonce from its large result, then call finish exactly once with that nonce as the exact summary. Do not call another tool.',
@@ -88,22 +114,28 @@ try {
   });
   completed = true;
   const productionToolSchemaVerified = providerRequests.length >= 2
-    && providerRequests.every((request) => request.effective?.toolCount === tools.length);
+    && providerRequests.every((request) => (
+      request.effective?.toolCount === expectedProviderTools.length
+      && canonicalJson(request.effective?.toolNames) === canonicalJson(expectedToolNames)
+      && request.effective?.toolSchemaSha256 === expectedToolSchemaSha256
+    ));
   const capabilityManifestSha256 = providerRequests[0]?.capabilityManifestSha256 ?? null;
   const requestedVsEffectiveVerified = providerRequests.length >= 2
     && providerRequests.every((request) => (
       request.capabilityManifestSha256 === capabilityManifestSha256
       && request.requested?.reasoningEffort === config.provider.reasoningEffort
       && request.effective?.systemPromptRole === config.provider.capabilities.roles.effectiveSystemPromptRole
-      && request.effective?.maxOutputTokens <= config.provider.capabilities.limits.maxOutputTokens
+      && request.effective?.maxOutputTokens === config.provider.capabilities.limits.maxOutputTokens
+      && request.effective?.modelFingerprint === expectedModelFingerprint
+      && request.requested?.parallelToolCalls === 'provider-default-unspecified'
+      && request.effective?.providerParallelToolCalls === 'provider-default-unspecified'
+      && request.effective?.agentToolExecution === 'sequential'
     ));
   const multiTurnContinuationVerified = state.done
     && observeCalls === 1
     && finishCalls === 1
     && providerRequests.length >= 2;
-  const largeToolResultVerified = providerRequests.some(
-    (request) => request.effective?.inputChars >= largeToolResultChars,
-  );
+  const largeToolResultVerified = multiTurnContinuationVerified && !largeToolResultTruncated;
   const ok = multiTurnContinuationVerified
     && toolCalls === 2
     && productionToolSchemaVerified
@@ -118,6 +150,7 @@ try {
     eventCounts,
     toolCalls,
     productionToolCount: tools.length,
+    productionToolSchemaSha256: expectedToolSchemaSha256,
     providerRequestCount: providerRequests.length,
     capabilityManifestSha256,
     productionToolSchemaVerified,
@@ -125,6 +158,7 @@ try {
     multiTurnContinuationVerified,
     largeToolResultChars,
     largeToolResultVerified,
+    largeToolResultTruncated,
     outerTurns: result.outerTurns,
     errorPresent: Boolean(result.error),
   });

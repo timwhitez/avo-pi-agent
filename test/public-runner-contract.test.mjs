@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import {
   buildRunCapsule,
   prepareRunState,
+  productionProviderToolSchemaDigest,
   RUN_CAPSULE_COMPONENT_FILES,
   writeRunCapsule,
 } from '../src/benchmark/run-capsule.mjs';
@@ -83,6 +84,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
   const scoped = path.join(root, 'node_modules', '@earendil-works');
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
+  fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
   fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-agent-core', version: '0.84.2', type: 'module', exports: './index.js',
   }));
@@ -183,12 +185,20 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     exports: { '.': './index.js', './api/*': './api/*.js' },
   }));
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'index.js'), String.raw`
-    const make = (kind) => (...args) => ({ kind, args });
+    const optional = Symbol('optional');
+    const scalar = (type) => (options = {}) => ({ type, ...options });
     export const Type = {
-      Any: make('Any'), Array: make('Array'), Boolean: make('Boolean'),
-      Integer: make('Integer'), Literal: make('Literal'), Null: make('Null'),
-      Number: make('Number'), Object: make('Object'), Optional: make('Optional'),
-      String: make('String'), Union: make('Union'),
+      Any: (options = {}) => ({ ...options }),
+      Array: (items, options = {}) => ({ type: 'array', items, ...options }),
+      Boolean: scalar('boolean'), Integer: scalar('integer'), Null: scalar('null'),
+      Number: scalar('number'), String: scalar('string'),
+      Literal: (value, options = {}) => ({ const: value, type: typeof value, ...options }),
+      Union: (anyOf, options = {}) => ({ anyOf, ...options }),
+      Optional: (schema) => Object.assign(schema, { [optional]: true }),
+      Object: (properties, options = {}) => {
+        const required = Object.entries(properties).filter(([, value]) => !value[optional]).map(([name]) => name);
+        return { type: 'object', properties, ...(required.length ? { required } : {}), ...options };
+      },
     };
     export const envApiKeyAuth = (...args) => ({ kind: 'env-auth', args });
     export const createProvider = (input) => ({ ...input, getModels: () => input.models });
@@ -204,6 +214,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           const role = model.reasoning && model.compat?.supportsDeveloperRole !== false ? 'developer' : 'system';
           const effort = model.reasoning ? model.thinkingLevelMap?.[options.reasoning] ?? options.reasoning : null;
           await options.onPayload?.({
+            model: model.id,
             input: [
               { role, content: context.systemPrompt },
               ...context.messages.map((message) => ({ role: message.role, content: message.content })),
@@ -211,7 +222,9 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
             stream: true,
             max_output_tokens: model.maxTokens,
             ...(effort ? { reasoning: { effort } } : {}),
-            tools: context.tools.map((tool) => ({ type: 'function', name: tool.name })),
+            tools: context.tools.map((tool) => ({
+              type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
+            })),
           }, model);
           return { result: async () => ({}) };
         },
@@ -222,6 +235,19 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     export const openAIResponsesApi = () => ({
       stream: () => ({ result: async () => ({}) }),
       streamSimple: () => ({ result: async () => ({}) }),
+    });
+  `);
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'api', 'openai-responses-shared.js'), String.raw`
+    export const convertResponsesTools = (tools) => tools.map((tool) => ({
+      type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
+    }));
+  `);
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'utils', 'estimate.js'), String.raw`
+    const tokens = (value) => Math.ceil(JSON.stringify(value).length / 4);
+    export const estimateContextTokens = (context) => ({
+      tokens: Math.ceil(String(context.systemPrompt || '').length / 4)
+        + tokens(context.tools || [])
+        + tokens(context.messages || []),
     });
   `);
 
@@ -468,6 +494,7 @@ process.exit(result.status ?? 1);
     providerModelFingerprint: fingerprint(config.provider.model, providerSalt),
   };
   const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(config.workspaceMode);
   const capabilityProvenance = {
     providerPreflight: {
       ok: true,
@@ -481,6 +508,7 @@ process.exit(result.status ?? 1);
     piStreamPreflight: {
       ok: true,
       capabilityManifestSha256,
+      productionToolSchemaSha256: providerToolSchemaSha256,
       productionToolSchemaVerified: true,
       requestedVsEffectiveVerified: true,
       multiTurnContinuationVerified: true,
@@ -489,9 +517,10 @@ process.exit(result.status ?? 1);
     modelCapabilities: {
       capabilityStatus: 'configured-with-bounded-probes',
       manifestSha256: capabilityManifestSha256,
+      providerToolSchemaSha256,
       requested: {
         wireApi: 'responses', reasoningEffort: 'max', inputModalities: ['text'],
-        streaming: true, toolCalling: true, parallelToolCalls: false,
+        streaming: true, toolCalling: true, parallelToolCalls: 'provider-default-unspecified',
       },
       effective: config.provider.capabilities,
       probes: {

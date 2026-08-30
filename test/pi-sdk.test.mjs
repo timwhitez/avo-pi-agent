@@ -12,6 +12,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     const scoped = path.join(root, 'node_modules', '@earendil-works');
     fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
     fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
+    fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
     fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
     fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
 
@@ -84,6 +85,13 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
       export const openAIResponsesApi = () => ({
         stream: () => ({ result: async () => ({}) }),
         streamSimple: () => ({ result: async () => ({}) }),
+      });
+    `);
+    fs.writeFileSync(path.join(scoped, 'pi-ai', 'utils', 'estimate.js'), `
+      export const estimateContextTokens = (context) => ({
+        tokens: Math.ceil((String(context.systemPrompt || '').length
+          + JSON.stringify(context.tools || []).length
+          + JSON.stringify(context.messages || []).length) / 4),
       });
     `);
 

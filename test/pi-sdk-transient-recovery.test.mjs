@@ -13,6 +13,7 @@ async function loadLoopWith(script) {
   const scoped = path.join(root, 'node_modules', '@earendil-works');
   fs.mkdirSync(path.join(scoped, 'pi-agent-core'), { recursive: true });
   fs.mkdirSync(path.join(scoped, 'pi-ai', 'api'), { recursive: true });
+  fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
   fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
   fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
 
@@ -74,6 +75,11 @@ async function loadLoopWith(script) {
   `);
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'api', 'openai-responses.lazy.js'),
     'export const openAIResponsesApi = () => ({});');
+  fs.writeFileSync(path.join(scoped, 'pi-ai', 'utils', 'estimate.js'), `
+    export const estimateContextTokens = (context) => ({
+      tokens: Math.ceil(JSON.stringify(context).length / 4),
+    });
+  `);
   fs.copyFileSync(path.resolve(process.cwd(), 'src/loop/pi-sdk.mjs'), path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
   fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
   fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));

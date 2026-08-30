@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 
+import { canonicalJson } from '../local/canonical-json.mjs';
 import {
   assertProviderCapabilities,
   providerCapabilityDigest,
@@ -40,16 +41,18 @@ export const THINKING_ELISION_POLICY_SHA256 = crypto
   .digest('hex');
 export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   let Agent;
-  let estimateTokens;
+  let estimateContextTokens;
   let createModels;
   let createProvider;
   let envApiKeyAuth;
   let openAIResponsesApi;
   let Type;
   try {
-    ({ Agent, estimateTokens } = await import('@earendil-works/pi-agent-core'));
+    ({ Agent } = await import('@earendil-works/pi-agent-core'));
     ({ createModels, createProvider, envApiKeyAuth, Type } = await import('@earendil-works/pi-ai'));
     ({ openAIResponsesApi } = await import('@earendil-works/pi-ai/api/openai-responses.lazy'));
+    const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
+    ({ estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry)));
   } catch (error) {
     throw new Error(
       'Pi SDK packages are unavailable. Run `npm install --ignore-scripts` with Node >=22.19.0.',
@@ -109,6 +112,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       onPayload: async (payload, currentModel) => {
         const telemetry = providerRequestTelemetry(payload, {
           capabilities,
+          expectedModel: config.provider.model,
           reasoningEffort: config.provider.reasoningEffort,
           requestSequence,
           streamMaxRetries,
@@ -118,11 +122,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       },
     });
   };
-  const transcriptOptions = {
+  const transcriptBounds = {
     recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
     maxTokens: transcriptMaxTokens(capabilities, process.env.AVO_TRANSCRIPT_MAX_TOKENS),
-    estimateMessageTokens: estimateTokens,
     onCompaction: onEvent,
   };
   // A single fat read (full lineage, a whole workspace file) kept verbatim in
@@ -143,11 +146,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       });
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
       const piTools = exposedTools.map((tool) => ({
-        name: tool.name,
-        label: tool.label || tool.name,
-        description: tool.description,
-        parameters: toTypeBox(tool.parameters, Type),
-        executionMode: 'sequential',
+        ...piToolContract(tool, Type),
         execute: async (_callId, params) => {
           const result = await tool.execute(params);
           let text = String(result.text ?? '');
@@ -176,6 +175,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           };
         },
       }));
+      const transcriptOptions = {
+        ...transcriptBounds,
+        estimateContextTokens: (messages) => estimateContextTokens({
+          systemPrompt: effectiveSystemPrompt,
+          messages,
+          tools: piTools,
+        }).tokens,
+      };
 
       let outerTurns = 1;
       const agent = new Agent({
@@ -259,6 +266,7 @@ export function effectivePiSystemPrompt(systemPrompt, workspaceMode = 'files-onl
 
 export function providerRequestTelemetry(payload, {
   capabilities,
+  expectedModel,
   reasoningEffort,
   requestSequence,
   streamMaxRetries,
@@ -275,6 +283,9 @@ export function providerRequestTelemetry(payload, {
     ? payload.input.find((entry) => ['developer', 'system'].includes(entry?.role))?.role ?? null
     : null;
   const effectiveMaxOutputTokens = Number(payload.max_output_tokens);
+  const modelMatches = typeof expectedModel === 'string'
+    && expectedModel.length > 0
+    && payload.model === expectedModel;
   const inputChars = JSON.stringify(payload.input ?? []).length;
   const inputModalities = payloadModalities(payload.input);
   const toolCount = Array.isArray(payload.tools) ? payload.tools.length : 0;
@@ -285,8 +296,8 @@ export function providerRequestTelemetry(payload, {
       && (cacheRetention !== 'long' || payload.prompt_cache_retention === '24h');
   const valid = payload.stream === true
     && Number.isSafeInteger(effectiveMaxOutputTokens)
-    && effectiveMaxOutputTokens >= 16
-    && effectiveMaxOutputTokens <= capabilities.limits.maxOutputTokens
+    && effectiveMaxOutputTokens === capabilities.limits.maxOutputTokens
+    && modelMatches
     && effectiveReasoningEffort === expectedReasoningEffort
     && effectiveSystemPromptRole === capabilities.roles.effectiveSystemPromptRole
     && inputModalities.includes('text')
@@ -294,6 +305,11 @@ export function providerRequestTelemetry(payload, {
     && toolCount > 0
     && cacheValid;
   if (!valid) throw new Error('effective provider request contradicts the capability manifest');
+  const modelFingerprint = providerModelFingerprint(expectedModel, capabilities);
+  const toolNames = payload.tools.map((tool) => String(tool?.name || ''));
+  if (toolNames.some((name) => !name)) {
+    throw new Error('effective provider request contains an unnamed tool');
+  }
 
   return Object.freeze({
     type: 'avo_provider_request',
@@ -306,7 +322,7 @@ export function providerRequestTelemetry(payload, {
       inputModalities: ['text'],
       streaming: true,
       toolCalling: true,
-      parallelToolCalls: false,
+      parallelToolCalls: 'provider-default-unspecified',
     },
     effective: {
       reasoningEffort: effectiveReasoningEffort,
@@ -315,8 +331,12 @@ export function providerRequestTelemetry(payload, {
       systemPromptRole: effectiveSystemPromptRole,
       inputChars,
       streaming: true,
+      modelFingerprint,
       toolCount,
-      toolSchemaSha256: crypto.createHash('sha256').update(JSON.stringify(payload.tools)).digest('hex'),
+      toolNames,
+      toolSchemaSha256: crypto.createHash('sha256').update(canonicalJson(payload.tools)).digest('hex'),
+      providerParallelToolCalls: 'provider-default-unspecified',
+      agentToolExecution: 'sequential',
       cacheRetention,
     },
     retry: {
@@ -324,6 +344,26 @@ export function providerRequestTelemetry(payload, {
       idempotencyKey: false,
     },
   });
+}
+
+export function providerModelFingerprint(model, capabilities) {
+  const salt = providerCapabilityDigest(capabilities);
+  return crypto.createHash('sha256').update(`${salt}\0${String(model)}`).digest('hex');
+}
+
+export function piToolContract(tool, Type) {
+  return {
+    name: tool.name,
+    label: tool.label || tool.name,
+    description: tool.description,
+    parameters: toTypeBox(tool.parameters, Type),
+    executionMode: 'sequential',
+  };
+}
+
+export function estimateStaticPiContextTokens(systemPrompt, piTools) {
+  return Math.ceil(String(systemPrompt).length / 4)
+    + Math.ceil(JSON.stringify(piTools).length / 4);
 }
 
 function payloadModalities(input) {
@@ -516,12 +556,19 @@ export function boundTranscript(messages, {
   maxMessages = 160,
   maxTokens = 120_000,
   estimateMessageTokens = fallbackEstimateTokens,
+  estimateContextTokens = null,
   onCompaction = () => {},
 } = {}) {
   if (!Array.isArray(messages)) return messages;
   if (!Number.isInteger(maxMessages) || maxMessages <= 0) throw new Error('maxMessages must be a positive integer');
   if (!Number.isInteger(maxTokens) || maxTokens <= 0) throw new Error('maxTokens must be a positive integer');
   if (typeof estimateMessageTokens !== 'function') throw new Error('estimateMessageTokens must be a function');
+  if (estimateContextTokens !== null && typeof estimateContextTokens !== 'function') {
+    throw new Error('estimateContextTokens must be a function');
+  }
+  const estimate = estimateContextTokens
+    ? (value) => contextTokens(value, estimateContextTokens)
+    : (value) => transcriptTokens(value, estimateMessageTokens);
   const toolIndices = [];
   const thinkingIndices = [];
   let lastAssistantIndex = -1;
@@ -540,7 +587,7 @@ export function boundTranscript(messages, {
   if (toolIndices.length <= recentToolResults
       && messages.length <= maxMessages
       && thinkingIndices.length === 0
-      && transcriptTokens(messages, estimateMessageTokens) <= maxTokens) {
+      && estimate(messages) <= maxTokens) {
     return messages;
   }
 
@@ -592,13 +639,13 @@ export function boundTranscript(messages, {
         && latestEvidence.indexes.every((index) => repaired.includes(messages[index])),
     });
   }
-  if (repaired.length <= maxMessages && transcriptTokens(repaired, estimateMessageTokens) <= maxTokens) {
+  if (repaired.length <= maxMessages && estimate(repaired) <= maxTokens) {
     return repaired;
   }
   return hardBoundTranscript(repaired, {
     maxMessages,
     maxTokens,
-    estimateMessageTokens,
+    estimateContextTokens: estimate,
     onCompaction,
   });
 }
@@ -606,7 +653,7 @@ export function boundTranscript(messages, {
 function hardBoundTranscript(messages, {
   maxMessages,
   maxTokens,
-  estimateMessageTokens,
+  estimateContextTokens,
   onCompaction,
 }) {
   const taskIndex = messages.findIndex((message) => message?.role === 'user'
@@ -617,42 +664,39 @@ function hardBoundTranscript(messages, {
     if (isRuntimeStatus(messages[index])) { statusIndex = index; break; }
   }
   const selected = new Set([taskIndex, statusIndex].filter((index) => index >= 0));
-  let tokens = transcriptTokens([...selected].map((index) => messages[index]), estimateMessageTokens);
-  if (selected.size > maxMessages || tokens > maxTokens) {
+  const fits = (indexes, includeNotice = false) => {
+    let candidate = repairToolPairs(messages.filter((_message, index) => indexes.has(index)));
+    if (includeNotice) {
+      const taskPosition = candidate.indexOf(messages[taskIndex]);
+      candidate.splice(taskPosition >= 0 ? taskPosition + 1 : 0, 0, compactionNotice(
+        messages.length - candidate.length,
+        messages[0]?.timestamp,
+        latestEvidencePair(messages).ref,
+      ));
+    }
+    return candidate.length <= maxMessages && estimateContextTokens(candidate) <= maxTokens;
+  };
+  if (!fits(selected)) {
     throw new Error('transcript bounds cannot preserve the original task and current runtime status');
   }
   const latestEvidence = latestEvidencePair(messages);
   const evidenceIndexes = latestEvidence.indexes.filter((index) => !selected.has(index));
-  const evidenceTokens = transcriptTokens(
-    evidenceIndexes.map((index) => messages[index]),
-    estimateMessageTokens,
-  );
+  const withEvidence = new Set([...selected, ...evidenceIndexes]);
   const keepsExactEvidence = latestEvidence.exact
     && latestEvidence.indexes.length === 2
-    && selected.size + evidenceIndexes.length <= maxMessages
-    && tokens + evidenceTokens <= maxTokens;
+    && fits(withEvidence);
   if (keepsExactEvidence) {
     for (const index of evidenceIndexes) selected.add(index);
-    tokens += evidenceTokens;
   }
-  const provisionalNotice = compactionNotice(
-    messages.length,
-    messages[0]?.timestamp,
-    latestEvidence.ref,
-  );
-  const noticeTokens = messageTokens(provisionalNotice, estimateMessageTokens);
-  const reserveNotice = selected.size + 1 <= maxMessages && tokens + noticeTokens <= maxTokens;
+  const reserveNotice = fits(selected, true);
   if (latestEvidence.ref && !keepsExactEvidence && !reserveNotice) {
     throw new Error('transcript bounds cannot preserve the latest exact evidence or its durable reference');
   }
-  if (reserveNotice) tokens += noticeTokens;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (selected.has(index)) continue;
     if (selected.size + (reserveNotice ? 1 : 0) >= maxMessages) break;
-    const candidateTokens = messageTokens(messages[index], estimateMessageTokens);
-    if (tokens + candidateTokens > maxTokens) break;
-    selected.add(index);
-    tokens += candidateTokens;
+    const candidate = new Set([...selected, index]);
+    if (fits(candidate, reserveNotice)) selected.add(index);
   }
   const selectedMessages = messages.filter((_message, index) => selected.has(index));
   let retained = repairToolPairs(selectedMessages);
@@ -670,7 +714,7 @@ function hardBoundTranscript(messages, {
     noticeIncluded = true;
   }
   if (retained.length > maxMessages
-      || transcriptTokens(retained, estimateMessageTokens) > maxTokens) {
+      || estimateContextTokens(retained) > maxTokens) {
     throw new Error('transcript hard bound failed after compaction');
   }
   onCompaction({
@@ -684,6 +728,12 @@ function hardBoundTranscript(messages, {
     noticeIncluded,
   });
   return retained;
+}
+
+function contextTokens(messages, estimateContextTokens) {
+  const value = Number(estimateContextTokens(messages));
+  if (!Number.isFinite(value) || value < 0) throw new Error('context token estimator returned an invalid value');
+  return Math.ceil(value);
 }
 
 function compactionNotice(dropped, timestamp = Date.now(), latestEvidenceRef = null) {
