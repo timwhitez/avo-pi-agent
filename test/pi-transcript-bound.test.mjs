@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { boundTranscript } from '../src/loop/pi-sdk.mjs';
+import {
+  boundTranscript,
+  replaceRuntimeStatus,
+  runtimeStatusMessage,
+} from '../src/loop/pi-sdk.mjs';
 
 function toolResult(index, text = 'x'.repeat(500)) {
   return {
@@ -104,7 +108,7 @@ test('historical reasoning blocks are elided while the latest turn keeps its thi
   }
 });
 
-test('hard message cap drops oldest non-user messages and discloses the compaction', () => {
+test('hard message cap applies across roles and discloses the compaction', () => {
   const messages = [user(0)];
   for (let index = 1; index <= 40; index += 1) {
     messages.push(
@@ -113,9 +117,9 @@ test('hard message cap drops oldest non-user messages and discloses the compacti
     );
   }
   const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 30 });
-  assert.ok(bounded.length <= 32, `length=${bounded.length}`);
-  assert.match(bounded[0].content[0].text, /transcript compaction/);
-  assert.match(bounded[0].content[0].text, /trajectory_read from startSequence=1/);
+  assert.ok(bounded.length <= 30, `length=${bounded.length}`);
+  const notice = bounded.find((message) => message.content?.[0]?.text?.includes('transcript compaction'));
+  assert.match(notice.content[0].text, /trajectory_read from startSequence=1/);
   const users = bounded.filter((message) => message.role === 'user');
   assert.ok(users.some((message) => message.content[0].text.includes('prompt 0')), 'initial prompt survives');
   const recentIds = bounded.filter((message) => message.role === 'toolResult').map((message) => message.toolCallId);
@@ -127,6 +131,41 @@ test('hard message cap drops oldest non-user messages and discloses the compacti
       assert.equal('details' in message, true);
     }
   }
+});
+
+test('token bound preserves one original task and one replaceable runtime status across many user messages', () => {
+  const messages = [user(0)];
+  for (let index = 1; index <= 300; index += 1) messages.push(user(index));
+  const status = runtimeStatusMessage({
+    state: 'GAME_OVER',
+    environmentActions: 42,
+    maxActions: 100,
+    terminalReason: 'game_over',
+    allowedNext: 'reset with a new plan or finish; gameplay actions are forbidden',
+  }, { outerTurns: 300, maxOuterTurns: 1000 });
+  let withStatus = messages;
+  for (let index = 0; index < 1000; index += 1) {
+    withStatus = replaceRuntimeStatus(withStatus, status.text, 1000 + index);
+  }
+  const estimate = (message) => message.content.reduce(
+    (total, block) => total + String(block.text || '').length,
+    0,
+  );
+  const bounded = boundTranscript(withStatus, {
+    recentToolResults: 6,
+    maxMessages: 400,
+    maxTokens: 1000,
+    estimateMessageTokens: estimate,
+  });
+  assert.ok(bounded.length <= 400);
+  assert.ok(bounded.reduce((total, message) => total + estimate(message), 0) <= 1000);
+  assert.ok(bounded.some((message) => message.content[0].text === 'prompt 0'));
+  assert.ok(bounded.some((message) => message.content[0].text === 'prompt 300'));
+  const statuses = bounded.filter((message) => message.content[0].text.startsWith('[AVO_RUNTIME_STATUS v1]'));
+  assert.equal(statuses.length, 1);
+  assert.match(statuses[0].content[0].text, /state=GAME_OVER/);
+  assert.match(statuses[0].content[0].text, /reset.*finish/i);
+  assert.doesNotMatch(statuses[0].content[0].text, /continue|exhaust/i);
 });
 
 test('overflow severing a call/output pair drops the orphaned output (provider-pairing invariant)', async () => {

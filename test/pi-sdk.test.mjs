@@ -19,14 +19,32 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'index.js'), `
       export class Agent {
         constructor(options) {
-          globalThis.__avoFakePi = { options, followUps: [], continues: 0 };
+          globalThis.__avoFakePi = { options, handoffs: [], continues: 0 };
+          this.options = options;
           this.state = { messages: [], errorMessage: undefined };
         }
         subscribe(listener) { globalThis.__avoFakePi.listener = listener; return () => {}; }
-        followUp(message) { globalThis.__avoFakePi.followUps.push(message); }
-        async prompt(prompt) { globalThis.__avoFakePi.prompt = prompt; }
-        async continue() { globalThis.__avoFakePi.continues += 1; }
+        async prompt(prompt) {
+          globalThis.__avoFakePi.prompt = prompt;
+          this.state.messages.push(
+            { role: 'user', content: [{ type: 'text', text: prompt }], timestamp: 0 },
+          );
+          globalThis.__avoFakePi.handoffs.push(structuredClone(this.options.transformContext(this.state.messages)));
+          this.state.messages.push(
+            { role: 'assistant', content: [{ type: 'text', text: 'initial response' }], timestamp: 1 },
+          );
+        }
+        async continue() {
+          globalThis.__avoFakePi.handoffs.push(structuredClone(this.options.transformContext(this.state.messages)));
+          globalThis.__avoFakePi.continues += 1;
+          this.state.messages.push({
+            role: 'assistant',
+            content: [{ type: 'text', text: 'bounded response ' + globalThis.__avoFakePi.continues }],
+            timestamp: globalThis.__avoFakePi.continues + 1,
+          });
+        }
       }
+      export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
     `);
 
     fs.writeFileSync(path.join(scoped, 'pi-ai', 'package.json'), JSON.stringify({
@@ -69,14 +87,27 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
 
     fs.copyFileSync('src/loop/pi-sdk.mjs', path.join(root, 'src', 'pi-sdk.mjs'));
     const module = await import(`${pathToFileURL(path.join(root, 'src', 'pi-sdk.mjs')).href}?test=${Date.now()}`);
+    const events = [];
     const loop = await module.createPiSdkLoop({
       provider: {
         baseUrl: 'http://localhost:9999/v1', model: 'test-model', reasoningEffort: 'max',
       },
-      maxOuterTurns: 3,
-    });
+      maxOuterTurns: 1001,
+    }, { onEvent: (event) => events.push(event) });
     const result = await loop.run({
       systemPrompt: 'system', initialPrompt: 'start', shouldStop: () => false,
+      runtimeStatus: () => {
+        const terminal = globalThis.__avoFakePi.continues === 999;
+        return {
+          state: terminal ? 'GAME_OVER' : 'ACTIVE',
+          environmentActions: globalThis.__avoFakePi.continues,
+          maxActions: 2000,
+          terminalReason: terminal ? 'game_over' : 'none',
+          allowedNext: terminal
+            ? 'reset with a new plan or finish; gameplay actions are forbidden'
+            : 'inspect evidence or take one legal gameplay action',
+        };
+      },
       tools: [{
         name: 'act', label: 'Act', description: 'test',
         parameters: {
@@ -92,15 +123,24 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     assert.equal(globalThis.__avoFakePi.options.initialState.thinkingLevel, 'max');
     assert.equal(globalThis.__avoFakePi.options.initialState.tools[0].parameters.kind, 'Object');
     assert.equal(globalThis.__avoFakePi.options.followUpMode, 'one-at-a-time');
-    assert.equal(globalThis.__avoFakePi.followUps.length, 2);
-    assert.ok(globalThis.__avoFakePi.followUps.every(
-      (message) => message.content === module.CONTINUATION_PROMPT,
-    ));
-    assert.match(module.CONTINUATION_PROMPT, /GAME_OVER.*reset.*finish/i);
-    assert.match(module.CONTINUATION_PROMPT, /budgets are ceilings/i);
-    assert.doesNotMatch(module.CONTINUATION_PROMPT, /until WIN or the action budget is exhausted/i);
-    assert.equal(globalThis.__avoFakePi.continues, 2);
+    assert.equal(globalThis.__avoFakePi.continues, 1000);
     assert.equal(globalThis.__avoFakePi.prompt, 'start');
+    assert.equal(globalThis.__avoFakePi.handoffs.length, 1001);
+    assert.ok(globalThis.__avoFakePi.handoffs.every((messages) => messages.length <= 160));
+    assert.ok(globalThis.__avoFakePi.handoffs.every((messages) => messages.some(
+      (message) => message.role === 'user'
+        && message.content.some((block) => block.text === 'start'),
+    )));
+    const users = result.messages.filter((message) => message.role === 'user');
+    assert.equal(users.length, 2, 'one original task plus one replaceable runtime status');
+    const statuses = users.filter((message) => message.content[0].text.startsWith('[AVO_RUNTIME_STATUS v1]'));
+    assert.equal(statuses.length, 1);
+    assert.match(statuses[0].content[0].text, /state=GAME_OVER/);
+    assert.match(statuses[0].content[0].text, /allowed_next=.*reset.*finish/i);
+    assert.doesNotMatch(statuses[0].content[0].text, /continue|exhaust/i);
+    const statusEvents = events.filter((event) => event.type === 'avo_runtime_status');
+    assert.equal(statusEvents.length, 1000);
+    assert.ok(statusEvents.every((event) => event.templateSha256 === module.RUNTIME_STATUS_TEMPLATE_SHA256));
     assert.equal(result.exhaustedOuterTurns, true);
     assert.match(result.error, /outer-turn budget exhausted/);
   } finally {

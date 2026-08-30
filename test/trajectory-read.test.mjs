@@ -89,7 +89,8 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     });
     assert.ok(messages.length > 160);
     const bounded = boundTranscript(messages, { recentToolResults: 6, maxMessages: 160 });
-    assert.match(bounded[0].content[0].text, /trajectory_read/);
+    assert.ok(bounded.some((message) => message.content?.[0]?.text?.includes('trajectory_read')));
+    assert.equal(bounded[0].content[0].text, 'solve', 'the original task remains first');
     assert.equal(JSON.stringify(bounded).includes(actionRef), false, 'the earliest action left the transcript');
 
     const restarted = new AvoArcAgent({

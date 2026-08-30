@@ -25,6 +25,7 @@ async function loadAdapterCapturing() {
       async prompt() {}
       async continue() {}
     }
+    export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
   `);
   fs.writeFileSync(path.join(scoped, 'pi-ai', 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-ai', type: 'module',
@@ -57,6 +58,10 @@ async function loadAdapterCapturing() {
   }, {});
   await loop.run({
     systemPrompt: 's', initialPrompt: 'p', shouldStop: () => true,
+    runtimeStatus: () => ({
+      state: 'WIN', environmentActions: 1, maxActions: 5,
+      terminalReason: 'win', allowedNext: 'none; run is terminal',
+    }),
     tools: [{
       name: 'fat_read',
       label: 'fat',

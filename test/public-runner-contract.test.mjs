@@ -142,6 +142,7 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         }
       }
     }
+    export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
     function find(grid, value) {
       for (let y = 0; y < grid.length; y += 1) {
         for (let x = 0; x < grid[y].length; x += 1) {

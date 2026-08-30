@@ -1,5 +1,17 @@
+import crypto from 'node:crypto';
+
 /** Production loop backed by the official Pi Agent Harness packages. */
-export const CONTINUATION_PROMPT = 'Re-ground in the latest exact evidence and durable memory. Use trajectory_read when an older observation or transition is no longer visible. If the current episode is active, choose one materially useful direct-interaction experiment. If state is GAME_OVER or ERROR, issue no gameplay action: choose reset with a new plan or finish. Action and turn budgets are ceilings, not targets.';
+export const RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
+state={state}
+environment_actions={environmentActions}/{maxActions}
+outer_turns={outerTurns}/{maxOuterTurns}
+terminal_reason={terminalReason}
+allowed_next={allowedNext}
+budget_policy=Action and turn budgets are ceilings. Finish when no useful valid experiment remains.`;
+export const RUNTIME_STATUS_TEMPLATE_SHA256 = crypto
+  .createHash('sha256')
+  .update(RUNTIME_STATUS_TEMPLATE)
+  .digest('hex');
 export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
   api: 'openai-responses',
   reasoning: true,
@@ -23,13 +35,14 @@ export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
 
 export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   let Agent;
+  let estimateTokens;
   let createModels;
   let createProvider;
   let envApiKeyAuth;
   let openAIResponsesApi;
   let Type;
   try {
-    ({ Agent } = await import('@earendil-works/pi-agent-core'));
+    ({ Agent, estimateTokens } = await import('@earendil-works/pi-agent-core'));
     ({ createModels, createProvider, envApiKeyAuth, Type } = await import('@earendil-works/pi-ai'));
     ({ openAIResponsesApi } = await import('@earendil-works/pi-ai/api/openai-responses.lazy'));
   } catch (error) {
@@ -78,6 +91,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   const transcriptOptions = {
     recentToolResults: positiveEnvInt('AVO_TRANSCRIPT_RECENT_TOOL_RESULTS', 6),
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
+    maxTokens: positiveEnvInt('AVO_TRANSCRIPT_MAX_TOKENS', 120_000),
+    estimateMessageTokens: estimateTokens,
   };
   // A single fat read (full lineage, a whole workspace file) kept verbatim in
   // the recent window can exceed the provider context by itself.
@@ -85,7 +100,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
 
   return {
     kind: 'pi-sdk',
-    async run({ systemPrompt, tools, initialPrompt, shouldStop }) {
+    async run({ systemPrompt, tools, initialPrompt, shouldStop, runtimeStatus }) {
+      if (typeof runtimeStatus !== 'function') {
+        throw new Error('Pi production loop requires a runtimeStatus callback');
+      }
       const workspaceMode = config.workspaceMode || 'files-only';
       const exposedTools = tools.filter((tool) => {
         if (workspaceMode === 'disabled' && tool.name.startsWith('workspace_')) return false;
@@ -151,10 +169,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           agent.state.errorMessage = undefined;
         }
         if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
-        agent.followUp({
-          role: 'user',
-          content: CONTINUATION_PROMPT,
-          timestamp: Date.now() + outerTurns,
+        const status = runtimeStatusMessage(runtimeStatus(), {
+          outerTurns,
+          maxOuterTurns: config.maxOuterTurns,
+        });
+        agent.state.messages = replaceRuntimeStatus(agent.state.messages, status.text, Date.now() + outerTurns);
+        onEvent({
+          type: 'avo_runtime_status',
+          templateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+          status: status.value,
         });
         await agent.continue();
         outerTurns += 1;
@@ -250,6 +273,57 @@ function positiveEnvInt(name, fallback) {
   return parsed;
 }
 
+export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns }) {
+  const value = {
+    state: statusField(status?.state, 'state'),
+    environmentActions: nonNegativeInteger(status?.environmentActions, 'environmentActions'),
+    maxActions: nonNegativeInteger(status?.maxActions, 'maxActions'),
+    outerTurns: nonNegativeInteger(outerTurns, 'outerTurns'),
+    maxOuterTurns: nonNegativeInteger(maxOuterTurns, 'maxOuterTurns'),
+    terminalReason: statusField(status?.terminalReason ?? 'none', 'terminalReason'),
+    allowedNext: statusField(status?.allowedNext, 'allowedNext'),
+  };
+  if (value.environmentActions > value.maxActions || value.outerTurns > value.maxOuterTurns) {
+    throw new Error('runtime status counters exceed their configured maxima');
+  }
+  const text = RUNTIME_STATUS_TEMPLATE
+    .replace('{state}', value.state)
+    .replace('{environmentActions}', String(value.environmentActions))
+    .replace('{maxActions}', String(value.maxActions))
+    .replace('{outerTurns}', String(value.outerTurns))
+    .replace('{maxOuterTurns}', String(value.maxOuterTurns))
+    .replace('{terminalReason}', value.terminalReason)
+    .replace('{allowedNext}', value.allowedNext);
+  return { text, value };
+}
+
+export function replaceRuntimeStatus(messages, text, timestamp = Date.now()) {
+  if (!Array.isArray(messages)) throw new Error('runtime status requires an agent message array');
+  return [
+    ...messages.filter((message) => !isRuntimeStatus(message)),
+    { role: 'user', content: [{ type: 'text', text }], timestamp },
+  ];
+}
+
+function statusField(input, name) {
+  const value = String(input ?? '').trim();
+  if (!value || /[\r\n]/.test(value)) throw new Error(`runtime status ${name} must be one non-empty line`);
+  return value;
+}
+
+function nonNegativeInteger(input, name) {
+  const value = Number(input);
+  if (!Number.isInteger(value) || value < 0) throw new Error(`runtime status ${name} must be a non-negative integer`);
+  return value;
+}
+
+function isRuntimeStatus(message) {
+  if (message?.role !== 'user') return false;
+  const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }];
+  return blocks.some((block) => block?.type === 'text'
+    && String(block.text || '').startsWith('[AVO_RUNTIME_STATUS v1]'));
+}
+
 /**
  * Bound the replayed transcript before every provider request.
  *
@@ -260,8 +334,16 @@ function positiveEnvInt(name, fallback) {
  * replaced by a reference to the append-only per-game trajectory when one
  * exists. Read-only non-environment tools can be called again with narrower bounds.
  */
-export function boundTranscript(messages, { recentToolResults = 6, maxMessages = 160 } = {}) {
+export function boundTranscript(messages, {
+  recentToolResults = 6,
+  maxMessages = 160,
+  maxTokens = 120_000,
+  estimateMessageTokens = fallbackEstimateTokens,
+} = {}) {
   if (!Array.isArray(messages)) return messages;
+  if (!Number.isInteger(maxMessages) || maxMessages <= 0) throw new Error('maxMessages must be a positive integer');
+  if (!Number.isInteger(maxTokens) || maxTokens <= 0) throw new Error('maxTokens must be a positive integer');
+  if (typeof estimateMessageTokens !== 'function') throw new Error('estimateMessageTokens must be a function');
   const toolIndices = [];
   const thinkingIndices = [];
   let lastAssistantIndex = -1;
@@ -277,17 +359,16 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
       thinkingIndices.push(index);
     }
   });
-  if (toolIndices.length <= recentToolResults && messages.length <= maxMessages && thinkingIndices.length === 0) {
+  if (toolIndices.length <= recentToolResults
+      && messages.length <= maxMessages
+      && thinkingIndices.length === 0
+      && transcriptTokens(messages, estimateMessageTokens) <= maxTokens) {
     return messages;
   }
 
   const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
-  const overflow = Math.max(0, messages.length - maxMessages);
   const kept = [];
-  let droppedOverflow = 0;
   messages.forEach((message, index) => {
-    const droppable = index < overflow && message?.role !== 'user';
-    if (droppable) { droppedOverflow += 1; return; }
     if (message?.role === 'toolResult' && !keepTools.has(index)) {
       kept.push({
         ...message,
@@ -307,18 +388,82 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
     }
     kept.push(message);
   });
-  if (droppedOverflow > 0) {
-    kept.unshift({
-      role: 'user',
-      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]` }],
-      timestamp: messages[0]?.timestamp ?? Date.now(),
-    });
+  if (kept.length <= maxMessages && transcriptTokens(kept, estimateMessageTokens) <= maxTokens) {
+    return repairToolPairs(kept);
   }
+  return hardBoundTranscript(kept, { maxMessages, maxTokens, estimateMessageTokens });
+}
+
+function hardBoundTranscript(messages, { maxMessages, maxTokens, estimateMessageTokens }) {
+  const taskIndex = messages.findIndex((message) => message?.role === 'user'
+    && !isRuntimeStatus(message)
+    && !isCompactionNotice(message));
+  let statusIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isRuntimeStatus(messages[index])) { statusIndex = index; break; }
+  }
+  const selected = new Set([taskIndex, statusIndex].filter((index) => index >= 0));
+  const provisionalNotice = compactionNotice(messages.length, messages[0]?.timestamp);
+  let tokens = transcriptTokens([...selected].map((index) => messages[index]), estimateMessageTokens)
+    + messageTokens(provisionalNotice, estimateMessageTokens);
+  if (selected.size + 1 > maxMessages || tokens > maxTokens) {
+    throw new Error('transcript bounds cannot preserve the original task and current runtime status');
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (selected.has(index)) continue;
+    if (selected.size + 1 >= maxMessages) break;
+    const candidateTokens = messageTokens(messages[index], estimateMessageTokens);
+    if (tokens + candidateTokens > maxTokens) break;
+    selected.add(index);
+    tokens += candidateTokens;
+  }
+  let retained = repairToolPairs(messages.filter((_message, index) => selected.has(index)));
+  const notice = compactionNotice(messages.length - retained.length, messages[0]?.timestamp);
+  const retainedTaskIndex = retained.indexOf(messages[taskIndex]);
+  const insertAt = retainedTaskIndex >= 0 ? retainedTaskIndex + 1 : 0;
+  retained.splice(insertAt, 0, notice);
+  if (retained.length > maxMessages
+      || transcriptTokens(retained, estimateMessageTokens) > maxTokens) {
+    throw new Error('transcript hard bound failed after compaction');
+  }
+  return retained;
+}
+
+function compactionNotice(dropped, timestamp = Date.now()) {
+  return {
+    role: 'user',
+    content: [{ type: 'text', text: `[transcript compaction: ${dropped} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]` }],
+    timestamp,
+  };
+}
+
+function isCompactionNotice(message) {
+  if (message?.role !== 'user') return false;
+  const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }];
+  return blocks.some((block) => block?.type === 'text'
+    && String(block.text || '').startsWith('[transcript compaction:'));
+}
+
+function transcriptTokens(messages, estimateMessageTokens) {
+  return messages.reduce((total, message) => total + messageTokens(message, estimateMessageTokens), 0);
+}
+
+function messageTokens(message, estimateMessageTokens) {
+  const value = Number(estimateMessageTokens(message));
+  if (!Number.isFinite(value) || value < 0) throw new Error('message token estimator returned an invalid value');
+  return Math.ceil(value);
+}
+
+function fallbackEstimateTokens(message) {
+  return Math.ceil(JSON.stringify(message?.content ?? '').length / 4);
+}
+
+function repairToolPairs(messages) {
   // Overflow dropping can sever an assistant turn from its trailing tool
   // results; a function_call_output without its function_call is a hard
   // provider 400, so orphaned outputs are dropped as part of the repair.
   const pairedCallIds = new Set();
-  for (const message of kept) {
+  for (const message of messages) {
     if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
     for (const block of message.content) {
       if (block?.type === 'toolCall' && typeof block.id === 'string') {
@@ -326,7 +471,7 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
       }
     }
   }
-  return kept.filter((message) => message?.role !== 'toolResult'
+  return messages.filter((message) => message?.role !== 'toolResult'
     || pairedCallIds.has(String(message.toolCallId || '').split('|')[0]));
 }
 

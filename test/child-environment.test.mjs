@@ -31,6 +31,7 @@ function hostileSource() {
     AVO_RUN_CLASS: 'cold-start',
     AVO_GAME_ATTEMPTS: '3',
     AVO_TRANSCRIPT_MAX_MESSAGES: '160',
+    AVO_TRANSCRIPT_MAX_TOKENS: '120000',
     AVO_MISSION_CONTROL_ACCESS_TOKEN: 'control-secret',
     GITHUB_TOKEN: 'github-secret',
     AWS_SECRET_ACCESS_KEY: 'cloud-secret',
@@ -57,6 +58,7 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   assert.equal(env.AVO_RUN_CLASS, 'cold-start');
   assert.equal(env.AVO_GAME_ATTEMPTS, '3');
   assert.equal(env.AVO_TRANSCRIPT_MAX_MESSAGES, '160');
+  assert.equal(env.AVO_TRANSCRIPT_MAX_TOKENS, '120000');
   for (const key of [
     'AVO_MISSION_CONTROL_ACCESS_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY',
     'NPM_TOKEN', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PYTHONPATH', 'LD_PRELOAD',

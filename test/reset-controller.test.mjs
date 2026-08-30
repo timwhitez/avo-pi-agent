@@ -210,11 +210,50 @@ test('GAME_OVER is episode-terminal but still permits finish without spending th
     await agent.initialize();
     assert.equal(episodeState(agent.frame), 'GAME_OVER');
     assert.equal(agent.isDone(), false, 'run stays open so reset or finish remains reachable');
+    assert.deepEqual(agent.runtimeStatus(), {
+      state: 'GAME_OVER',
+      environmentActions: 0,
+      maxActions: 10,
+      terminalReason: 'game_over',
+      allowedNext: 'reset with a new plan or finish; gameplay actions are forbidden',
+    });
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
     const finished = await tools.finish.execute({ summary: 'terminal episode; stop this run' });
     assert.equal(finished.terminate, true);
     assert.equal(agent.isDone(), true);
     assert.equal(environmentCalls, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ACTIVE permits structured finish without forcing budget exhaustion', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-active-finish-'));
+  let environmentSteps = 0;
+  const agent = new AvoArcAgent({
+    gameId: 'active-finish',
+    environment: {
+      async start() { return frame({ state: 'PLAYING' }); },
+      async step() { environmentSteps += 1; throw new Error('must not step'); },
+      async scorecard() { return null; },
+    },
+    loop: inertLoop,
+    config: {
+      maxActions: 10,
+      stallWindow: 8,
+      memoryDir: path.join(root, 'memory'),
+      workspaceDir: path.join(root, 'workspace'),
+    },
+  });
+  try {
+    await agent.initialize();
+    assert.match(agent.runtimeStatus().allowedNext, /finish when no useful valid experiment remains/);
+    const finish = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool])).finish;
+    const result = await finish.execute({ summary: 'no useful valid experiment remains' });
+    assert.equal(result.terminate, true);
+    assert.equal(agent.isDone(), true);
+    assert.equal(agent.actions, 0);
+    assert.equal(environmentSteps, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -244,6 +283,8 @@ test('ERROR rejects gameplay while keeping reset and finish reachable', async ()
     });
     await recovering.initialize();
     const recoveringTools = Object.fromEntries(recovering.tools().map((tool) => [tool.name, tool]));
+    assert.equal(recovering.runtimeStatus().terminalReason, 'environment_error');
+    assert.match(recovering.runtimeStatus().allowedNext, /reset.*finish/);
     const rejected = await recoveringTools.act.execute({ action: 'ACTION1', reasoning: 'must not forward' });
     assert.equal(rejected.details.code, 'EPISODE_TERMINAL');
     assert.equal(rejected.details.telemetry.terminalRejectedCommands, 1);

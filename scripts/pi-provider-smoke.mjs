@@ -59,6 +59,13 @@ try {
     initialPrompt: 'Perform the required diagnostic tool call now.',
     tools,
     shouldStop: () => state.done,
+    runtimeStatus: () => ({
+      state: state.done ? 'WIN' : 'ACTIVE',
+      environmentActions: 0,
+      maxActions: 1,
+      terminalReason: state.done ? 'diagnostic_complete' : 'none',
+      allowedNext: state.done ? 'none; diagnostic is terminal' : 'call diagnostic_ack exactly once',
+    }),
   });
   completed = true;
   const ok = state.done && toolCalls === 1 && !result.error;

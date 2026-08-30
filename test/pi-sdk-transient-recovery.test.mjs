@@ -40,6 +40,7 @@ async function loadLoopWith(script) {
     export const __typeboxShim = true;
     export function toTypeBoxSafe() {}
     export const __took = [];
+    export const estimateTokens = (message) => Math.ceil(JSON.stringify(message.content || '').length / 4);
   `);
   // real pi-sdk imports `Type` from pi-ai and Agent from pi-agent-core; the
   // TypeBox conversion lives in pi-ai's namespace in production. Reuse the
@@ -99,6 +100,13 @@ async function runLoop(steps, stopAfterContinues) {
       tools: [],
       initialPrompt: 'go',
       shouldStop: () => (globalThis.__avoPlan.continues >= globalThis.__avoPlan.stopAfter) || ++guard > 200,
+      runtimeStatus: () => ({
+        state: 'ACTIVE',
+        environmentActions: globalThis.__avoPlan.continues,
+        maxActions: 100,
+        terminalReason: 'none',
+        allowedNext: 'inspect evidence or take one legal gameplay action',
+      }),
     });
     return { result, continues: globalThis.__avoPlan.continues };
   } finally {

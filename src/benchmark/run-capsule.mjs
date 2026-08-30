@@ -12,8 +12,8 @@ import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
-  CONTINUATION_PROMPT,
   PI_MODEL_CAPABILITY_MANIFEST,
+  RUNTIME_STATUS_TEMPLATE_SHA256,
   boundTranscript,
   createPiSdkLoop,
   effectivePiSystemPrompt,
@@ -249,7 +249,7 @@ export function buildRunCapsule({
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      continuationSha256: sha256(CONTINUATION_PROMPT),
+      runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
@@ -260,6 +260,7 @@ export function buildRunCapsule({
       policySha256: sha256(boundTranscript.toString()),
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
+      maxTokens: positiveInteger(env.AVO_TRANSCRIPT_MAX_TOKENS, 120_000, 'AVO_TRANSCRIPT_MAX_TOKENS'),
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
     modelInterface: {
@@ -501,7 +502,7 @@ export function verifyRunCapsuleExecution({
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      continuationSha256: sha256(CONTINUATION_PROMPT),
+      runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
@@ -512,6 +513,7 @@ export function verifyRunCapsuleExecution({
       policySha256: sha256(boundTranscript.toString()),
       recentToolResults: positiveInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6, 'AVO_TRANSCRIPT_RECENT_TOOL_RESULTS'),
       maxMessages: positiveInteger(env.AVO_TRANSCRIPT_MAX_MESSAGES, 160, 'AVO_TRANSCRIPT_MAX_MESSAGES'),
+      maxTokens: positiveInteger(env.AVO_TRANSCRIPT_MAX_TOKENS, 120_000, 'AVO_TRANSCRIPT_MAX_TOKENS'),
       maxToolResultChars: positiveInteger(env.AVO_TOOL_RESULT_MAX_CHARS, 24_000, 'AVO_TOOL_RESULT_MAX_CHARS'),
     },
   };

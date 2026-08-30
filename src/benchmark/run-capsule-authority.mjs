@@ -107,7 +107,7 @@ export function evaluatePublicRunCapsule(value, {
   const prompts = recordOrEmpty(capsule.prompts);
   requireCondition(isSha256(prompts.systemSha256), 'run capsule system-prompt digest is absent', reasons);
   requireCondition(isSha256(prompts.initialTemplateSha256), 'run capsule initial-prompt digest is absent', reasons);
-  requireCondition(isSha256(prompts.continuationSha256), 'run capsule continuation-prompt digest is absent', reasons);
+  requireCondition(isSha256(prompts.runtimeStatusTemplateSha256), 'run capsule runtime-status template digest is absent', reasons);
   requireCondition(prompts.developerPresent === false && prompts.developerSha256 === null, 'run capsule developer-prompt declaration is malformed', reasons);
   requireCondition(isSha256(capsule.toolSchemaSha256), 'run capsule tool-schema digest is absent', reasons);
   requireCondition(isRecord(capsule.nodeDependencies), 'run capsule Node dependency manifest is absent', reasons);
@@ -136,7 +136,7 @@ export function evaluatePublicRunCapsule(value, {
   );
   const transcript = recordOrEmpty(capsule.transcript);
   requireCondition(isSha256(transcript.policySha256), 'run capsule transcript-policy digest is absent', reasons);
-  requireCondition(['recentToolResults', 'maxMessages', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
+  requireCondition(['recentToolResults', 'maxMessages', 'maxTokens', 'maxToolResultChars'].every((name) => isPositiveInteger(transcript[name])), 'run capsule transcript bounds are malformed', reasons);
   const runtime = recordOrEmpty(capsule.runtime);
   requireCondition(/^v\d+\.\d+\.\d+/.test(String(runtime.node || '')), 'run capsule Node runtime version is absent', reasons);
   requireCondition(/^\d+\.\d+\.\d+/.test(String(runtime.npm || '')), 'run capsule npm runtime version is absent', reasons);

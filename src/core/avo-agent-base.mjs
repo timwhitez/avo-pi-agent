@@ -122,6 +122,53 @@ export class AvoArcAgent {
     return this.finished || this.actions >= this.config.maxActions || isWin(this.frame);
   }
 
+  runtimeStatus() {
+    const state = episodeState(this.frame);
+    if (this.finished) {
+      return {
+        state,
+        environmentActions: this.actions,
+        maxActions: this.config.maxActions,
+        terminalReason: 'explicit_finish',
+        allowedNext: 'none; run is terminal',
+      };
+    }
+    if (this.actions >= this.config.maxActions) {
+      return {
+        state,
+        environmentActions: this.actions,
+        maxActions: this.config.maxActions,
+        terminalReason: 'action_budget_exhausted',
+        allowedNext: 'none; run is terminal',
+      };
+    }
+    if (state === 'WIN') {
+      return {
+        state,
+        environmentActions: this.actions,
+        maxActions: this.config.maxActions,
+        terminalReason: 'win',
+        allowedNext: 'none; run is terminal',
+      };
+    }
+    if (state === 'GAME_OVER' || state === 'ERROR') {
+      return {
+        state,
+        environmentActions: this.actions,
+        maxActions: this.config.maxActions,
+        terminalReason: state === 'GAME_OVER' ? 'game_over' : 'environment_error',
+        allowedNext: 'reset with a new plan or finish; gameplay actions are forbidden',
+      };
+    }
+    return {
+      state,
+      environmentActions: this.actions,
+      maxActions: this.config.maxActions,
+      terminalReason: 'none',
+      allowedNext: 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful',
+    };
+  }
+
   objectiveState() {
     return objectiveVector({
       frame: this.frame,
@@ -348,15 +395,12 @@ export class AvoArcAgent {
       {
         name: 'finish',
         label: 'Finish the current run',
-        description: 'Finish after WIN, GAME_OVER, ERROR, or action-budget exhaustion. On GAME_OVER, choose either finish or the separate reset controller.',
+        description: 'Explicitly finish after WIN, GAME_OVER, ERROR, action-budget exhaustion, or when no useful valid experiment remains. On GAME_OVER, choose either finish or the separate reset controller.',
         parameters: {
           type: 'object', required: ['summary'],
           properties: { summary: { type: 'string' } }, additionalProperties: false,
         },
         execute: async ({ summary }) => {
-          if (episodeState(this.frame) === 'ACTIVE' && this.actions < this.config.maxActions) {
-            return this.toolResult('Rejected: the current episode is active and the action budget remains.', { rejected: true });
-          }
           this.finished = true;
           this.memory.merge({ notes: [`Final summary: ${summary}`] });
           return this.toolResult('Run finished.', { summary }, true);
@@ -759,7 +803,7 @@ AVO contract:
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
 5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
-7. Continue through every level while the episode is active. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
+7. Continue through every level while useful valid experiments remain. You may explicitly finish an active episode only when no useful valid experiment remains. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
 You have ARC interaction, domain knowledge, structured memory, an optional hypothesis lineage, objective evaluation, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
   }
@@ -767,12 +811,13 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
   async run() {
     if (!this.frame) await this.initialize();
     const initialEvidence = this.evidenceLedger.at(-1)?.id;
-    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While the episode is active, pursue WIN without spending actions merely because budget remains. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe()}`;
+    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe()}`;
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
       tools: this.tools(),
       initialPrompt,
       shouldStop: () => this.isDone(),
+      runtimeStatus: () => this.runtimeStatus(),
     });
     const forwardingLifecycle = await this.forwardingLifecycleTelemetry();
     return {

@@ -161,7 +161,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: '8'.repeat(64),
-      continuationSha256: '9'.repeat(64),
+      runtimeStatusTemplateSha256: '9'.repeat(64),
     },
     tools: {
       schemaSha256: 'a'.repeat(64),
@@ -172,6 +172,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       policySha256: 'b'.repeat(64),
       recentToolResults: 6,
       maxMessages: 160,
+      maxTokens: 120_000,
       maxToolResultChars: 24_000,
     },
     modelInterface: {

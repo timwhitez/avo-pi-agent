@@ -119,12 +119,15 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.equal(canonicalJson({ z: 1, a: { y: 2, b: 3 } }), '{"a":{"b":3,"y":2},"z":1}');
   const baseline = capsule();
   const transcript = capsule({ env: { AVO_TRANSCRIPT_MAX_MESSAGES: '80' } });
+  const tokenBound = capsule({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '90000' } });
   const warm = capsule({
     initialState: initialState({ mode: 'warm-start', snapshotName: 'snapshot-a' }),
   });
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(tokenBound.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
+  assert.equal(tokenBound.definition.transcript.maxTokens, 90_000);
   assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
   for (const file of [
     'src/core/durable-avo-agent.mjs',
