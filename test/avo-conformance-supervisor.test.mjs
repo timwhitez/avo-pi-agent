@@ -99,3 +99,51 @@ test('objective progress closes the active episode and permits a new independent
   assert.equal(second.stalled, true);
   assert.notEqual(second.episodeId, first.episodeId);
 });
+
+test('stall detection never joins observations across a reset episode boundary', () => {
+  const supervisor = new StallSupervisor(4);
+  for (let index = 1; index <= 3; index += 1) {
+    supervisor.observe(event(index, { episodeId: 'episode-000001' }));
+  }
+  supervisor.observe(event(4, { action: 'RESET', episodeId: 'episode-000002' }));
+  supervisor.observe(event(5, { episodeId: 'episode-000002' }));
+  supervisor.observe(event(6, { episodeId: 'episode-000002' }));
+  assert.equal(
+    supervisor.status({ legalActions: ['ACTION1', 'ACTION2'] }).stalled,
+    false,
+    'pre-reset evidence must not complete the new episode window',
+  );
+
+  supervisor.observe(event(7, { episodeId: 'episode-000002' }));
+  const currentEpisode = supervisor.status({ legalActions: ['ACTION1', 'ACTION2'] });
+  assert.equal(currentEpisode.stalled, true);
+  assert.deepEqual(currentEpisode.evidenceRefs, [
+    'evidence-4', 'evidence-5', 'evidence-6', 'evidence-7',
+  ]);
+});
+
+test('repeated actions are not a cycle when their typed transitions differ', () => {
+  const supervisor = new StallSupervisor(4);
+  for (let index = 1; index <= 4; index += 1) {
+    supervisor.observe(event(index, {
+      afterHash: `state-${index}`,
+      transitionId: `transition-${index}`,
+    }));
+  }
+  assert.equal(
+    supervisor.status({ legalActions: ['ACTION1', 'ACTION2'] }).stalled,
+    false,
+  );
+
+  const repeated = new StallSupervisor(4);
+  for (let index = 1; index <= 4; index += 1) {
+    repeated.observe(event(index, {
+      afterHash: `state-${index}`,
+      transitionId: `transition-${index % 2}`,
+    }));
+  }
+  assert.match(
+    repeated.status({ legalActions: ['ACTION1', 'ACTION2'] }).reason,
+    /transition cycle/,
+  );
+});

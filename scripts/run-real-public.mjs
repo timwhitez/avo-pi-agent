@@ -310,6 +310,7 @@ try {
   const loopAttestation = validateProductionLoops(selected.records, games.length, {
     allowUnavailableControllerTelemetry: resumeDecision.runClass === 'diagnostic-migrated',
     allowLegacyLevelMetadata: resumeDecision.runClass === 'diagnostic-migrated',
+    allowUnavailableTrajectoryEvidence: resumeDecision.runClass === 'diagnostic-migrated',
   });
 
   stage.value = 'game-completeness';

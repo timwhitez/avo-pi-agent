@@ -125,6 +125,15 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
+  assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
+  for (const file of [
+    'src/core/durable-avo-agent.mjs',
+    'src/core/evidence-store.mjs',
+    'src/core/observation.mjs',
+    'src/core/supervisor.mjs',
+  ]) {
+    assert.ok(RUN_CAPSULE_COMPONENT_FILES.includes(file), `${file} is outside the run capsule`);
+  }
 });
 
 test('cold starts create empty run-owned state while warm starts name and hash input state', () => {

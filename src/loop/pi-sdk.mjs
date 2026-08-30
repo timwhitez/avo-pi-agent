@@ -1,5 +1,5 @@
 /** Production loop backed by the official Pi Agent Harness packages. */
-export const CONTINUATION_PROMPT = 'Re-ground in the latest exact evidence and durable memory. If the current episode is active, choose one materially useful direct-interaction experiment. If state is GAME_OVER or ERROR, issue no gameplay action: choose reset with a new plan or finish. Action and turn budgets are ceilings, not targets.';
+export const CONTINUATION_PROMPT = 'Re-ground in the latest exact evidence and durable memory. Use trajectory_read when an older observation or transition is no longer visible. If the current episode is active, choose one materially useful direct-interaction experiment. If state is GAME_OVER or ERROR, issue no gameplay action: choose reset with a new plan or finish. Action and turn budgets are ceilings, not targets.';
 export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
   api: 'openai-responses',
   reasoning: true,
@@ -250,8 +250,6 @@ function positiveEnvInt(name, fallback) {
   return parsed;
 }
 
-const ELIDED_TOOL_OUTPUT = '[older tool output elided to stay within the model context window; durable memory, the knowledge tool and the scratch workspace retain the details]';
-
 /**
  * Bound the replayed transcript before every provider request.
  *
@@ -259,8 +257,8 @@ const ELIDED_TOOL_OUTPUT = '[older tool output elided to stay within the model c
  * tool result embeds a full textual frame. Replaying every historical payload
  * eventually exceeds the provider context window (observed as
  * context_too_large after roughly twenty actions), so older tool outputs are
- * elided in favor of the durable per-game memory that the agent already
- * recovers on every turn.
+ * replaced by a reference to the append-only per-game trajectory when one
+ * exists. Non-environment tools can be called again with narrower bounds.
  */
 export function boundTranscript(messages, { recentToolResults = 6, maxMessages = 160 } = {}) {
   if (!Array.isArray(messages)) return messages;
@@ -293,7 +291,7 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
     if (message?.role === 'toolResult' && !keepTools.has(index)) {
       kept.push({
         ...message,
-        content: [{ type: 'text', text: ELIDED_TOOL_OUTPUT }],
+        content: [{ type: 'text', text: elidedToolOutput(message) }],
       });
       return;
     }
@@ -312,7 +310,7 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
   if (droppedOverflow > 0) {
     kept.unshift({
       role: 'user',
-      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; recover any needed detail from durable memory before acting]` }],
+      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and re-call other tools when needed]` }],
       timestamp: messages[0]?.timestamp ?? Date.now(),
     });
   }
@@ -330,4 +328,11 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
   }
   return kept.filter((message) => message?.role !== 'toolResult'
     || pairedCallIds.has(String(message.toolCallId || '').split('|')[0]));
+}
+
+function elidedToolOutput(message) {
+  const ref = String(message?.details?.evidenceRef || '');
+  return ref
+    ? `[older tool output elided; exact environment evidence remains available via trajectory_read ref=${ref}]`
+    : '[older tool output elided; no environment evidence ref was attached, so re-call this tool with narrower bounds if its result is needed]';
 }

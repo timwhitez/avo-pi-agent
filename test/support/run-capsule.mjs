@@ -11,6 +11,20 @@ const ARC_RUNTIME = Object.freeze({
   officialPackageAttested: true,
 });
 
+export function trajectoryEvidenceFixture(overrides = {}) {
+  return Object.freeze({
+    schema: 'avo.trajectory-evidence.v1',
+    identitySchema: 'avo.episode-observation.v1',
+    complete: true,
+    eventCount: 1,
+    highWaterSequence: 1,
+    firstEvidenceRef: 'evidence-000001-111111111111',
+    lastEvidenceRef: 'evidence-000001-111111111111',
+    rootSha256: '2'.repeat(64),
+    ...overrides,
+  });
+}
+
 export function scorecardCoverageFixture({
   versionedGameIds = ['g1-v1'],
   score = 0,

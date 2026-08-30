@@ -2,7 +2,6 @@ import path from 'node:path';
 import { AvoArcAgent as BaseAvoArcAgent } from './avo-agent-base.mjs';
 import { DurableMemory } from './durable-memory.mjs';
 import { EvidenceStore } from './evidence-store.mjs';
-import { configuredEvidenceRetainRecent } from './evidence-retention.mjs';
 import { normalizeCandidate } from './evaluator.mjs';
 import { frameHash } from './observation.mjs';
 
@@ -21,33 +20,22 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     ).load();
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
-    this.compactEvidence();
+    this.attemptId = `attempt-${String(this.evidenceSequence + 1).padStart(6, '0')}`;
   }
 
-  recordEvidence({ type, frame, action = null, data = {}, reasoning = '', beforeHash = null, levelDelta = 0 }) {
-    const event = this.evidenceStore.append({
-      type,
-      action,
-      data: data && typeof data === 'object' ? structuredClone(data) : {},
-      reasoning: String(reasoning || '').slice(0, 1000),
-      beforeHash,
-      afterHash: frameHash(frame),
-      frameHash: frameHash(frame),
-      levelsCompleted: Number(frame?.levelsCompleted || 0),
-      totalLevels: frame?.totalLevels ?? null,
-      levelDelta: Number(levelDelta || 0),
-      state: String(frame?.state || 'UNKNOWN'),
-      availableActions: Array.isArray(frame?.availableActions) ? frame.availableActions.slice() : [],
-      actionIndex: this.actions,
-      fullReset: Boolean(frame?.fullReset),
-      episodeId: this.episodeId(),
-      createdAt: new Date().toISOString(),
-    });
+  recordEvidence(input) {
+    const transient = super.recordEvidence(input);
+    const event = this.evidenceStore.append(transient);
+    if (event.id !== transient.id || event.digest !== transient.digest) {
+      throw new Error('durable trajectory identity differs from the production event');
+    }
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
-    const retainRecent = configuredEvidenceRetainRecent(this.config.evidenceRetainRecent);
-    if (this.evidenceLedger.length > Math.max(4000, retainRecent * 2)) this.compactEvidence();
     return event;
+  }
+
+  trajectoryEvidence() {
+    return this.evidenceStore.summary();
   }
 
   proposeCandidate(input) {
@@ -66,7 +54,6 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
         uniqueStates: this.uniqueStates.size,
       },
     });
-    this.compactEvidence();
     return this.toolResult(
       `Proposal ${proposal.id} persisted before experiment. Execute discriminating actions, then call candidate_evaluate with post-proposal evidence references.`,
       { proposal },
@@ -95,7 +82,6 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
         failedHypotheses: [`Rejected attempt ${record.id}: ${record.candidate.hypothesis}. ${evaluation.reasons.join('; ')}`],
       });
     }
-    this.compactEvidence();
     return this.toolResult(
       record.accepted
         ? `Proposal ${proposalId} passed external correctness and candidate ${record.id} was committed. Objective vector=${JSON.stringify(evaluation.scoreVector.named)}.`
@@ -104,14 +90,4 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     );
   }
 
-  compactEvidence() {
-    if (!this.evidenceStore) return { removed: 0, retained: 0 };
-    const result = this.evidenceStore.compact({
-      protectedIds: this.memory.protectedEvidenceIds(),
-      retainRecent: configuredEvidenceRetainRecent(this.config.evidenceRetainRecent),
-    });
-    this.evidenceLedger = this.evidenceStore.events.slice();
-    this.evidenceSequence = this.evidenceStore.sequence;
-    return result;
-  }
 }

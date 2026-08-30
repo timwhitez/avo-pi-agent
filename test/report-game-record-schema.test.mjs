@@ -9,6 +9,7 @@ import {
   validateCompleteGameSet,
   validateProductionLoops,
 } from '../src/benchmark/report.mjs';
+import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
 
 function valid(overrides = {}) {
   return {
@@ -19,6 +20,7 @@ function valid(overrides = {}) {
     actions: 0,
     won: false,
     loop: 'pi-sdk',
+    trajectoryEvidence: trajectoryEvidenceFixture(),
     ...overrides,
   };
 }
@@ -282,6 +284,35 @@ test('production rejects missing or ambiguous legacy level metadata while preser
   assert.throws(
     () => validateProductionLoops([missing], 1, { allowUnavailableControllerTelemetry: true }),
     /requires explicit totalLevels/,
+  );
+});
+
+test('production requires complete content-addressed trajectory evidence', () => {
+  const current = normalizeGameRecord(valid());
+  assert.equal(current.trajectoryEvidence.complete, true);
+  assert.equal(validateProductionLoops([current], 1, {
+    allowUnavailableControllerTelemetry: true,
+  }).trajectoryEvidence, 'content-addressed-v1');
+
+  const missing = valid();
+  delete missing.trajectoryEvidence;
+  assert.throws(
+    () => validateProductionLoops([normalizeGameRecord(missing)], 1, {
+      allowUnavailableControllerTelemetry: true,
+    }),
+    /requires complete trajectory evidence/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      trajectoryEvidence: trajectoryEvidenceFixture({ rootSha256: 'not-a-hash' }),
+    })),
+    /trajectoryEvidence root hash/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      trajectoryEvidence: trajectoryEvidenceFixture({ lastEvidenceRef: 'evidence-000002-aaaaaaaaaaaa' }),
+    })),
+    /reference coverage/,
   );
 });
 

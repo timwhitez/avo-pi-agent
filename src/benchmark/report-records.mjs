@@ -4,6 +4,9 @@ const SAFE_VERSIONED_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const SAFE_SHORT_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_]{0,63}$/;
 const SAFE_STATE = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/;
 const SAFE_EPISODE_ID = /^episode-[0-9]{6}$/;
+const TRAJECTORY_EVIDENCE_SCHEMA = 'avo.trajectory-evidence.v1';
+const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
+const SAFE_EVIDENCE_REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 
 export function extractGameRecords(report) {
   const records = [];
@@ -116,6 +119,10 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     invalidRecord(sourcePath, 'won requires levelsCompleted to equal known totalLevels');
   }
   const executions = normalizeExecutions(value.executions, versionedGameId, sourcePath);
+  const trajectoryEvidence = normalizeTrajectoryEvidence(
+    firstOwn(value, ['trajectoryEvidence', 'trajectory_evidence']),
+    sourcePath,
+  );
 
   return Object.freeze({
     gameId,
@@ -137,6 +144,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     error: optionalString(value.error, 'error', sourcePath),
     loop: optionalString(value.loop, 'loop', sourcePath),
     executions,
+    trajectoryEvidence,
     sourcePath,
   });
 }
@@ -144,6 +152,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
 export function validateProductionLoops(records, expectedGames, {
   allowUnavailableControllerTelemetry = false,
   allowLegacyLevelMetadata = false,
+  allowUnavailableTrajectoryEvidence = false,
 } = {}) {
   if (!Array.isArray(records) || records.length !== expectedGames) {
     throw new Error(`production loop attestation requires exactly ${expectedGames} game records; found ${records?.length ?? 0}`);
@@ -176,6 +185,12 @@ export function validateProductionLoops(records, expectedGames, {
   if (invalidLevelMetadata.length && !allowLegacyLevelMetadata) {
     throw new Error(`production loop attestation requires explicit totalLevels metadata: ${JSON.stringify(invalidLevelMetadata)}`);
   }
+  const unavailableTrajectory = records
+    .filter((record) => record.trajectoryEvidence?.complete !== true)
+    .map((record) => record.gameId);
+  if (unavailableTrajectory.length && !allowUnavailableTrajectoryEvidence) {
+    throw new Error(`production loop attestation requires complete trajectory evidence: ${unavailableTrajectory.join(', ')}`);
+  }
   return {
     complete: true,
     attestedCount: records.length,
@@ -183,6 +198,7 @@ export function validateProductionLoops(records, expectedGames, {
     controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
     terminalLifecycleTelemetry: unavailableLifecycle.length ? 'unavailable-diagnostic' : 'complete',
     levelMetadata: invalidLevelMetadata.length ? 'legacy-diagnostic' : 'totalLevels-v2',
+    trajectoryEvidence: unavailableTrajectory.length ? 'unavailable-diagnostic' : 'content-addressed-v1',
   };
 }
 
@@ -395,6 +411,69 @@ function normalizeExecutions(value, versionedGameId, sourcePath) {
     next.set(execution.executionIdSha256, expected + 1);
   }
   return Object.freeze(executions);
+}
+
+function normalizeTrajectoryEvidence(value, sourcePath) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)
+      || value.schema !== TRAJECTORY_EVIDENCE_SCHEMA
+      || value.identitySchema !== EPISODE_OBSERVATION_SCHEMA
+      || typeof value.complete !== 'boolean') {
+    invalidRecord(sourcePath, 'trajectoryEvidence schema or identity semantics are invalid');
+  }
+  if (!Object.hasOwn(value, 'eventCount') || !Object.hasOwn(value, 'highWaterSequence')) {
+    invalidRecord(sourcePath, 'trajectoryEvidence sequence coverage is absent');
+  }
+  const eventCount = optionalCount(value.eventCount, 'trajectoryEvidence.eventCount', sourcePath);
+  const highWaterSequence = optionalCount(
+    value.highWaterSequence,
+    'trajectoryEvidence.highWaterSequence',
+    sourcePath,
+  );
+  if (eventCount > highWaterSequence || (value.complete && eventCount !== highWaterSequence)) {
+    invalidRecord(sourcePath, 'trajectoryEvidence sequence coverage is inconsistent');
+  }
+  if (value.complete && eventCount === 0) {
+    invalidRecord(sourcePath, 'complete trajectoryEvidence must contain the initial observation');
+  }
+  const firstEvidenceRef = optionalEvidenceRef(value.firstEvidenceRef, 'firstEvidenceRef', sourcePath);
+  const lastEvidenceRef = optionalEvidenceRef(value.lastEvidenceRef, 'lastEvidenceRef', sourcePath);
+  if (eventCount === 0
+    ? firstEvidenceRef !== null || lastEvidenceRef !== null
+    : firstEvidenceRef === null || lastEvidenceRef === null) {
+    invalidRecord(sourcePath, 'trajectoryEvidence reference bounds are inconsistent');
+  }
+  if (value.complete && eventCount > 0
+      && (evidenceSequence(firstEvidenceRef) !== 1
+        || evidenceSequence(lastEvidenceRef) !== highWaterSequence)) {
+    invalidRecord(sourcePath, 'complete trajectoryEvidence reference coverage is inconsistent');
+  }
+  const rootSha256 = String(value.rootSha256 || '');
+  if (!/^[a-f0-9]{64}$/.test(rootSha256)) {
+    invalidRecord(sourcePath, 'trajectoryEvidence root hash is malformed');
+  }
+  return Object.freeze({
+    schema: TRAJECTORY_EVIDENCE_SCHEMA,
+    identitySchema: EPISODE_OBSERVATION_SCHEMA,
+    complete: value.complete,
+    eventCount,
+    highWaterSequence,
+    firstEvidenceRef,
+    lastEvidenceRef,
+    rootSha256,
+  });
+}
+
+function evidenceSequence(ref) {
+  return Number.parseInt(String(ref).split('-')[1] || '', 10);
+}
+
+function optionalEvidenceRef(value, field, sourcePath) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !SAFE_EVIDENCE_REF.test(value)) {
+    invalidRecord(sourcePath, `trajectoryEvidence ${field} is malformed`);
+  }
+  return value;
 }
 
 function requireState(value, sourcePath) {

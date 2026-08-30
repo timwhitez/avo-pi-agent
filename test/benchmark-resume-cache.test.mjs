@@ -14,6 +14,7 @@ import {
 } from '../src/benchmark/resume-cache.mjs';
 import { canonicalJson } from '../src/benchmark/run-capsule.mjs';
 import { hashExecutionId, normalizeScorecardSnapshot } from '../src/benchmark/scorecard-evidence.mjs';
+import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
 
 function sandbox() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-resume-'));
@@ -38,6 +39,7 @@ const record = (gameId, overrides = {}) => ({
   won: false,
   error: null,
   loop: 'pi-sdk',
+  trajectoryEvidence: trajectoryEvidenceFixture(),
   executions: [{
     versionedGameId: `${gameId}-00000000`,
     executionIdSha256: hashExecutionId(`${gameId}-execution`),

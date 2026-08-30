@@ -11,6 +11,7 @@ import {
   validateCompleteGameSet,
   validateProductionLoops,
 } from '../src/benchmark/report.mjs';
+import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
 
 const expected = [
   { gameId: 'aa01', versionedGameId: 'aa01-v1' },
@@ -27,12 +28,14 @@ const report = {
       actions: 10, gameplayActions: 10, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
+      trajectoryEvidence: trajectoryEvidenceFixture(),
     },
     {
       gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, totalLevels: 3,
       actions: 20, gameplayActions: 20, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
+      trajectoryEvidence: trajectoryEvidenceFixture(),
     },
   ],
   aggregateScorecard: { score: 0.625 },
@@ -100,6 +103,7 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     controllerTelemetry: 'complete',
     terminalLifecycleTelemetry: 'complete',
     levelMetadata: 'totalLevels-v2',
+    trajectoryEvidence: 'content-addressed-v1',
   });
   assert.throws(() => validateProductionLoops(records.map((record) => ({ ...record, loop: null })), 2), /missing/);
   assert.throws(() => validateProductionLoops([{ ...records[0], loop: 'portable' }, records[1]], 2), /portable/);

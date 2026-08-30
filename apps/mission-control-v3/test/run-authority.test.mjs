@@ -12,6 +12,7 @@ import {
   publicRunCapsuleFixture,
   runCapsuleProvenanceFixture,
   scorecardCoverageFixture,
+  trajectoryEvidenceFixture,
 } from '../../../test/support/run-capsule.mjs';
 
 const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
@@ -35,6 +36,7 @@ function authoritative(overrides = {}) {
     episodeId: 'episode-000001',
     won: false,
     loop: 'pi-sdk',
+    trajectoryEvidence: trajectoryEvidenceFixture(),
   }));
   return {
     ...scorecard,
@@ -56,6 +58,7 @@ function authoritative(overrides = {}) {
       controllerTelemetry: 'complete',
       terminalLifecycleTelemetry: 'complete',
       levelMetadata: 'totalLevels-v2',
+      trajectoryEvidence: 'content-addressed-v1',
     },
     privateArtifactHashes: {
       runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },

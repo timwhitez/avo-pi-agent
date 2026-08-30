@@ -49,6 +49,24 @@ test('older tool results are elided while recent ones and identity fields surviv
   }
 });
 
+test('elided environment output preserves its durable evidence lookup key', () => {
+  const ref = 'evidence-000001-123456789abc';
+  const messages = [user(0)];
+  for (let index = 1; index <= 8; index += 1) {
+    messages.push(
+      { ...assistant(index), content: [...assistant(index).content, { type: 'toolCall', id: `call-${index}`, name: 'act', arguments: {} }] },
+      {
+        ...toolResult(index),
+        details: { evidenceRef: index === 1 ? ref : `evidence-${String(index).padStart(6, '0')}-aaaaaaaaaaaa` },
+      },
+    );
+  }
+  const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 160 });
+  const first = bounded.find((message) => message.toolCallId === 'call-1');
+  assert.match(first.content[0].text, /trajectory_read/);
+  assert.match(first.content[0].text, new RegExp(ref));
+});
+
 test('historical reasoning blocks are elided while the latest turn keeps its thinking', () => {
   const messages = [user(0)];
   for (let index = 1; index <= 8; index += 1) {
@@ -83,6 +101,7 @@ test('hard message cap drops oldest non-user messages and discloses the compacti
   const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 30 });
   assert.ok(bounded.length <= 32, `length=${bounded.length}`);
   assert.match(bounded[0].content[0].text, /transcript compaction/);
+  assert.match(bounded[0].content[0].text, /trajectory_read from startSequence=1/);
   const users = bounded.filter((message) => message.role === 'user');
   assert.ok(users.some((message) => message.content[0].text.includes('prompt 0')), 'initial prompt survives');
   const recentIds = bounded.filter((message) => message.role === 'toolResult').map((message) => message.toolCallId);

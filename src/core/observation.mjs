@@ -1,5 +1,12 @@
 import crypto from 'node:crypto';
 
+import { canonicalJson } from '../local/canonical-json.mjs';
+
+export const GRID_CONTENT_SCHEMA = 'avo.grid-content.v1';
+export const OBSERVATION_CONTENT_SCHEMA = 'avo.observation-content.v1';
+export const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
+export const TRANSITION_SCHEMA = 'avo.transition.v1';
+
 export function normalizeFrame(raw) {
   const frame = raw?.frame ?? [];
   const levelsCompleted = nonNegativeInteger(
@@ -47,10 +54,83 @@ function normalizeActions(actions) {
 }
 
 export function frameHash(frame) {
-  return crypto.createHash('sha256')
-    .update(JSON.stringify([frame.frame, frame.state, frame.levelsCompleted]))
-    .digest('hex')
-    .slice(0, 16);
+  return observationIdentity(frame).observationContentHash.slice(0, 16);
+}
+
+export function observationIdentity(frame, {
+  attemptId = 'attempt-unknown',
+  episodeId = 'episode-unknown',
+} = {}) {
+  const observation = exactObservation(frame);
+  const gridContentHash = digest({
+    schema: GRID_CONTENT_SCHEMA,
+    frame: observation.frame,
+  });
+  const observationContentHash = digest({
+    schema: OBSERVATION_CONTENT_SCHEMA,
+    gameId: observation.gameId,
+    gridContentHash,
+    state: observation.state,
+    levelsCompleted: observation.levelsCompleted,
+    totalLevels: observation.totalLevels,
+    availableActions: observation.availableActions,
+  });
+  const episodeObservationId = digest({
+    schema: EPISODE_OBSERVATION_SCHEMA,
+    attemptId: String(attemptId),
+    episodeId: String(episodeId),
+    observationContentHash,
+    fullReset: observation.fullReset,
+    executionIdSha256: observation.executionIdSha256,
+  });
+  return Object.freeze({
+    schema: EPISODE_OBSERVATION_SCHEMA,
+    gridContentHash,
+    observationContentHash,
+    episodeObservationId,
+    observation,
+  });
+}
+
+export function transitionIdentity({
+  beforeObservationId,
+  afterObservationId,
+  type,
+  action = null,
+  data = {},
+  result = {},
+}) {
+  for (const [name, value] of Object.entries({ beforeObservationId, afterObservationId })) {
+    if (!/^[a-f0-9]{64}$/.test(String(value || ''))) {
+      throw new Error(`${name} must be a versioned episode observation ID`);
+    }
+  }
+  return digest({
+    schema: TRANSITION_SCHEMA,
+    beforeObservationId,
+    afterObservationId,
+    type: String(type || 'environment-transition'),
+    action: action === null ? null : String(action),
+    data: jsonValue(data),
+    result: jsonValue(result),
+  });
+}
+
+export function exactObservation(frame) {
+  const value = frame ?? {};
+  return Object.freeze({
+    schema: OBSERVATION_CONTENT_SCHEMA,
+    gameId: value.gameId ?? null,
+    frame: structuredClone(Array.isArray(value.frame) ? value.frame : []),
+    state: String(value.state ?? 'UNKNOWN'),
+    levelsCompleted: nonNegativeInteger(value.levelsCompleted ?? 0, 'levelsCompleted'),
+    totalLevels: positiveIntegerOrNull(value.totalLevels ?? null, 'totalLevels'),
+    availableActions: normalizeActions(value.availableActions ?? []).sort(),
+    fullReset: Boolean(value.fullReset),
+    executionIdSha256: value.guid === null || value.guid === undefined
+      ? null
+      : crypto.createHash('sha256').update(String(value.guid)).digest('hex'),
+  });
 }
 
 export function gridToExactText(grid) {
@@ -76,6 +156,7 @@ export function gridDelta(previous, current) {
 
 export function describeFrame(frame, previousFrame = null) {
   const delta = gridDelta(previousFrame?.frame, frame.frame);
+  const identity = observationIdentity(frame);
   const header = {
     game_id: frame.gameId,
     state: frame.state,
@@ -83,8 +164,20 @@ export function describeFrame(frame, previousFrame = null) {
     total_levels: frame.totalLevels,
     available_actions: frame.availableActions,
     grid_shape: [frame.frame.length, frame.frame[0]?.length ?? 0],
-    frame_hash: frameHash(frame),
+    identity_schema: OBSERVATION_CONTENT_SCHEMA,
+    grid_content_hash: identity.gridContentHash,
+    observation_content_hash: identity.observationContentHash,
+    frame_hash: identity.observationContentHash.slice(0, 16),
     changed_cells: delta.changed?.length ?? null,
   };
   return `${JSON.stringify(header, null, 2)}\nGRID_EXACT:\n${delta.exact}`;
+}
+
+function digest(value) {
+  return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+function jsonValue(value) {
+  if (value === undefined) return null;
+  return JSON.parse(JSON.stringify(value));
 }

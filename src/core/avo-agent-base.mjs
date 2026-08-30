@@ -1,14 +1,26 @@
+import crypto from 'node:crypto';
+
 import { PersistentMemory } from './memory.mjs';
 import { StallSupervisor } from './supervisor.mjs';
 import { CandidateEvaluator, normalizeCandidate, objectiveVector } from './evaluator.mjs';
 import { ArcKnowledgeBase } from './knowledge-base.mjs';
 import { WorkspaceSandbox } from './workspace.mjs';
-import { describeFrame, frameHash, normalizeFrame } from './observation.mjs';
+import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
+import {
+  EPISODE_OBSERVATION_SCHEMA,
+  TRANSITION_SCHEMA,
+  describeFrame,
+  frameHash,
+  normalizeFrame,
+  observationIdentity,
+  transitionIdentity,
+} from './observation.mjs';
 
 const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
 export const AVO_TOOL_NAMES = Object.freeze([
   'observe',
+  'trajectory_read',
   'act',
   'reset',
   'knowledge_read',
@@ -66,6 +78,8 @@ export class AvoArcAgent {
     this.lastResult = null;
     this.evidenceLedger = [];
     this.evidenceSequence = 0;
+    this.attemptId = 'attempt-000001';
+    this.currentObservationId = null;
     this.executionGuids = [];
   }
 
@@ -75,8 +89,8 @@ export class AvoArcAgent {
       : await this.environment.observe();
     this.frame = this.adoptFrame(raw);
     this.executionGuids.push(this.frame.guid);
-    this.uniqueStates.add(frameHash(this.frame));
-    this.recordEvidence({ type: 'initial-observation', frame: this.frame });
+    const evidence = this.recordEvidence({ type: 'initial-observation', frame: this.frame });
+    this.uniqueStates.add(evidence.observationContentHash);
   }
 
   adoptFrame(raw) {
@@ -127,6 +141,22 @@ export class AvoArcAgent {
           const evidence = this.recordEvidence({ type: 'observation', frame: this.frame });
           return this.toolResult(`${this.describe()}\nEVIDENCE_REF: ${evidence.id}`, { frame: this.frame, evidenceRef: evidence.id });
         },
+      },
+      {
+        name: 'trajectory_read',
+        label: 'Read exact durable trajectory evidence',
+        description: 'Retrieve one exact prior observation/transition by evidence ref, or page bounded summaries from a sequence number. Use ref plus part=before/after when a full transition is too large.',
+        parameters: {
+          type: 'object',
+          properties: {
+            ref: { type: 'string', pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' },
+            startSequence: { type: 'integer', minimum: 1 },
+            limit: { type: 'integer', minimum: 1, maximum: 20 },
+            part: { type: 'string', enum: ['summary', 'event', 'before', 'after'] },
+          },
+          additionalProperties: false,
+        },
+        execute: async (input) => this.readTrajectory(input),
       },
       {
         name: 'act',
@@ -392,7 +422,6 @@ export class AvoArcAgent {
 
   acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind }) {
     this.previousFrame = previousFrame;
-    const beforeHash = frameHash(previousFrame);
     this.frame = this.adoptFrame(raw);
     if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
@@ -403,19 +432,18 @@ export class AvoArcAgent {
     } else {
       this.gameplayActions += 1;
     }
-    const afterHash = frameHash(this.frame);
-    const wasNew = !this.uniqueStates.has(afterHash);
-    this.uniqueStates.add(afterHash);
     const progressed = this.frame.levelsCompleted > this.previousFrame.levelsCompleted || isWin(this.frame);
     const evidence = this.recordEvidence({
       type: kind === 'reset' ? 'environment-reset' : 'environment-action',
       action,
       data,
       reasoning,
-      beforeHash,
+      beforeFrame: previousFrame,
       frame: this.frame,
       levelDelta: this.frame.levelsCompleted - this.previousFrame.levelsCompleted,
     });
+    const wasNew = !this.uniqueStates.has(evidence.observationContentHash);
+    this.uniqueStates.add(evidence.observationContentHash);
 
     this.supervisor.observe(evidence);
     const knowledgeHints = this.knowledge.search('stall experiment action semantics', 3);
@@ -461,6 +489,7 @@ export class AvoArcAgent {
     if (code === 'EPISODE_TERMINAL') this.terminalRejectedCommands += 1;
     const evidence = this.recordEvidence({
       type: 'command-rejected',
+      beforeFrame: this.frame,
       frame: this.frame,
       action,
       data: { code },
@@ -573,17 +602,57 @@ export class AvoArcAgent {
     );
   }
 
-  recordEvidence({ type, frame, action = null, data = {}, reasoning = '', beforeHash = null, levelDelta = 0 }) {
+  recordEvidence({
+    type,
+    frame,
+    beforeFrame = null,
+    action = null,
+    data = {},
+    reasoning = '',
+    levelDelta = 0,
+  }) {
     this.evidenceSequence += 1;
-    const event = Object.freeze({
-      id: `evidence-${String(this.evidenceSequence).padStart(6, '0')}`,
+    const afterIdentity = observationIdentity(frame, {
+      attemptId: this.attemptId,
+      episodeId: this.episodeId(),
+    });
+    const beforeIdentity = beforeFrame ? observationIdentity(beforeFrame) : null;
+    const beforeObservationId = beforeFrame ? this.currentObservationId : null;
+    const transitionId = beforeObservationId
+      ? transitionIdentity({
+        beforeObservationId,
+        afterObservationId: afterIdentity.episodeObservationId,
+        type,
+        action,
+        data,
+        result: {
+          state: afterIdentity.observation.state,
+          levelsCompleted: afterIdentity.observation.levelsCompleted,
+          totalLevels: afterIdentity.observation.totalLevels,
+          fullReset: afterIdentity.observation.fullReset,
+          rejected: type === 'command-rejected',
+        },
+      })
+      : null;
+    const core = {
       gameId: this.gameId,
+      sequence: this.evidenceSequence,
       type,
       action,
       data: data && typeof data === 'object' ? structuredClone(data) : {},
       reasoning: String(reasoning || '').slice(0, 1000),
-      beforeHash,
-      afterHash: frameHash(frame),
+      identitySchema: EPISODE_OBSERVATION_SCHEMA,
+      transitionSchema: transitionId ? TRANSITION_SCHEMA : null,
+      attemptId: this.attemptId,
+      gridContentHash: afterIdentity.gridContentHash,
+      observationContentHash: afterIdentity.observationContentHash,
+      episodeObservationId: afterIdentity.episodeObservationId,
+      beforeObservationId,
+      transitionId,
+      beforeObservation: beforeIdentity?.observation ?? null,
+      observation: afterIdentity.observation,
+      beforeHash: beforeIdentity?.observationContentHash ?? null,
+      afterHash: afterIdentity.observationContentHash,
       frameHash: frameHash(frame),
       levelsCompleted: Number(frame?.levelsCompleted || 0),
       totalLevels: frame?.totalLevels ?? null,
@@ -594,10 +663,82 @@ export class AvoArcAgent {
       fullReset: Boolean(frame?.fullReset),
       episodeId: this.episodeId(),
       createdAt: new Date().toISOString(),
+    };
+    const digest = crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex');
+    const event = Object.freeze({
+      ...core,
+      id: `evidence-${String(this.evidenceSequence).padStart(6, '0')}-${digest.slice(0, 12)}`,
+      digest,
     });
     this.evidenceLedger.push(event);
-    if (this.evidenceLedger.length > 2000) this.evidenceLedger.shift();
+    this.currentObservationId = afterIdentity.episodeObservationId;
     return event;
+  }
+
+  readTrajectory({ ref, startSequence, limit = 10, part } = {}) {
+    const hasRef = typeof ref === 'string' && ref.length > 0;
+    const hasSequence = startSequence !== undefined && startSequence !== null;
+    if (hasRef === hasSequence) {
+      throw new Error('trajectory_read requires exactly one of ref or startSequence');
+    }
+    const view = part ?? (hasRef ? 'event' : 'summary');
+    if (!['summary', 'event', 'before', 'after'].includes(view)) {
+      throw new Error('trajectory_read part is invalid');
+    }
+
+    let value;
+    if (hasRef) {
+      const event = this.evidenceLedger.find((entry) => entry.id === ref);
+      if (!event) throw new Error(`trajectory evidence not found: ${ref}`);
+      value = trajectoryView(event, view);
+    } else {
+      if (!Number.isSafeInteger(startSequence) || startSequence < 1) {
+        throw new Error('trajectory_read startSequence must be a positive safe integer');
+      }
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+        throw new Error('trajectory_read limit must be an integer from 1 through 20');
+      }
+      const events = this.evidenceLedger
+        .filter((entry) => entry.sequence >= startSequence)
+        .slice(0, limit);
+      value = {
+        trajectory: this.trajectoryEvidence(),
+        startSequence,
+        events: events.map((event) => trajectoryView(event, view)),
+        nextSequence: events.length === limit ? events.at(-1).sequence + 1 : null,
+      };
+    }
+    const text = JSON.stringify(value);
+    if (text.length > 20_000) {
+      throw new Error('trajectory_read result exceeds 20000 characters; request one ref with part=before or part=after');
+    }
+    return this.toolResult(text, {
+      evidenceRef: hasRef ? ref : null,
+      startSequence: hasSequence ? startSequence : null,
+      part: view,
+      characters: text.length,
+    });
+  }
+
+  trajectoryEvidence() {
+    const refs = this.evidenceLedger.map((event) => ({
+      sequence: event.sequence,
+      id: event.id,
+      digest: event.digest,
+    }));
+    return Object.freeze({
+      schema: TRAJECTORY_EVIDENCE_SCHEMA,
+      identitySchema: EPISODE_OBSERVATION_SCHEMA,
+      complete: this.evidenceLedger.length === this.evidenceSequence,
+      eventCount: this.evidenceLedger.length,
+      highWaterSequence: this.evidenceSequence,
+      firstEvidenceRef: this.evidenceLedger[0]?.id ?? null,
+      lastEvidenceRef: this.evidenceLedger.at(-1)?.id ?? null,
+      rootSha256: crypto.createHash('sha256').update(JSON.stringify({
+        schema: TRAJECTORY_EVIDENCE_SCHEMA,
+        refs,
+      })).digest('hex'),
+    });
   }
 
   describe() {
@@ -616,7 +757,7 @@ AVO contract:
 2. Use direct interaction with the exact text grid and currently legal gameplay actions as the primary ARC policy. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
 3. Gameplay actions and the separate reset controller both consume environment actions. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
 4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
-5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Revisit earlier evidence and alter the order of operations as the environment demands.
+5. Do not follow a rigid fixed workflow. Consult memory, evolution history, knowledge, or scratch files only when they are useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
 7. Continue through every level while the episode is active. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
@@ -647,6 +788,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       postTerminalGameplayActions: forwardingLifecycle.postTerminalGameplayActions,
       fullResets: this.fullResets,
       episodeId: this.episodeId(),
+      trajectoryEvidence: this.trajectoryEvidence(),
       objective: this.objectiveState(),
       won: isWin(this.frame),
       loop: this.loop.kind,
@@ -662,6 +804,45 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
         : null,
     };
   }
+}
+
+function trajectoryView(event, part) {
+  if (part === 'event') return event;
+  if (part === 'before') {
+    return {
+      evidenceRef: event.id,
+      observationId: event.beforeObservationId,
+      observation: event.beforeObservation,
+    };
+  }
+  if (part === 'after') {
+    return {
+      evidenceRef: event.id,
+      observationId: event.episodeObservationId,
+      observation: event.observation,
+    };
+  }
+  return {
+    id: event.id,
+    sequence: event.sequence,
+    type: event.type,
+    action: event.action,
+    data: event.data,
+    beforeObservationId: event.beforeObservationId,
+    episodeObservationId: event.episodeObservationId,
+    transitionId: event.transitionId,
+    transitionSchema: event.transitionSchema,
+    gridContentHash: event.gridContentHash,
+    observationContentHash: event.observationContentHash,
+    attemptId: event.attemptId,
+    episodeId: event.episodeId,
+    state: event.state,
+    levelsCompleted: event.levelsCompleted,
+    totalLevels: event.totalLevels,
+    levelDelta: event.levelDelta,
+    fullReset: event.fullReset,
+    createdAt: event.createdAt,
+  };
 }
 
 export function episodeState(frame) {

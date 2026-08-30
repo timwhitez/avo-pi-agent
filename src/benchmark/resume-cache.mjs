@@ -309,6 +309,7 @@ function recordBinding(record) {
     error: record.error,
     loop: record.loop,
     executions: record.executions,
+    trajectoryEvidence: record.trajectoryEvidence,
   };
 }
 
