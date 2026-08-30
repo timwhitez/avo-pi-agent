@@ -10,7 +10,7 @@ import { canonicalJson } from '../local/canonical-json.mjs';
 
 export const WORKSPACE_CAPABILITY_SCHEMA = 'avo.workspace-capability.v1';
 const MODES = new Set(['disabled', 'files-only', 'isolated-python']);
-const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+const IMMUTABLE_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{64}$/;
 const ISOLATION_CHECKS = Object.freeze([
   'capabilitiesDropped',
   'containerInvoked',
@@ -216,7 +216,7 @@ export function validateWorkspaceCapabilityAttestation(value, { config = null } 
     'repoDigestsSha256',
     'runtimeVersionSha256',
     'userIdentitySha256',
-  ]) || !IMAGE_ID.test(String(container.imageId || ''))
+  ]) || !IMMUTABLE_IMAGE_ID.test(String(container.imageId || ''))
       || !isSha256(container.runtimeVersionSha256)
       || !isSha256(container.repoDigestsSha256)
       || !Number.isSafeInteger(container.repoDigestCount) || container.repoDigestCount < 0
@@ -263,7 +263,7 @@ function inspectLocalImage(runtime, image, env) {
   }
   const record = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : null;
   const id = String(record?.Id || record?.ID || '').toLowerCase();
-  if (!IMAGE_ID.test(id)) throw new Error('isolated workspace image has no immutable content ID');
+  if (!IMMUTABLE_IMAGE_ID.test(id)) throw new Error('isolated workspace image has no immutable content ID');
   const repoDigests = Array.isArray(record.RepoDigests)
     ? record.RepoDigests.filter((entry) => typeof entry === 'string').sort()
     : [];

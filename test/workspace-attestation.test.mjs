@@ -29,7 +29,7 @@ test('disabled and files-only attest without invoking a container runtime', asyn
   }
 });
 
-test('isolated Python attests production container restrictions and runs the immutable image ID', async (t) => {
+test('isolated Python attests restrictions and runs Docker or Podman immutable image IDs', async (t) => {
   if (process.platform === 'win32') {
     t.skip('executable fixture uses a POSIX shebang');
     return;
@@ -38,6 +38,7 @@ test('isolated Python attests production container restrictions and runs the imm
   const runtime = path.join(root, 'fake-runtime');
   const log = path.join(root, 'runtime.jsonl');
   const imageId = `sha256:${'b'.repeat(64)}`;
+  const bareImageId = 'd'.repeat(64);
   fs.writeFileSync(runtime, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -46,7 +47,10 @@ if (args[0] === '--version') {
   console.log('fake-runtime 1.0.0');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (args[2] === 'missing') process.exit(3);
-  console.log(JSON.stringify([{ Id: ${JSON.stringify(imageId)}, RepoDigests: ['local-python@sha256:${'c'.repeat(64)}'] }]));
+  const inspectedId = args[2] === 'podman-local'
+    ? ${JSON.stringify(bareImageId)}
+    : ${JSON.stringify(imageId)};
+  console.log(JSON.stringify([{ Id: inspectedId, RepoDigests: ['local-python@sha256:${'c'.repeat(64)}'] }]));
 } else if (args[0] === 'run') {
   const mount = args[args.indexOf('--mount') + 1];
   const source = mount.split(',').find((part) => part.startsWith('source=')).slice('source='.length);
@@ -94,6 +98,15 @@ if (args[0] === '--version') {
     assert.ok(run.includes(`${process.getuid()}:${process.getgid()}`));
     assert.ok(run.includes(imageId));
     assert.equal(run.includes('local-python:test'), false);
+
+    const podmanRequested = config('isolated-python', runtime, 'podman-local');
+    const podmanValue = await attestWorkspaceCapability(podmanRequested, { temporaryRoot: root });
+    assert.equal(podmanValue.effective.container.imageId, bareImageId);
+    validateWorkspaceCapabilityAttestation(podmanValue, { config: podmanRequested });
+    const podmanCalls = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    const podmanRun = podmanCalls.filter((args) => args[0] === 'run').at(-1);
+    assert.ok(podmanRun.includes(bareImageId));
+    assert.equal(podmanRun.includes(`sha256:${bareImageId}`), false);
 
     await assert.rejects(
       attestWorkspaceCapability(config('isolated-python', runtime, 'missing'), { temporaryRoot: root }),
