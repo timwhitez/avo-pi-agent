@@ -33,6 +33,7 @@ export function projectPublicRunCapsule(capsule, {
     initialStateSha256: sha256(canonicalJson(definition.initialState)),
     initialState: definition.initialState,
     enabledTools: definition.tools.enabled,
+    workspaceCapability: definition.workspaceCapability,
     transcript: definition.transcript,
     runtime: {
       node: definition.runtime.node,

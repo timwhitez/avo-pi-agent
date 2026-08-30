@@ -33,6 +33,10 @@ import {
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { fingerprint } from './redaction.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
+import {
+  validateWorkspaceCapabilityAttestation,
+  workspaceCapabilityDigest,
+} from './workspace-attestation.mjs';
 
 export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
 export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
@@ -50,6 +54,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/benchmark/report-records.mjs',
   'src/benchmark/report-safe-files.mjs',
   'src/benchmark/scorecard-evidence.mjs',
+  'src/benchmark/workspace-attestation.mjs',
   'src/benchmark/pi-stream-attestation.mjs',
   'src/benchmark/provider-attestation.mjs',
   'src/benchmark/provenance-core.mjs',
@@ -213,6 +218,7 @@ export function buildRunCapsule({
   arcRuntime,
   games,
   config,
+  workspaceAttestation,
   initialState,
   env = process.env,
   git = null,
@@ -238,9 +244,7 @@ export function buildRunCapsule({
   }
   const workspaceMode = String(config?.workspaceMode || 'files-only');
   if (!WORKSPACE_MODES.has(workspaceMode)) throw new Error('run capsule workspace mode is invalid');
-  if (workspaceMode === 'isolated-python') {
-    throw new Error('official run capsule refuses isolated-python until the container runtime and image digest are attested');
-  }
+  validateWorkspaceCapabilityAttestation(workspaceAttestation, { config });
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
   const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
@@ -281,6 +285,10 @@ export function buildRunCapsule({
       providerSchemaSha256: sha256(canonicalJson(providerToolSchemas)),
       enabled: toolSchemas.map((tool) => tool.name),
       executionMode: 'sequential',
+    },
+    workspaceCapability: {
+      sha256: workspaceCapabilityDigest(workspaceAttestation),
+      attestation: structuredClone(workspaceAttestation),
     },
     transcript: {
       policySha256: sha256(boundTranscript.toString()),
@@ -494,6 +502,7 @@ export function verifyRunCapsuleExecution({
   capsule,
   python = '.venv/bin/python',
   config = null,
+  workspaceAttestation = null,
   stateBinding = null,
   requireInitialState = false,
   env = process.env,
@@ -517,10 +526,15 @@ export function verifyRunCapsuleExecution({
   if (process.version !== definition.runtime.node) {
     throw new Error('execution Node runtime differs from the sealed run capsule');
   }
-  if (definition.runtime.config.workspaceMode === 'isolated-python') {
-    throw new Error('official execution refuses unattested isolated-python runtime identity');
-  }
   if (config) verifyEffectiveConfig(config, definition.runtime.config);
+  validateWorkspaceCapabilityAttestation(workspaceAttestation, { config: config || definition.runtime.config });
+  validateWorkspaceCapabilityAttestation(definition.workspaceCapability?.attestation, {
+    config: definition.runtime.config,
+  });
+  if (workspaceCapabilityDigest(workspaceAttestation) !== definition.workspaceCapability?.sha256
+      || canonicalJson(workspaceAttestation) !== canonicalJson(definition.workspaceCapability.attestation)) {
+    throw new Error('effective workspace capability differs from the sealed run capsule');
+  }
   const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
   const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
@@ -603,6 +617,7 @@ export function verifyRunCapsuleExecution({
     componentSetSha256: definition.components.setSha256,
     nodeDependencySha256: closure.nodeSha256,
     pythonDependencySha256: closure.pythonSha256,
+    workspaceCapabilitySha256: definition.workspaceCapability.sha256,
   });
 }
 

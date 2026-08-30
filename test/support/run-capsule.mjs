@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { canonicalJson, sealRunCapsule } from '../../src/benchmark/run-capsule.mjs';
 import { projectPublicRunCapsule } from '../../src/benchmark/run-capsule-public.mjs';
 import { fingerprint } from '../../src/benchmark/redaction.mjs';
+import { effectiveAvoToolNames } from '../../src/core/avo-agent-base.mjs';
 import { evaluateScorecardCoverage, normalizeScorecardSnapshot } from '../../src/benchmark/scorecard-evidence.mjs';
 import { providerCapabilityDigest } from '../../src/provider-capabilities.mjs';
 import { providerCapabilities } from './provider.mjs';
@@ -12,6 +13,47 @@ const ARC_RUNTIME = Object.freeze({
   arcEngineVersion: '0.9.9',
   officialPackageAttested: true,
 });
+
+export function workspaceAttestationFixture(config = {}) {
+  const mode = String(config.workspaceMode || 'files-only');
+  const isolated = mode === 'isolated-python';
+  return Object.freeze({
+    schema: 'avo.workspace-capability.v1',
+    requested: {
+      mode,
+      containerRuntime: isolated ? String(config.workspaceContainerRuntime || 'docker') : null,
+      containerImage: isolated ? String(config.workspaceContainerImage || 'python:3.12-slim') : null,
+    },
+    effective: {
+      mode,
+      enabledTools: effectiveAvoToolNames(mode),
+      container: isolated ? {
+        runtimeVersionSha256: 'a'.repeat(64),
+        imageId: `sha256:${'b'.repeat(64)}`,
+        repoDigestsSha256: 'c'.repeat(64),
+        repoDigestCount: 1,
+        pythonVersionSha256: 'd'.repeat(64),
+        userIdentitySha256: 'e'.repeat(64),
+      } : null,
+    },
+    checks: isolated ? {
+      containerRequired: true,
+      containerInvoked: true,
+      deterministicPython: true,
+      workspaceRoundTrip: true,
+      outsideWriteBlocked: true,
+      networkNamespaceIsolated: true,
+      rootFilesystemReadOnly: true,
+      capabilitiesDropped: true,
+      noNewPrivileges: true,
+      userIdentityApplied: true,
+    } : {
+      containerRequired: false,
+      containerInvoked: false,
+    },
+    verified: true,
+  });
+}
 
 export function trajectoryEvidenceFixture(overrides = {}) {
   return Object.freeze({
@@ -218,8 +260,12 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
     tools: {
       schemaSha256: 'a'.repeat(64),
       providerSchemaSha256: providerToolSchemaSha256,
-      enabled: ['observe', 'act'],
+      enabled: effectiveAvoToolNames('files-only'),
       executionMode: 'sequential',
+    },
+    workspaceCapability: {
+      sha256: digest(workspaceAttestationFixture()),
+      attestation: workspaceAttestationFixture(),
     },
     transcript: {
       policySha256: 'b'.repeat(64),

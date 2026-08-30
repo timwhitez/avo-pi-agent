@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { AvoArcAgent, effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
 import { WorkspaceSandbox } from '../src/core/workspace.mjs';
 
 function makeWorkspace(options = {}) {
@@ -108,5 +109,47 @@ process.stdin.on('end', () => {
     else process.env.OPENAI_API_KEY = previous;
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('agent construction initializes the exact workspace mode and exposes only its tools', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-agent-workspace-'));
+  const frame = {
+    game_id: 'workspace-wiring',
+    frame: [[1]],
+    state: 'PLAYING',
+    levels_completed: 0,
+    win_levels: 1,
+    available_actions: ['ACTION1'],
+  };
+  try {
+    for (const mode of ['disabled', 'files-only', 'isolated-python']) {
+      let payload = null;
+      const agent = new AvoArcAgent({
+        gameId: mode,
+        environment: { async start() { return frame; } },
+        loop: { kind: 'test', async run(value) { payload = value; return { error: null }; } },
+        captureScorecard: false,
+        config: {
+          maxActions: 10,
+          stallWindow: 2,
+          memoryDir: path.join(root, 'memory'),
+          workspaceDir: path.join(root, 'workspace'),
+          workspaceMode: mode,
+          workspacePythonTimeoutMs: 1_234,
+          workspaceContainerRuntime: 'runtime-x',
+          workspaceContainerImage: `sha256:${'a'.repeat(64)}`,
+        },
+      });
+      await agent.run();
+      assert.equal(agent.workspace.mode, mode);
+      assert.equal(agent.workspace.timeoutMs, 1_234);
+      assert.equal(agent.workspace.containerRuntime, 'runtime-x');
+      assert.equal(agent.workspace.containerImage, `sha256:${'a'.repeat(64)}`);
+      assert.equal(payload.workspaceMode, mode);
+      assert.deepEqual(payload.tools.map((tool) => tool.name), effectiveAvoToolNames(mode));
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

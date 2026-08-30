@@ -2,6 +2,10 @@ import crypto from 'node:crypto';
 
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
+import {
+  validateWorkspaceCapabilityAttestation,
+  workspaceCapabilityDigest,
+} from './workspace-attestation.mjs';
 
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
@@ -156,7 +160,24 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
   requireCondition(runtime.scorecardBinding === 'exact-session-execution-v5', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);
-  requireCondition(runtime.config?.workspaceMode !== 'isolated-python', 'run capsule isolated-Python runtime identity is unattested', reasons);
+  const workspaceCapability = recordOrEmpty(capsule.workspaceCapability);
+  const workspaceAttestation = recordOrEmpty(workspaceCapability.attestation);
+  try {
+    validateWorkspaceCapabilityAttestation(workspaceAttestation, { config: runtime.config });
+    requireCondition(
+      isSha256(workspaceCapability.sha256)
+        && workspaceCapability.sha256 === workspaceCapabilityDigest(workspaceAttestation),
+      'run capsule workspace-capability digest is inconsistent',
+      reasons,
+    );
+    requireCondition(
+      canonicalJson(workspaceAttestation.effective?.enabledTools) === canonicalJson(tools),
+      'run capsule workspace-capability tool set differs from the sealed tools',
+      reasons,
+    );
+  } catch {
+    reasons.push('run capsule workspace capability is absent or malformed');
+  }
   const task = recordOrEmpty(capsule.task);
   requireCondition(['anonymous-auto', 'registered'].includes(String(task.arcAuthMode || '')), 'run capsule ARC auth mode is unknown', reasons);
   requireCondition(Array.isArray(task.versionedGameIds) && task.versionedGameIds.length > 0, 'run capsule versioned game set is absent', reasons);

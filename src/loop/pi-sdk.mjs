@@ -134,18 +134,24 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
 
   return {
     kind: 'pi-sdk',
-    async run({ systemPrompt, tools, initialPrompt, shouldStop, runtimeStatus }) {
+    async run({ systemPrompt, tools, initialPrompt, shouldStop, runtimeStatus, workspaceMode: initializedWorkspaceMode }) {
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
       }
-      const workspaceMode = config.workspaceMode || 'files-only';
-      const exposedTools = tools.filter((tool) => {
-        if (workspaceMode === 'disabled' && tool.name.startsWith('workspace_')) return false;
-        if (tool.name === 'workspace_python' && workspaceMode !== 'isolated-python') return false;
-        return true;
-      });
+      const workspaceMode = initializedWorkspaceMode || config.workspaceMode || 'files-only';
+      if (!['disabled', 'files-only', 'isolated-python'].includes(workspaceMode)) {
+        throw new Error(`Pi production loop received an invalid workspace mode: ${workspaceMode}`);
+      }
+      if (initializedWorkspaceMode && config.workspaceMode && initializedWorkspaceMode !== config.workspaceMode) {
+        throw new Error('Pi production loop workspace mode differs from the initialized sandbox');
+      }
+      if (initializedWorkspaceMode && tools.some((tool) =>
+        (workspaceMode === 'disabled' && tool.name.startsWith('workspace_'))
+        || (tool.name === 'workspace_python' && workspaceMode !== 'isolated-python'))) {
+        throw new Error('Pi production loop tools differ from the initialized workspace capability');
+      }
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
-      const piTools = exposedTools.map((tool) => ({
+      const piTools = tools.map((tool) => ({
         ...piToolContract(tool, Type),
         execute: async (_callId, params) => {
           const result = await tool.execute(params);

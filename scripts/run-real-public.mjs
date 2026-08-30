@@ -14,6 +14,7 @@ import {
 } from '../src/benchmark/provenance.mjs';
 import { runProcess } from '../src/benchmark/process-runner.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
+import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
   aggregateGameMetrics,
   copyRegularFileExclusive,
@@ -114,6 +115,10 @@ try {
   }
   const config = getRuntimeConfig();
 
+  stage.value = 'workspace-preflight';
+  console.log('[real-run] attesting the initialized workspace capability');
+  const workspaceAttestation = await attestWorkspaceCapability(config);
+
   stage.value = 'provider-preflight';
   console.log('[real-run] validating a non-mock Responses request');
   const providerPreflight = await preflightResponsesProvider(provider);
@@ -151,6 +156,7 @@ try {
     arcRuntime,
     games,
     config,
+    workspaceAttestation,
     initialState: runState.initialState,
   });
   const resumeDecision = resumeContext
@@ -162,6 +168,7 @@ try {
     capsule,
     python,
     config,
+    workspaceAttestation,
     stateBinding: runState.currentState,
     requireInitialState: !resumeContext || resumeDecision.runClass === 'diagnostic-migrated',
   });
@@ -259,7 +266,13 @@ try {
   if (finalCapsule.capsuleHash !== capsule.capsuleHash) {
     throw new Error('active run capsule changed after execution');
   }
-  verifyRunCapsuleExecution({ root, capsule: finalCapsule, python, config });
+  verifyRunCapsuleExecution({
+    root,
+    capsule: finalCapsule,
+    python,
+    config,
+    workspaceAttestation,
+  });
   const finalState = inspectRunState({
     memoryDir: runState.memoryDir,
     workspaceDir: runState.workspaceDir,

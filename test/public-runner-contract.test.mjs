@@ -19,6 +19,7 @@ import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evid
 import { fingerprint } from '../src/benchmark/redaction.mjs';
 import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
 import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
+import { workspaceAttestationFixture } from './support/run-capsule.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -549,6 +550,7 @@ process.exit(result.status ?? 1);
       versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
     })),
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: runState.initialState,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });
@@ -815,6 +817,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
     })),
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: migratedState.initialState,
     env: { AVO_GAME_CONCURRENCY: '4' },
   });

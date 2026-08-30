@@ -179,7 +179,7 @@ export class WorkspaceSandbox {
       ? ['--user', `${process.getuid()}:${process.getgid()}`]
       : [];
     const args = [
-      'run', '--rm', '--pull=never', '--name', name,
+      'run', '--rm', '--interactive', '--pull=never', '--name', name,
       '--network=none', '--read-only', '--cap-drop=ALL',
       '--security-opt=no-new-privileges:true', '--pids-limit=32',
       '--memory=512m', '--cpus=1',
@@ -366,7 +366,7 @@ function normalizeMode(value) {
   return mode;
 }
 
-function containerCliEnv(env) {
+export function containerCliEnv(env) {
   const allowed = ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'XDG_RUNTIME_DIR'];
   return Object.fromEntries(allowed.filter((name) => env[name] !== undefined).map((name) => [name, String(env[name])]));
 }

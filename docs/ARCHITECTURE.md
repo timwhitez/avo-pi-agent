@@ -127,8 +127,10 @@ explicit modes:
   source files may be stored, but no code is executed;
 - `isolated-python`: the Python tool is exposed only through a local Docker or
   Podman container with no network, a read-only container root, dropped Linux
-  capabilities, `no-new-privileges`, PID/memory/CPU limits, an unprivileged UID,
-  and exactly one writable bind mount for the per-game workspace.
+  capabilities, `no-new-privileges`, PID/memory/CPU limits, an explicit UID/GID,
+  and exactly one writable bind mount for the per-game workspace. The container
+  uses the host process's explicit numeric UID/GID; operators should run the
+  harness as a non-root account when they require a non-root container UID.
 
 The Node file layer rejects symbolic links, multiply-linked files, path escapes,
 non-regular files, oversized files, and unbounded recursive listings. Writes use
@@ -139,7 +141,10 @@ Python audit hooks inside the container are defense in depth only. They are not
 and are never described as the isolation boundary. There is no fallback to
 model-authored Python running directly on the host interpreter. Operators must
 pre-pull the configured image; `--pull=never` prevents an execution-time image
-substitution.
+substitution. Production startup resolves the local tag to an immutable image
+ID, runs a bounded isolation/round-trip preflight through the same workspace
+path, and seals that attestation into the run capsule. The child repeats the
+preflight and executes Python by the immutable image ID.
 
 ## Trust boundaries
 

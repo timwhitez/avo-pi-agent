@@ -60,8 +60,10 @@ export class AvoArcAgent {
     this.workspace = new WorkspaceSandbox({
       root: config.workspaceDir || `${config.memoryDir}-workspaces`,
       gameId,
-      python: config.python || 'python',
+      mode: config.workspaceMode || 'files-only',
       timeoutMs: config.workspacePythonTimeoutMs || 10_000,
+      containerRuntime: config.workspaceContainerRuntime || 'docker',
+      containerImage: config.workspaceContainerImage || 'python:3.12-slim',
     });
     this.supervisor = new StallSupervisor(config.stallWindow);
     this.frame = null;
@@ -839,6 +841,15 @@ export class AvoArcAgent {
     return { text, details, terminate };
   }
 
+  exposedTools() {
+    const enabled = new Set(effectiveAvoToolNames(this.workspace.mode));
+    const tools = this.tools().filter((tool) => enabled.has(tool.name));
+    if (tools.length !== enabled.size) {
+      throw new Error('initialized workspace mode cannot provide its exact tool set');
+    }
+    return tools;
+  }
+
   systemPrompt() {
     return `You are the autonomous variation operator for one ARC-AGI-3 game, running inside the official Pi agent loop.
 
@@ -860,7 +871,8 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
     const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe(null, initialEvidence)}`;
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
-      tools: this.tools(),
+      tools: this.exposedTools(),
+      workspaceMode: this.workspace.mode,
       initialPrompt,
       shouldStop: () => this.isDone(),
       runtimeStatus: () => this.runtimeStatus(),

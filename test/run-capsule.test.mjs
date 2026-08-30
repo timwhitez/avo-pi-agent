@@ -28,6 +28,7 @@ import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evid
 import { fingerprint } from '../src/benchmark/redaction.mjs';
 import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
 import { providerCapabilities } from './support/provider.mjs';
+import { workspaceAttestationFixture } from './support/run-capsule.mjs';
 
 function temporaryRoot(prefix = 'avo-capsule-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -132,7 +133,7 @@ function providerProvenance(runId, config) {
 }
 
 function capsule(overrides = {}) {
-  const config = runtimeConfig();
+  const config = overrides.config || runtimeConfig();
   return buildRunCapsule({
     root: process.cwd(),
     runId: 'run-x',
@@ -146,6 +147,7 @@ function capsule(overrides = {}) {
     arcRuntime: { officialPackageAttested: true, arcAgiVersion: '0.9.9' },
     games: [{ gameId: 'ls20', versionedGameId: 'ls20-00000000' }],
     config,
+    workspaceAttestation: workspaceAttestationFixture(config),
     initialState: initialState(),
     env: {},
     git: {
@@ -325,6 +327,7 @@ test('execution verification rejects code and effective runtime drift after seal
     capsule: value,
     python: 'python',
     config: runtimeConfig(),
+    workspaceAttestation: value.definition.workspaceCapability.attestation,
     env: {},
     git: value.definition.git,
     dependencies: value.definition.runtime.dependencies,
@@ -494,11 +497,32 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.throws(() => readRunCapsule(file, { root: privateDir }), /hash does not match/);
 });
 
-test('official capsules reject isolated Python until runtime and image identity are attested', () => {
-  const baseline = capsule();
+test('official capsules bind an attested immutable isolated-Python image', () => {
+  const config = runtimeConfig({ workspaceMode: 'isolated-python' });
+  const value = capsule({ config });
+  assert.equal(value.definition.workspaceCapability.attestation.requested.containerImage, 'python:3.12-slim');
+  assert.match(value.definition.workspaceCapability.attestation.effective.container.imageId, /^sha256:[a-f0-9]{64}$/);
+  assert.ok(value.definition.tools.enabled.includes('workspace_python'));
+  const root = temporaryRoot('avo-isolated-capsule-');
+  const privateDir = path.join(root, 'runs', 'private', 'run-x');
+  fs.mkdirSync(privateDir, { recursive: true });
+  writeRunCapsule(path.join(privateDir, 'run-capsule.json'), value, { root: privateDir });
+  const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
+  const privateCapsuleEvidence = readPrivateRunCapsuleEvidence({
+    repositoryRoot: root,
+    report: {
+      runId: 'run-x',
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: published.capsuleEvidenceSha256 },
+      },
+    },
+  });
+  assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
+  fs.rmSync(root, { recursive: true, force: true });
   assert.throws(() => capsule({
-    config: runtimeConfig({ workspaceMode: 'isolated-python' }),
-  }), /refuses isolated-python/);
+    config,
+    workspaceAttestation: null,
+  }), /workspace capability attestation/);
 });
 
 test('migrated diagnostics cannot publish an official score', () => {

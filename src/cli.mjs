@@ -9,6 +9,7 @@ import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
+import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
   assertRunStateMatchesInitial,
   inspectRunState,
@@ -74,13 +75,13 @@ async function offlineDemo(args) {
   const results = [];
   for (const [index, environment] of environments.entries()) {
     const loop = createPortablePiLoop({ maxSteps: config.maxActions });
-    const agent = configureWorkspace(new AvoArcAgent({
+    const agent = new AvoArcAgent({
       gameId: environment.gameId,
       environment,
       loop,
       config,
       logger: quietLogger,
-    }), config);
+    });
     const result = await agent.run();
     results.push(result);
     console.log(`[${index + 1}/${environments.length}] ${result.gameId}: ${result.state}, levels=${result.levelsCompleted}, actions=${result.actions}`);
@@ -99,6 +100,7 @@ async function listPublic() {
 
 async function runPublic(args) {
   const config = getRuntimeConfig();
+  let workspaceAttestation = null;
   const selection = parseSelection(args);
   const results = [];
   let replayedGames = 0;
@@ -121,6 +123,7 @@ async function runPublic(args) {
   if (process.env.AVO_REQUIRE_REAL_PROVIDER === '1' && !resumeDir) {
     throw new Error('real-provider public execution requires a capsule-bound resume directory');
   }
+  workspaceAttestation = await attestWorkspaceCapability(config);
   if (resumeDir) {
     runCapsuleHash = requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH);
     runClass = requiredRunClass(process.env.AVO_RUN_CLASS);
@@ -139,6 +142,7 @@ async function runPublic(args) {
       capsule: runCapsule,
       python: config.python,
       config,
+      workspaceAttestation,
       stateBinding,
       requireInitialState: runClass !== 'recovered',
     });
@@ -151,6 +155,9 @@ async function runPublic(args) {
     if (runClass === 'recovered' && resumedRecords.size === 0) {
       assertRunStateMatchesInitial(stateBinding, runCapsule.definition.initialState);
     }
+  }
+  if (workspaceAttestation.effective.container?.imageId) {
+    config.workspaceContainerImage = workspaceAttestation.effective.container.imageId;
   }
 
   try {
@@ -238,13 +245,13 @@ async function runPublic(args) {
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           activeAttempt = attempt;
           if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
-          const agent = configureWorkspace(new AvoArcAgent({
+          const agent = new AvoArcAgent({
             gameId,
             environment: env,
             loop,
             config: gameConfig,
             captureScorecard: false,
-          }), gameConfig);
+          });
           const agentResult = await agent.run();
           attemptResults.push(agentResult);
           const executionGuids = agent.scorecardExecutionGuids();
@@ -391,14 +398,6 @@ async function runPublic(args) {
   // A complete public benchmark can legitimately score below 100. Individual
   // non-wins are benchmark data, not a process/infrastructure failure. Exact
   // game coverage and official score origin are validated by the outer runner.
-}
-
-function configureWorkspace(agent, config) {
-  agent.workspace.mode = config.workspaceMode || 'files-only';
-  agent.workspace.timeoutMs = config.workspacePythonTimeoutMs || 10_000;
-  agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
-  agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
-  return agent;
 }
 
 function currentStateBinding(config) {
