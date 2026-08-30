@@ -79,5 +79,7 @@ test('README tool inventory is generated from the sealed production profiles', (
 
   assert.ok(readme.includes(inventory), 'README tool inventory must match production exactly');
   assert.match(readme, /\[`issues\.md`\]\(issues\.md\)/);
+  assert.equal(fs.existsSync(path.join(root, 'issues.md')), true, 'README audit link must resolve');
+  assert.match(read('issues.md'), /^# Benchmark and Harness Audit:[\s\S]*^## Live remediation ledger$/m);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
