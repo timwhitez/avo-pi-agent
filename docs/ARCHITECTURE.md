@@ -2,10 +2,11 @@
 
 ## Objective
 
-`avo-pi-agent` is a clean-room reconstruction of the publicly documented AVO
-mechanism, adapted to ARC-AGI-3 and implemented on the official Pi Agent core
-loop. The architecture keeps model agency broad while making environment facts,
-objective evaluation, lineage commits and secret boundaries non-negotiable.
+`avo-pi-agent` is an ARC-AGI-3 harness inspired by public AVO material and built
+on the official Pi Agent core loop. It does not implement AVO's executable,
+behavior-changing candidate mechanism. The architecture keeps model agency
+broad while making environment facts, evidence integrity and secret boundaries
+non-negotiable.
 
 ## Runtime flow
 
@@ -17,15 +18,14 @@ real Responses-compatible provider
   dynamic long-horizon continuation
                 │
                 ▼
-AvoArcAgent — autonomous variation operator
+AvoArcAgent — autonomous ARC interaction controller
   ├─ exact observe / guarded act or bounded act_sequence / controller reset
   ├─ source-backed domain knowledge
   ├─ persistent structured memory
-  ├─ pre-experiment candidate proposals
+  ├─ optional pre-experiment hypothesis proposals
   ├─ immutable environment evidence
-  ├─ external objective evaluator
-  ├─ failed-attempt archive
-  ├─ committed parent-linked lineage
+  ├─ prediction/evidence checks
+  ├─ confirmed and contradicted journal history
   ├─ conditional stagnation supervisor
   └─ bounded files-only scratch workspace by default
                 │
@@ -39,39 +39,40 @@ Python bridge using official arc-agi / arcengine
 ARC-AGI-3 public environment and official scorecard
 ```
 
-## AVO control plane
+## Agent control plane
 
 The model is not placed in a fixed inspect-plan-act checklist. It chooses when
-to consult memory, full evolution history, domain knowledge or scratch files;
+to consult memory, hypothesis history, domain knowledge or scratch files;
 when to create a durable proposal; which direct interaction discriminates among
-hypotheses; and when enough objective evidence exists for evaluation.
+hypotheses; and when enough exact evidence exists for evaluation.
 
 ### Proposal lifecycle
 
-1. `candidate_propose` stores a normalized hypothesis, plan, structured action
-   predictions, objective baseline and current committed parent.
+1. `hypothesis_propose` stores a normalized hypothesis, plan, structured action
+   predictions and an exact pre-action baseline.
 2. Direct gameplay actions and controller resets produce immutable evidence
    events with stable IDs, before/after state hashes, episode identity, action
    index, level delta and terminal state.
-3. `candidate_evaluate` accepts only a proposal ID and evidence references.
-4. `CandidateEvaluator` checks that evidence belongs to the game, occurred after
+3. `hypothesis_evaluate` accepts only a proposal ID and evidence references.
+4. `HypothesisEvaluator` checks that evidence belongs to the game, occurred after
    proposal creation and matches every structured prediction claim.
-5. A commit additionally requires a current parent, non-duplication and an
-   objective vector that matches or improves the best committed version.
-6. Rejected attempts stay queryable but are never inserted into committed
-   lineage.
+5. The result is confirmed, contradicted, or inconclusive. Confirmation records
+   prediction agreement only; no policy, prompt, tool, model or code is installed.
+6. Confirmed and contradicted records retain their exact evidence references
+   across restart. There is no parent, best, rollback or improvement state.
 
 ### Objective boundary
 
 The local objective vector is derived only from environment state:
 
 ```text
-WIN → levels completed → progress since proposal
-    → fewer actions since proposal → novel-state coverage
+WIN → levels completed → progress
+    → fewer actions → novel-state coverage
 ```
 
-It gates candidate lineage. It is not official ARC scoring. Official score
-claims require the scorecard returned by a real official-runtime execution.
+It is runtime progress telemetry only. It does not rank or confirm hypotheses
+and is not official ARC scoring. Official score claims require the scorecard
+returned by a real official-runtime execution.
 
 Public report schema v2 keeps three facts separate: `levelsCompleted` is the
 maximum observed progress, `totalLevels` is stable task metadata or `null` when
@@ -109,20 +110,20 @@ so only controller reset or explicit finish remains legal. The run stops on:
 
 ## Persistent state
 
-Per-game memory schema v4 stores:
+Per-game memory schema v5 stores:
 
 - action semantics, objects, goals and invariants;
 - failed hypotheses and proven strategies;
-- candidate proposals and pending proposals;
-- all evaluated attempts;
-- accepted parent-linked lineage;
-- supervisor interventions.
+- optional hypothesis proposals and pending proposals;
+- confirmed, contradicted, inconclusive and expired evidence evaluations;
+- supervisor interventions;
 - bounded typed claims with stable IDs, explicit proposed/confirmed/terminal
   status, exact evidence refs and claim relations.
 
-Writes are bounded, atomic and mode-restricted. Legacy memory is migrated while
-preserving failed and accepted records. The model-facing update tool cannot
-write the legacy flat fields: it proposes typed claims, then requires current
+Writes are bounded, atomic and mode-restricted. Legacy structured proposals and
+evaluations are migrated without preserving false selection labels. Older
+unverifiable prose is retained as unconfirmed history. The model-facing update
+tool cannot write the legacy flat fields: it proposes typed claims, then requires current
 durable evidence to confirm, contradict or supersede them. Terminal claims stay
 queryable, while only a small deterministic active set is surfaced with initial
 and later observations. `AVO_MEMORY_SURFACE_LIMIT=0` disables that automatic

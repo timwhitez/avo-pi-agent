@@ -304,7 +304,7 @@ test('schema v3 migration is deterministic and malformed claim relations fail cl
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(memory.file, `${JSON.stringify({ schemaVersion: 3, gameId: 'legacy', notes: ['kept'] })}\n`);
     const migrated = memory.load();
-    assert.equal(migrated.snapshot().schemaVersion, 4);
+    assert.equal(migrated.snapshot().schemaVersion, 5);
     assert.deepEqual(migrated.snapshot().notes, ['kept']);
     assert.deepEqual(migrated.snapshot().claimSummary, {
       total: 0, active: 0, proposed: 0, confirmed: 0, contradicted: 0, superseded: 0,

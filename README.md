@@ -1,18 +1,17 @@
 # AVO × Pi for ARC-AGI-3
 
-An independent, clean-room reconstruction of the publicly described NVIDIA AVO
-agent pattern, with the **official Pi Agent Harness as the production core
-loop** and an adapter for the official ARC-AGI-3 runtime.
+An experimental ARC-AGI-3 agent harness inspired by public AVO material, with
+the **official Pi Agent Harness as the production core loop** and an adapter for
+the official ARC runtime.
 
 This is not NVIDIA's private implementation, prompt, trace set, or collection
-of solved public-game scripts. It reconstructs the system mechanisms disclosed
-in the AVO paper and NVIDIA's ARC-AGI-3 article:
+of solved public-game scripts. It does **not** currently implement AVO's
+behavior-changing candidate mechanism. What is implemented is:
 
 - autonomous inspect → hypothesize → act → evaluate → revise cycles;
 - persistent knowledge across a long run;
-- an evidence-scored candidate lineage;
-- evaluator-controlled acceptance rather than model self-approval;
-- a supervisor that detects stalls and forces strategy changes;
+- an optional hypothesis journal checked against exact later evidence;
+- a supervisor that detects stalls and suggests fresh experiments;
 - direct, exact text-grid interaction with ARC environments.
 
 ## What is implemented
@@ -22,7 +21,7 @@ ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values
 Python bridge
    ⇅ narrow model tools
-AVO controller: memory + lineage + evaluator + supervisor
+ARC controller: direct interaction + memory + optional journal + supervisor
    ⇅
 @earendil-works/pi-agent-core
    ⇅ OpenAI Responses-compatible API
@@ -31,7 +30,8 @@ runtime-configured reasoning model
 
 The agent receives only these capabilities: observe, take a frame-authorized
 gameplay action, invoke the separate reset controller, read/update structured
-memory, evaluate a candidate, use a confined scratch workspace, and finish.
+memory, check a prior hypothesis against evidence, use a confined scratch
+workspace, and finish.
 There is no shell, arbitrary host filesystem, browser, or generic networking
 tool in the model's tool set.
 
@@ -114,11 +114,11 @@ npm run verify
 ```
 
 This test verifies the loop/tool protocol, exact-grid observations, level
-transitions, memory persistence, lineage commits, supervisor behavior and
+transitions, memory persistence, hypothesis evidence, supervisor behavior and
 secret scanner. It is not an ARC public score and the output labels it
 `offline-contract-demo`.
 
-## AVO reconstruction details
+## Design boundaries
 
 ### Persistent memory
 
@@ -130,11 +130,13 @@ queryable, while only a small deterministic relevant set is surfaced
 automatically. Writes are atomic and permissions are restricted. Runtime memory
 lives under a gitignored directory.
 
-### Candidate lineage
+### Hypothesis journal
 
-`candidate_commit` records a parent-linked hypothesis, evidence, measured score
-and acceptance decision. The score uses observed level progress, state novelty
-and action cost. The model cannot mark its own candidate accepted.
+`hypothesis_propose` can record structured predictions before an experiment;
+`hypothesis_evaluate` then checks only exact, later environment evidence. The
+result is `confirmed`, `contradicted`, or `inconclusive`. Confirmation means the
+declared predictions matched. It does not install or change a policy, prompt,
+tool, world model, or code artifact, and it is not an improvement claim.
 
 ### Supervisor
 
@@ -148,7 +150,7 @@ the failed branch.
 `act` and `reset` each consume one ARC environment action. `act` accepts only
 gameplay actions exposed by the current frame; `reset` is a separate controller
 operation and reports whether the runtime performed a full reset. Observation,
-memory, candidate evaluation and model deliberation are internal. Reports keep
+memory, hypothesis evaluation and model deliberation are internal. Reports keep
 gameplay actions, resets, rejected commands and total environment actions
 separate so later analysis can use the official scorecard rather than a
 fabricated local score.
@@ -170,9 +172,9 @@ git history.
 ## Repository map
 
 ```text
-src/core/avo-agent.mjs       AVO orchestration and narrow tools
+src/core/avo-agent.mjs       ARC orchestration and narrow tools
 src/core/memory.mjs          persistent structured knowledge
-src/core/lineage.mjs         scored parent-linked candidates
+src/core/hypothesis-journal.mjs optional prediction/evidence history
 src/core/supervisor.mjs      stall and cycle intervention
 src/loop/pi-sdk.mjs          production Pi Agent loop
 src/loop/portable-pi.mjs     offline-only deterministic test double

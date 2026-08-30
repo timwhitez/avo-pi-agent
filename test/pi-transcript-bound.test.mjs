@@ -94,8 +94,8 @@ test('elided state-changing tool output never advises replaying the mutation', (
   const messages = [user(0)];
   for (let index = 1; index <= 8; index += 1) {
     messages.push(
-      { ...assistant(index), content: [...assistant(index).content, { type: 'toolCall', id: `call-${index}`, name: 'candidate_propose', arguments: {} }] },
-      { ...toolResult(index), toolName: 'candidate_propose' },
+      { ...assistant(index), content: [...assistant(index).content, { type: 'toolCall', id: `call-${index}`, name: 'hypothesis_propose', arguments: {} }] },
+      { ...toolResult(index), toolName: 'hypothesis_propose' },
     );
   }
   const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 160 });

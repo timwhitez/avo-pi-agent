@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CandidateLineage } from './lineage.mjs';
+import { HypothesisJournal } from './hypothesis-journal.mjs';
+import { normalizeHypothesis } from './evaluator.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { wasAtomicWriteCommitted, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
-const MEMORY_SCHEMA_VERSION = 4;
+const MEMORY_SCHEMA_VERSION = 5;
 const MAX_CLAIMS = 1000;
 const MAX_CLAIM_REFS = 16;
 const MAX_CLAIM_CONTENT = 2000;
@@ -27,9 +28,8 @@ function initial(gameId) {
     failedHypotheses: [],
     provenStrategies: [],
     notes: [],
-    candidateProposals: [],
-    committedLineage: [],
-    candidateAttempts: [],
+    hypothesisProposals: [],
+    hypothesisEvaluations: [],
     supervisorInterventions: [],
     claimSequence: 0,
     claims: [],
@@ -43,7 +43,7 @@ export class PersistentMemory {
     this.file = path.join(root, `${safe(gameId)}.json`);
     this.maxMemoryBytes = DEFAULT_MAX_MEMORY_BYTES;
     this.data = initial(gameId);
-    this.lineage = new CandidateLineage();
+    this.journal = new HypothesisJournal();
   }
 
   load() {
@@ -57,11 +57,14 @@ export class PersistentMemory {
         purpose: 'memory state',
       }).value;
       this.data = migrate({ ...initial(this.gameId), ...parsed, gameId: this.gameId });
-      this.lineage = new CandidateLineage({
-        proposals: this.data.candidateProposals,
-        committed: this.data.committedLineage,
-        attempts: this.data.candidateAttempts,
+      this.journal = new HypothesisJournal({
+        proposals: this.data.hypothesisProposals,
+        evaluations: this.data.hypothesisEvaluations,
       });
+      if ([...this.journal.proposals, ...this.journal.evaluations]
+        .some((record) => record.gameId !== this.gameId)) {
+        throw new Error('hypothesis journal crosses a game boundary');
+      }
     }
     return this;
   }
@@ -76,13 +79,14 @@ export class PersistentMemory {
       failedHypotheses: this.data.failedHypotheses.slice(-20),
       provenStrategies: this.data.provenStrategies.slice(-20),
       notes: this.data.notes.slice(-30),
-      lineage: {
-        proposalCount: this.lineage.proposals.length,
-        pendingCount: this.lineage.pendingProposals().length,
-        committedCount: this.lineage.committed.length,
-        attemptCount: this.lineage.attempts.length,
-        head: this.lineage.head,
-        best: this.lineage.best(),
+      hypothesisJournal: {
+        proposalCount: this.journal.proposals.length,
+        pendingCount: this.journal.pendingProposals().length,
+        evaluationCount: this.journal.evaluations.length,
+        confirmedCount: this.journal.byOutcome('confirmed').length,
+        contradictedCount: this.journal.byOutcome('contradicted').length,
+        inconclusiveCount: this.journal.byOutcome('inconclusive').length,
+        expiredCount: this.journal.byOutcome('expired').length,
       },
       supervisorInterventions: this.data.supervisorInterventions.slice(-8),
       claimSummary: claimSummary(this.data.claims),
@@ -241,14 +245,11 @@ export class PersistentMemory {
     return claim;
   }
 
-  evolution({ proposalLimit = 100, attemptLimit = 100, committedLimit = 100 } = {}) {
+  hypothesisJournal({ proposalLimit = 100, evaluationLimit = 100 } = {}) {
     return {
-      proposals: this.lineage.recentProposals(proposalLimit),
-      pending: this.lineage.pendingProposals().slice(-boundedLimit(proposalLimit)),
-      committed: this.lineage.recentCommitted(committedLimit),
-      attempts: this.lineage.recentAttempts(attemptLimit),
-      head: this.lineage.head,
-      best: this.lineage.best(),
+      proposals: this.journal.recentProposals(proposalLimit),
+      pending: this.journal.pendingProposals().slice(-boundedLimit(proposalLimit)),
+      evaluations: this.journal.recentEvaluations(evaluationLimit),
       supervisorInterventions: this.data.supervisorInterventions.slice(-50),
     };
   }
@@ -285,18 +286,32 @@ export class PersistentMemory {
     return this.snapshot();
   }
 
-  proposeCandidate({ gameId, candidate, baseline }) {
-    const proposal = this.lineage.propose({ gameId, candidate, baseline });
-    this.syncEvolution();
-    this.save();
-    return proposal;
+  proposeHypothesis({ gameId, hypothesis, baseline }) {
+    const previous = structuredClone(this.journal.toJSON());
+    const previousUpdatedAt = this.data.updatedAt;
+    try {
+      const proposal = this.journal.propose({ gameId, hypothesis, baseline });
+      this.syncHypothesisJournal();
+      this.save();
+      return proposal;
+    } catch (error) {
+      if (!wasAtomicWriteCommitted(error)) this.restoreHypothesisJournal(previous, previousUpdatedAt);
+      throw error;
+    }
   }
 
-  evaluateCandidate({ proposalId, evaluation }) {
-    const record = this.lineage.recordEvaluation({ proposalId, evaluation });
-    this.syncEvolution();
-    this.save();
-    return record;
+  evaluateHypothesis({ proposalId, evaluation }) {
+    const previous = structuredClone(this.journal.toJSON());
+    const previousUpdatedAt = this.data.updatedAt;
+    try {
+      const record = this.journal.recordEvaluation({ proposalId, evaluation });
+      this.syncHypothesisJournal();
+      this.save();
+      return record;
+    } catch (error) {
+      if (!wasAtomicWriteCommitted(error)) this.restoreHypothesisJournal(previous, previousUpdatedAt);
+      throw error;
+    }
   }
 
   recordSupervisor(intervention) {
@@ -312,19 +327,27 @@ export class PersistentMemory {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
     assertMemoryRoot(fs.lstatSync(this.root));
     this.data.updatedAt = new Date().toISOString();
-    this.syncEvolution();
+    this.syncHypothesisJournal();
     writeJsonAtomic(this.file, this.data, {
       root: this.root,
       maxBytes: this.maxMemoryBytes,
     });
   }
 
-  syncEvolution() {
-    const state = this.lineage.toJSON();
-    this.data.candidateProposals = state.proposals;
-    this.data.committedLineage = state.committed;
-    this.data.candidateAttempts = state.attempts;
+  syncHypothesisJournal() {
+    const state = this.journal.toJSON();
+    this.data.hypothesisProposals = state.proposals;
+    this.data.hypothesisEvaluations = state.evaluations;
     delete this.data.lineage;
+    delete this.data.candidateProposals;
+    delete this.data.committedLineage;
+    delete this.data.candidateAttempts;
+  }
+
+  restoreHypothesisJournal(state, updatedAt) {
+    this.journal = new HypothesisJournal(state);
+    this.data.updatedAt = updatedAt;
+    this.syncHypothesisJournal();
   }
 }
 
@@ -359,14 +382,129 @@ function migrate(data) {
     data.claimSequence = 0;
     data.claims = [];
   }
+  if (version < 5) {
+    const legacyProposals = Array.isArray(data.candidateProposals) ? data.candidateProposals : [];
+    const legacyAttempts = Array.isArray(data.candidateAttempts) && data.candidateAttempts.length
+      ? data.candidateAttempts
+      : Array.isArray(data.committedLineage) ? data.committedLineage : [];
+    const evidenceAttempts = legacyAttempts.filter(isLegacyEvidenceEvaluation);
+    const unverifiable = legacyAttempts.filter((record) => !isLegacyEvidenceEvaluation(record));
+    const proposals = legacyProposals.map((record) => migrateLegacyProposal(record));
+    const proposalIds = new Set(proposals.map((record) => record.id));
+    for (const attempt of evidenceAttempts) {
+      if (!proposalIds.has(attempt?.proposalId)) {
+        const proposal = migrateLegacyProposal(attempt, attempt?.proposalId);
+        proposals.push(proposal);
+        proposalIds.add(proposal.id);
+      }
+    }
+    data.hypothesisProposals = proposals;
+    data.hypothesisEvaluations = evidenceAttempts.map(migrateLegacyEvaluation);
+    data.notes = dedupe([
+      ...(Array.isArray(data.notes) ? data.notes : []),
+      ...unverifiable.map(archiveLegacyHypothesis),
+    ]).slice(-200);
+  }
   data.schemaVersion = MEMORY_SCHEMA_VERSION;
-  data.candidateProposals = Array.isArray(data.candidateProposals) ? data.candidateProposals : [];
-  data.committedLineage = Array.isArray(data.committedLineage) ? data.committedLineage : [];
-  data.candidateAttempts = Array.isArray(data.candidateAttempts) ? data.candidateAttempts : [];
+  data.hypothesisProposals = Array.isArray(data.hypothesisProposals) ? data.hypothesisProposals : [];
+  data.hypothesisEvaluations = Array.isArray(data.hypothesisEvaluations) ? data.hypothesisEvaluations : [];
   data.supervisorInterventions = Array.isArray(data.supervisorInterventions) ? data.supervisorInterventions : [];
   validateClaims(data);
   delete data.lineage;
+  delete data.candidateProposals;
+  delete data.committedLineage;
+  delete data.candidateAttempts;
   return data;
+}
+
+function migrateLegacyProposal(record, id = record?.id) {
+  const candidate = record?.candidate && typeof record.candidate === 'object' ? record.candidate : {};
+  const hypothesis = normalizeHypothesis(candidate);
+  return {
+    id,
+    gameId: record?.gameId,
+    ...hypothesis,
+    baseline: structuredClone(record?.baseline || {}),
+    createdAt: record?.createdAt || record?.evaluatedAt || record?.evaluation?.evaluatedAt
+      || new Date(0).toISOString(),
+  };
+}
+
+function isLegacyEvidenceEvaluation(record) {
+  return Boolean(record && typeof record === 'object'
+    && /^proposal-[a-f0-9]{12}$/.test(String(record.proposalId || ''))
+    && record.candidate && typeof record.candidate === 'object' && !Array.isArray(record.candidate)
+    && record.evaluation && typeof record.evaluation === 'object' && !Array.isArray(record.evaluation));
+}
+
+function archiveLegacyHypothesis(record) {
+  return boundedValue({
+    type: 'legacy-unverifiable-hypothesis',
+    reason: 'Retained from schema v1 without confirmation because it has no structured predictions or exact evidence references.',
+    legacyRecord: {
+      id: record?.id ?? null,
+      gameId: record?.gameId ?? null,
+      hypothesis: record?.hypothesis ?? null,
+      evidenceText: record?.evidence ?? null,
+      selfReportedScore: record?.score ?? null,
+      formerStatus: record?.accepted === true ? 'historically-marked-positive' : 'historically-marked-negative',
+      parentId: record?.parent ?? null,
+      recordedAt: record?.timestamp ?? null,
+    },
+  });
+}
+
+function migrateLegacyEvaluation(record) {
+  const candidate = record?.candidate && typeof record.candidate === 'object' ? record.candidate : {};
+  const hypothesis = normalizeHypothesis(candidate);
+  const legacy = record?.evaluation && typeof record.evaluation === 'object' ? record.evaluation : {};
+  const outcome = legacyOutcome(legacy);
+  const evaluatedAt = legacy.evaluatedAt || record?.evaluatedAt || new Date(0).toISOString();
+  const evidence = structuredClone(Array.isArray(legacy.evidence) ? legacy.evidence : []);
+  const missingEvidenceRefs = structuredClone(
+    Array.isArray(legacy.missingEvidenceRefs) ? legacy.missingEvidenceRefs : [],
+  );
+  const evaluation = {
+    evaluator: 'migrated-schema-v4-prediction-evidence',
+    evaluatedAt,
+    proposalId: record?.proposalId,
+    outcome,
+    evidenceBoundaryValid: outcome === 'confirmed' || outcome === 'contradicted',
+    predictionChecks: structuredClone(legacy.predictionChecks || {
+      totalPredictions: 0,
+      totalClaims: 0,
+      matchedClaims: 0,
+      accuracy: 0,
+      unmatchedPredictions: [],
+      checks: [],
+    }),
+    evidence,
+    missingEvidenceRefs,
+    reasons: [
+      ...(Array.isArray(legacy.reasons) ? legacy.reasons.map(String) : []),
+      'Migrated from schema v4: prior acceptance, score, best, and parent labels did not install behavior.',
+    ],
+  };
+  return {
+    id: record?.id,
+    proposalId: record?.proposalId,
+    gameId: record?.gameId,
+    ...hypothesis,
+    baseline: structuredClone(record?.baseline || {}),
+    outcome,
+    evaluation,
+    evaluatedAt,
+  };
+}
+
+function legacyOutcome(evaluation) {
+  if (evaluation?.evaluator === 'system-expiry-v1') return 'expired';
+  const checks = evaluation?.predictionChecks;
+  if (checks && Number(checks.totalClaims) > 0
+      && Array.isArray(checks.unmatchedPredictions) && checks.unmatchedPredictions.length === 0) {
+    return Number(checks.matchedClaims) === Number(checks.totalClaims) ? 'confirmed' : 'contradicted';
+  }
+  return evaluation?.correctness === true ? 'confirmed' : 'inconclusive';
 }
 
 function normalizeClaimOperation(input) {

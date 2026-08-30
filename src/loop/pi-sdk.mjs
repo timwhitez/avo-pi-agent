@@ -128,7 +128,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     maxTokens: transcriptMaxTokens(capabilities, process.env.AVO_TRANSCRIPT_MAX_TOKENS),
     onCompaction: onEvent,
   };
-  // A single fat read (full lineage, a whole workspace file) kept verbatim in
+  // A single fat read (full journal, a whole workspace file) kept verbatim in
   // the recent window can exceed the provider context by itself.
   const maxToolResultChars = positiveEnvInt('AVO_TOOL_RESULT_MAX_CHARS', 24_000);
 
@@ -850,5 +850,5 @@ const RECALL_SAFE_TOOLS = new Set([
   'workspace_list',
   'workspace_read',
   'memory_read',
-  'evolution_read',
+  'journal_read',
 ]);

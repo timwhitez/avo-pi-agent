@@ -8,91 +8,107 @@ import { DurableMemory } from '../src/core/durable-memory.mjs';
 function root() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'avo-durable-memory-'));
 }
-function candidate(name) {
+
+function hypothesis(name) {
   return {
     hypothesis: name,
-    plan: 'test',
+    plan: 'test one exact transition',
     predictions: [{ action: 'ACTION1', expected: { changed: true } }],
-    fingerprint: name,
   };
 }
-function evaluation({ accepted = false, evidence = [] } = {}) {
+
+function evaluation(outcome = 'inconclusive', evidence = []) {
+  const conclusive = outcome === 'confirmed' || outcome === 'contradicted';
+  const matched = outcome === 'confirmed' ? 1 : 0;
   return {
-    evaluator: 'test',
-    correctness: accepted,
-    accepted,
-    scoreVector: { dimensions: [], values: [], named: {} },
+    evaluator: 'test-hypothesis-evidence-v1',
+    evaluatedAt: new Date().toISOString(),
+    outcome,
+    evidenceBoundaryValid: conclusive,
+    predictionChecks: {
+      totalPredictions: 1,
+      totalClaims: conclusive ? 1 : 0,
+      matchedClaims: matched,
+      accuracy: matched,
+      unmatchedPredictions: [],
+      checks: [],
+    },
     evidence,
+    missingEvidenceRefs: [],
     reasons: [],
   };
 }
 
-test('expires stale pending proposals and retains referenced evidence IDs', () => {
+test('expires stale proposals and protects evidence for both conclusive outcomes', () => {
   const dir = root();
   try {
     const memory = new DurableMemory(dir, 'game-a', { pendingMaxAgeMs: 10, maxPending: 4 }).load();
-    const proposal = memory.proposeCandidate({
-      gameId: 'game-a',
-      candidate: candidate('h1'),
+    const proposal = memory.proposeHypothesis({
+      gameId: 'game-a', hypothesis: hypothesis('h1'),
       baseline: { actionIndex: 0, evidenceRef: 'evidence-baseline' },
     });
-    memory.lineage.proposals[0] = Object.freeze({ ...proposal, createdAt: new Date(0).toISOString() });
-    memory.syncEvolution();
+    memory.journal.proposals[0] = Object.freeze({ ...proposal, createdAt: new Date(0).toISOString() });
+    memory.syncHypothesisJournal();
     memory.save();
     const reloaded = new DurableMemory(dir, 'game-a', { pendingMaxAgeMs: 10, maxPending: 4 }).load();
-    assert.equal(reloaded.lineage.pendingProposals().length, 0);
-    assert.equal(reloaded.lineage.attempts.at(-1).evaluation.evaluator, 'system-expiry-v1');
+    assert.equal(reloaded.journal.pendingProposals().length, 0);
+    assert.equal(reloaded.journal.evaluations.at(-1).outcome, 'expired');
 
-    const acceptedProposal = reloaded.proposeCandidate({
-      gameId: 'game-a',
-      candidate: candidate('h2'),
-      baseline: { actionIndex: 1, evidenceRef: 'evidence-base-2' },
-    });
-    reloaded.evaluateCandidate({
-      proposalId: acceptedProposal.id,
-      evaluation: evaluation({ accepted: true, evidence: [{ id: 'evidence-action-2' }] }),
-    });
+    for (const [index, outcome] of ['confirmed', 'contradicted'].entries()) {
+      const next = reloaded.proposeHypothesis({
+        gameId: 'game-a', hypothesis: hypothesis(`h${index + 2}`),
+        baseline: { actionIndex: index + 1, evidenceRef: `evidence-base-${index + 2}` },
+      });
+      reloaded.evaluateHypothesis({
+        proposalId: next.id,
+        evaluation: evaluation(outcome, [{ id: `evidence-action-${index + 2}` }]),
+      });
+    }
+
     const memoryClaim = reloaded.applyClaim({
-      operation: 'propose',
-      subject: 'action1',
-      type: 'action-semantics',
+      operation: 'propose', subject: 'action1', type: 'action-semantics',
       content: 'ACTION1 changes the observed state.',
-    }, [{ id: 'evidence-000003-cccccccccccc' }]).claim;
+    }, []).claim;
     reloaded.applyClaim({
-      operation: 'confirm',
-      claimId: memoryClaim.id,
+      operation: 'confirm', claimId: memoryClaim.id,
       evidenceRefs: ['evidence-000003-cccccccccccc'],
     }, [{ id: 'evidence-000003-cccccccccccc' }]);
     assert.deepEqual(
       new Set(reloaded.protectedEvidenceIds()),
-      new Set(['evidence-base-2', 'evidence-action-2', 'evidence-000003-cccccccccccc']),
+      new Set([
+        'evidence-base-2', 'evidence-action-2',
+        'evidence-base-3', 'evidence-action-3',
+        'evidence-000003-cccccccccccc',
+      ]),
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('bounds rejected attempts while preserving committed lineage', () => {
+test('bounds non-conclusive evaluations while preserving confirmed and contradicted history', () => {
   const dir = root();
   try {
     const memory = new DurableMemory(dir, 'game-b', {
-      maxAttempts: 3,
-      maxCommitted: 2,
+      maxEvaluations: 3,
+      maxConclusive: 2,
       maxProposals: 8,
       maxPending: 2,
     }).load();
-    for (let index = 0; index < 6; index += 1) {
-      const proposal = memory.proposeCandidate({
-        gameId: 'game-b',
-        candidate: candidate(`h${index}`),
-        baseline: { actionIndex: index },
+    const outcomes = ['confirmed', 'contradicted', 'inconclusive', 'inconclusive', 'inconclusive', 'inconclusive'];
+    for (const [index, outcome] of outcomes.entries()) {
+      const proposal = memory.proposeHypothesis({
+        gameId: 'game-b', hypothesis: hypothesis(`h${index}`), baseline: { actionIndex: index },
       });
-      memory.evaluateCandidate({ proposalId: proposal.id, evaluation: evaluation({ accepted: index === 0 }) });
+      memory.evaluateHypothesis({
+        proposalId: proposal.id,
+        evaluation: evaluation(outcome, outcome === 'inconclusive' ? [] : [{ id: `evidence-${index}` }]),
+      });
     }
-    assert.equal(memory.lineage.committed.length, 1);
-    assert.ok(memory.lineage.attempts.length <= 3);
-    assert.ok(memory.lineage.proposals.length <= 3);
-    assert.equal(memory.lineage.committed[0].candidate.hypothesis, 'h0');
+    assert.equal(memory.journal.byOutcome('confirmed').length, 1);
+    assert.equal(memory.journal.byOutcome('contradicted').length, 1);
+    assert.ok(memory.journal.evaluations.length <= 3);
+    assert.ok(memory.journal.proposals.length <= 3);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

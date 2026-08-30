@@ -2,7 +2,7 @@
   "name": "avo-pi-arc-agi3",
   "version": "0.1.0",
   "private": true,
-  "description": "A clean-room AVO-style ARC-AGI-3 agent built around the Pi agent loop.",
+  "description": "An ARC-AGI-3 agent harness inspired by public AVO material and built around the Pi agent loop.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

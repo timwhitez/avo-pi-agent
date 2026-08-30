@@ -14,7 +14,7 @@ without changing the JSONL protocol:
    frames, state, level delta, legal controls, and scorecard responses;
 2. bounded supervisor markers containing only an intervention hash, cited
    evidence IDs, evidence-backed flag, and direction count;
-3. durable memory and lineage change markers containing counts and hashes rather
+3. durable memory and hypothesis-journal change markers containing counts and hashes rather
    than raw private memory text.
 
 The round process log, complete replay corpus, exact frames, memory/workspace

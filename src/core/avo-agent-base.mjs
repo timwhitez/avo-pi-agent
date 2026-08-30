@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 
 import { PersistentMemory } from './memory.mjs';
 import { StallSupervisor } from './supervisor.mjs';
-import { CandidateEvaluator, normalizeCandidate, objectiveVector } from './evaluator.mjs';
+import { HypothesisEvaluator, normalizeHypothesis, objectiveVector } from './evaluator.mjs';
 import { ArcKnowledgeBase } from './knowledge-base.mjs';
 import { WorkspaceSandbox } from './workspace.mjs';
 import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
@@ -45,10 +45,10 @@ export const AVO_TOOL_NAMES = Object.freeze([
   'workspace_write',
   'workspace_python',
   'memory_read',
-  'evolution_read',
+  'journal_read',
   'memory_update',
-  'candidate_propose',
-  'candidate_evaluate',
+  'hypothesis_propose',
+  'hypothesis_evaluate',
   'finish',
 ]);
 
@@ -70,7 +70,7 @@ export class AvoArcAgent {
     this.captureScorecard = captureScorecard;
     this.memory = new PersistentMemory(config.memoryDir, gameId).load();
     this.knowledge = new ArcKnowledgeBase();
-    this.evaluator = new CandidateEvaluator();
+    this.hypothesisEvaluator = new HypothesisEvaluator();
     this.workspace = new WorkspaceSandbox({
       root: config.workspaceDir || `${config.memoryDir}-workspaces`,
       gameId,
@@ -372,7 +372,7 @@ export class AvoArcAgent {
       {
         name: 'memory_read',
         label: 'Read persistent game memory',
-        description: 'Read legacy harness notes, lineage summary, and one bounded page of typed claims. Page or filter claims by stable ID sequence, status, and local text query.',
+        description: 'Read harness notes, hypothesis-journal counts, and one bounded page of typed claims. Page or filter claims by stable ID sequence, status, and local text query.',
         parameters: {
           type: 'object',
           properties: {
@@ -391,21 +391,20 @@ export class AvoArcAgent {
         },
       },
       {
-        name: 'evolution_read',
-        label: 'Read proposals, evaluated attempts, and committed lineage',
-        description: 'Inspect pre-experiment proposals, pending hypotheses, externally evaluated failed attempts, committed lineage parents, and supervisor history.',
+        name: 'journal_read',
+        label: 'Read hypothesis and evidence history',
+        description: 'Inspect optional pre-experiment hypotheses, pending proposals, later evidence evaluations, and supervisor history. Confirmation records prediction agreement only; it does not install behavior.',
         parameters: {
           type: 'object',
           properties: {
             proposalLimit: { type: 'integer', minimum: 1, maximum: 200 },
-            attemptLimit: { type: 'integer', minimum: 1, maximum: 200 },
-            committedLimit: { type: 'integer', minimum: 1, maximum: 200 },
+            evaluationLimit: { type: 'integer', minimum: 1, maximum: 200 },
           },
           additionalProperties: false,
         },
-        execute: async ({ proposalLimit = 100, attemptLimit = 100, committedLimit = 100 } = {}) => {
-          const evolution = this.memory.evolution({ proposalLimit, attemptLimit, committedLimit });
-          return this.toolResult(JSON.stringify(evolution, null, 2), { evolution });
+        execute: async ({ proposalLimit = 100, evaluationLimit = 100 } = {}) => {
+          const journal = this.memory.hypothesisJournal({ proposalLimit, evaluationLimit });
+          return this.toolResult(JSON.stringify(journal, null, 2), { journal });
         },
       },
       {
@@ -434,9 +433,9 @@ export class AvoArcAgent {
         execute: async (input) => this.updateMemoryClaim(input),
       },
       {
-        name: 'candidate_propose',
+        name: 'hypothesis_propose',
         label: 'Persist a testable hypothesis before acting',
-        description: 'Create a durable pre-experiment proposal with structured action predictions. This is optional, but use it for hypotheses worth retaining or comparing across contexts.',
+        description: 'Create a durable pre-experiment proposal with structured action predictions. This is optional; use it only when an evidence-linked record is useful.',
         parameters: {
           type: 'object',
           required: ['hypothesis', 'plan', 'predictions'],
@@ -466,12 +465,12 @@ export class AvoArcAgent {
           },
           additionalProperties: false,
         },
-        execute: async (input) => this.proposeCandidate(input),
+        execute: async (input) => this.proposeHypothesis(input),
       },
       {
-        name: 'candidate_evaluate',
-        label: 'Externally evaluate one prior proposal',
-        description: 'Evaluate a durable proposal against post-proposal observe/act evidence. The model cannot provide score, correctness, acceptance, or parent fields.',
+        name: 'hypothesis_evaluate',
+        label: 'Check one hypothesis against later evidence',
+        description: 'Compare a durable proposal with exact post-proposal action evidence. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
         parameters: {
           type: 'object',
           required: ['proposalId', 'evidenceRefs'],
@@ -481,7 +480,7 @@ export class AvoArcAgent {
           },
           additionalProperties: false,
         },
-        execute: async (input) => this.evaluateCandidate(input),
+        execute: async (input) => this.evaluateHypothesis(input),
       },
       {
         name: 'finish',
@@ -800,15 +799,16 @@ export class AvoArcAgent {
     return { postTerminalGameplayActions: postTerminal };
   }
 
-  proposeCandidate(input) {
-    const candidate = normalizeCandidate(input);
-    if (!candidate.hypothesis || !candidate.plan || !candidate.predictions.length) {
-      throw new Error('candidate proposal requires hypothesis, plan, and structured predictions');
+  proposeHypothesis(input) {
+    const hypothesis = normalizeHypothesis(input);
+    if (!hypothesis.hypothesis || !hypothesis.plan || !hypothesis.predictions.length) {
+      throw new Error('hypothesis proposal requires hypothesis, plan, and structured predictions');
     }
-    const proposal = this.memory.proposeCandidate({
+    const proposal = this.memory.proposeHypothesis({
       gameId: this.gameId,
-      candidate,
+      hypothesis,
       baseline: {
+        evidenceRef: this.evidenceLedger.at(-1)?.id ?? null,
         frameHash: frameHash(this.frame),
         levelsCompleted: Number(this.frame?.levelsCompleted || 0),
         actionIndex: this.actions,
@@ -816,38 +816,27 @@ export class AvoArcAgent {
       },
     });
     return this.toolResult(
-      `Proposal ${proposal.id} persisted before experiment. Execute discriminating actions, then call candidate_evaluate with post-proposal evidence references.`,
+      `Hypothesis ${proposal.id} persisted before the experiment. After a discriminating action, call hypothesis_evaluate with exact post-proposal evidence references.`,
       { proposal },
     );
   }
 
-  evaluateCandidate({ proposalId, evidenceRefs }) {
-    const proposal = this.memory.lineage.getProposal(proposalId);
-    if (!proposal) throw new Error(`candidate proposal not found: ${proposalId}`);
-    const best = this.memory.lineage.best();
-    const evaluation = this.evaluator.evaluate({
+  evaluateHypothesis({ proposalId, evidenceRefs }) {
+    const proposal = this.memory.journal.getProposal(proposalId);
+    if (!proposal) throw new Error(`hypothesis proposal not found: ${proposalId}`);
+    const evaluation = this.hypothesisEvaluator.evaluate({
       gameId: this.gameId,
       proposal,
       evidenceRefs,
-      frame: this.frame,
-      actions: this.actions,
-      uniqueStates: this.uniqueStates.size,
-      evidenceLedger: this.evidenceLedger,
-      bestRecord: best,
-      currentHead: this.memory.lineage.head,
-      committedRecords: this.memory.lineage.committed,
+      evidenceLedger: this.claimEvidenceLedger(),
     });
-    const record = this.memory.evaluateCandidate({ proposalId, evaluation });
-    if (!record.accepted) {
-      this.memory.merge({
-        failedHypotheses: [`Rejected attempt ${record.id}: ${record.candidate.hypothesis}. ${evaluation.reasons.join('; ')}`],
-      });
-    }
+    const record = this.memory.evaluateHypothesis({ proposalId, evaluation });
+    const explanation = evaluation.outcome === 'confirmed'
+      ? 'Declared predictions matched the cited later evidence. No policy, prompt, tool, or code was installed, and no objective improvement is claimed.'
+      : evaluation.reasons.join('; ');
     return this.toolResult(
-      record.accepted
-        ? `Proposal ${proposalId} passed external correctness and candidate ${record.id} was committed. Objective vector=${JSON.stringify(evaluation.scoreVector.named)}.`
-        : `Attempt ${record.id} remains in trajectory only and was not committed: ${evaluation.reasons.join('; ')}.`,
-      { proposal, record, best: this.memory.lineage.best() },
+      `Hypothesis ${proposalId} outcome=${evaluation.outcome}. ${explanation}`,
+      { proposal, record },
     );
   }
 
@@ -1092,18 +1081,18 @@ export class AvoArcAgent {
   }
 
   systemPrompt() {
-    return `You are the autonomous variation operator for one ARC-AGI-3 game, running inside the official Pi agent loop.
+    return `You are an autonomous agent for one ARC-AGI-3 game, running inside the official Pi agent loop.
 
-AVO contract:
-1. You control the whole long-horizon loop. Decide what prior memory, proposals, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
+Operating contract:
+1. You control the whole long-horizon loop. Decide what prior memory, hypothesis records, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
 2. Use direct interaction with compact typed previews, exact referenced text grids, and currently legal gameplay actions as the primary ARC policy. When a delta is truncated or the shape changes, use trajectory_read after/region/diff before relying on missing cells. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
 3. Gameplay actions and the separate reset controller both consume environment actions. Use one act while uncertain; act_sequence may execute a tested 1–20 step plan but cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or execution failure. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
-4. For a hypothesis worth preserving, call candidate_propose before the experiment with structured predictions. Later candidate_evaluate accepts only the proposal ID and post-proposal objective evidence. You cannot supply correctness, score, parent, or acceptance. Failed attempts remain searchable; only externally verified proposals may enter committed lineage.
-5. Do not follow a rigid fixed workflow. Relevant typed memory claims may be surfaced automatically with their status and evidence refs; use memory_update to distinguish unverified proposals from evidence-backed confirmations or corrections. Consult full memory, evolution history, knowledge, or scratch files only when useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
+4. The hypothesis journal is optional. For a hypothesis worth preserving, call hypothesis_propose before the experiment with structured predictions; hypothesis_evaluate later accepts only its ID and exact post-proposal evidence. A confirmed entry means only that those predictions matched. It does not install behavior or prove improvement.
+5. Do not follow a rigid fixed workflow. Relevant typed memory claims may be surfaced automatically with their status and evidence refs; use memory_update to distinguish unverified proposals from evidence-backed confirmations or corrections. Consult full memory, journal history, knowledge, or scratch files only when useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
 7. Continue through every level while useful valid experiments remain. You may explicitly finish an active episode only when no useful valid experiment remains. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
-You have ARC interaction, domain knowledge, structured memory, an optional hypothesis lineage, objective evaluation, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
+You have ARC interaction, domain knowledge, structured memory, an optional hypothesis/evidence journal, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
   }
 
   async run() {
@@ -1154,11 +1143,12 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       won: isWin(this.frame),
       loop: this.loop.kind,
       error: this.executionError ?? this.lastResult?.error ?? null,
-      lineage: {
-        proposals: this.memory.lineage.proposals.length,
-        pending: this.memory.lineage.pendingProposals().length,
-        committed: this.memory.lineage.committed.length,
-        attempts: this.memory.lineage.attempts.length,
+      hypothesisJournal: {
+        proposals: this.memory.journal.proposals.length,
+        pending: this.memory.journal.pendingProposals().length,
+        evaluations: this.memory.journal.evaluations.length,
+        confirmed: this.memory.journal.byOutcome('confirmed').length,
+        contradicted: this.memory.journal.byOutcome('contradicted').length,
       },
       scorecard: this.captureScorecard && typeof this.environment.scorecard === 'function'
         ? await this.environment.scorecard().catch(() => null)

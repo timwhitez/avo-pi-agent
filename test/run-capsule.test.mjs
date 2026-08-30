@@ -197,7 +197,11 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
   for (const file of [
     'src/core/durable-avo-agent.mjs',
+    'src/core/durable-memory.mjs',
     'src/core/evidence-store.mjs',
+    'src/core/evaluator.mjs',
+    'src/core/hypothesis-journal.mjs',
+    'src/core/memory.mjs',
     'src/core/observation.mjs',
     'src/core/supervisor.mjs',
   ]) {

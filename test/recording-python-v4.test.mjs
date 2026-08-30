@@ -28,9 +28,8 @@ test('EOF-safe full-evidence recorder preserves streaming and exits cleanly', (t
     fs.writeFileSync(path.join(memory, 'ls20.json'), JSON.stringify({
       gameId: 'ls20',
       actionSemantics: { ACTION1: 'probe' },
-      proposals: [{ id: 'p-1' }],
-      attempts: [{ id: 'a-1', proposalId: 'p-1' }],
-      committed: [{ id: 'c-1' }],
+      hypothesisProposals: [{ id: 'p-1' }],
+      hypothesisEvaluations: [{ id: 'e-1', proposalId: 'p-1', outcome: 'confirmed' }],
       supervisorInterventions: [{ evidenceRefs: ['e-1'], directions: [{ nextExperiment: 'different probe' }] }],
       notes: ['private text must remain outside marker streams'],
     }));
@@ -56,7 +55,7 @@ test('EOF-safe full-evidence recorder preserves streaming and exits cleanly', (t
     assert.ok(arc.some((record) => record.kind === 'arc.response'));
     assert.ok(arc.some((record) => record.kind === 'supervisor.intervention'));
     assert.ok(durable.some((record) => record.kind === 'memory.snapshot'));
-    assert.ok(durable.some((record) => record.kind === 'lineage.snapshot'));
+    assert.ok(durable.some((record) => record.kind === 'hypothesis_journal.snapshot'));
     assert.equal(JSON.stringify([...arc, ...durable]).includes('private text must remain'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

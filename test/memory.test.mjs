@@ -5,62 +5,115 @@ import os from 'node:os';
 import path from 'node:path';
 import { PersistentMemory } from '../src/core/memory.mjs';
 
-function candidate(name) {
+function hypothesis(name) {
   return {
     hypothesis: name,
     plan: `Test ${name} against one recorded transition.`,
     predictions: [{ action: 'ACTION1', data: {}, expected: { changed: true }, rationale: 'controlled probe' }],
-    fingerprint: name,
   };
 }
 
-function evaluation({ accepted, values }) {
+function evaluation(outcome, evidenceId) {
+  const conclusive = outcome === 'confirmed' || outcome === 'contradicted';
+  const matchedClaims = outcome === 'confirmed' ? 1 : 0;
   return {
-    evaluator: 'test-objective',
-    accepted,
-    correctness: accepted,
-    scoreVector: {
-      dimensions: ['won', 'levelsCompleted', 'progressGain', 'actionEfficiency', 'stateCoverageGain'],
-      values,
-      named: {},
+    evaluator: 'test-hypothesis-evidence-v1',
+    evaluatedAt: new Date().toISOString(),
+    outcome,
+    evidenceBoundaryValid: conclusive,
+    predictionChecks: {
+      totalPredictions: 1,
+      totalClaims: conclusive ? 1 : 0,
+      matchedClaims,
+      accuracy: matchedClaims,
+      unmatchedPredictions: [],
+      checks: [],
     },
-    reasons: [accepted ? 'accepted by external fixture' : 'rejected by external fixture'],
+    evidence: conclusive ? [{ id: evidenceId }] : [],
+    missingEvidenceRefs: [],
+    reasons: [`fixture outcome=${outcome}`],
   };
 }
 
-test('persists structured memory and externally evaluated lineage', () => {
+test('persists confirmed and contradicted hypothesis evidence without selection state', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-'));
   try {
     const memory = new PersistentMemory(root, 'game-a').load();
     memory.merge({ goals: ['reach marker'], actionSemantics: { ACTION1: 'up' } });
 
-    const acceptedProposal = memory.proposeCandidate({
-      gameId: 'game-a',
-      candidate: candidate('h1'),
+    const confirmed = memory.proposeHypothesis({
+      gameId: 'game-a', hypothesis: hypothesis('h1'),
       baseline: { frameHash: 'frame-a', levelsCompleted: 0, actionIndex: 0, uniqueStates: 1 },
     });
-    const accepted = memory.evaluateCandidate({
-      proposalId: acceptedProposal.id,
-      evaluation: evaluation({ accepted: true, values: [0, 1, 1, -1, 1] }),
+    memory.evaluateHypothesis({
+      proposalId: confirmed.id,
+      evaluation: evaluation('confirmed', 'evidence-000001-111111111111'),
     });
 
-    const rejectedProposal = memory.proposeCandidate({
-      gameId: 'game-a',
-      candidate: candidate('h2'),
+    const contradicted = memory.proposeHypothesis({
+      gameId: 'game-a', hypothesis: hypothesis('h2'),
       baseline: { frameHash: 'frame-b', levelsCompleted: 1, actionIndex: 1, uniqueStates: 2 },
     });
-    const rejected = memory.evaluateCandidate({
-      proposalId: rejectedProposal.id,
-      evaluation: evaluation({ accepted: false, values: [0, 1, 0, -1, 0] }),
+    memory.evaluateHypothesis({
+      proposalId: contradicted.id,
+      evaluation: evaluation('contradicted', 'evidence-000002-222222222222'),
     });
 
     const reloaded = new PersistentMemory(root, 'game-a').load();
     assert.equal(reloaded.snapshot().actionSemantics.ACTION1, 'up');
-    assert.equal(reloaded.lineage.best().id, accepted.id);
-    assert.equal(reloaded.lineage.attempts.length, 2);
-    assert.equal(reloaded.lineage.committed.length, 1);
-    assert.equal(rejected.accepted, false);
-    assert.equal(reloaded.evolution().attempts[1].candidate.hypothesis, 'h2');
+    assert.equal(reloaded.journal.byOutcome('confirmed').length, 1);
+    assert.equal(reloaded.journal.byOutcome('contradicted').length, 1);
+    assert.equal(reloaded.journal.pendingProposals().length, 0);
+    assert.equal(reloaded.hypothesisJournal().evaluations[1].hypothesis, 'h2');
+
+    const durable = JSON.parse(fs.readFileSync(reloaded.file, 'utf8'));
+    assert.equal(durable.schemaVersion, 5);
+    assert.ok(Array.isArray(durable.hypothesisProposals));
+    assert.ok(Array.isArray(durable.hypothesisEvaluations));
+    for (const forbidden of ['candidateProposals', 'candidateAttempts', 'committedLineage', 'lineage']) {
+      assert.equal(forbidden in durable, false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('journal mutations roll back before rename and survive post-rename persistence errors', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-atomic-'));
+  const memory = new PersistentMemory(root, 'game-a').load();
+  const originalRename = fs.renameSync;
+  try {
+    fs.renameSync = () => { throw Object.assign(new Error('synthetic rename failure'), { code: 'EIO' }); };
+    assert.throws(() => memory.proposeHypothesis({
+      gameId: 'game-a', hypothesis: hypothesis('rollback'), baseline: { actionIndex: 0 },
+    }), /synthetic rename failure/);
+    assert.equal(memory.journal.proposals.length, 0);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  const proposal = memory.proposeHypothesis({
+    gameId: 'game-a', hypothesis: hypothesis('durable'), baseline: { actionIndex: 0 },
+  });
+  const originalFsync = fs.fsyncSync;
+  let calls = 0;
+  try {
+    fs.fsyncSync = function patchedFsync(descriptor, ...args) {
+      calls += 1;
+      if (calls === 2) throw Object.assign(new Error('synthetic directory fsync failure'), { code: 'EIO' });
+      return originalFsync.call(this, descriptor, ...args);
+    };
+    assert.throws(() => memory.evaluateHypothesis({
+      proposalId: proposal.id,
+      evaluation: evaluation('confirmed', 'evidence-000001-111111111111'),
+    }), (error) => error.code === 'ATOMIC_WRITE_POST_COMMIT');
+  } finally {
+    fs.fsyncSync = originalFsync;
+  }
+
+  try {
+    assert.equal(memory.journal.evaluations.length, 1);
+    assert.equal(new PersistentMemory(root, 'game-a').load().journal.evaluations.length, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

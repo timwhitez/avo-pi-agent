@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { frameHash } from './observation.mjs';
 
 const MAX_TEXT = 4000;
 const EXPECTED_KEYS = new Set(['changed', 'levelDeltaAtLeast', 'state', 'afterHash']);
@@ -9,27 +8,25 @@ const EXPECTED_KEYS = new Set(['changed', 'levelDeltaAtLeast', 'state', 'afterHa
  * Predictions are intentionally structured so an external evaluator can check
  * them against later environment evidence instead of grading persuasive prose.
  */
-export function normalizeCandidate(input = {}) {
+export function normalizeHypothesis(input = {}) {
   const predictions = Array.isArray(input.predictions)
     ? input.predictions.slice(0, 32).map(normalizePrediction).filter(Boolean)
     : [];
-  const candidate = {
+  const hypothesis = {
     hypothesis: bounded(input.hypothesis),
     plan: bounded(input.plan),
     predictions,
   };
-  candidate.fingerprint = crypto.createHash('sha256')
-    .update(JSON.stringify(candidate))
+  hypothesis.fingerprint = crypto.createHash('sha256')
+    .update(JSON.stringify(hypothesis))
     .digest('hex')
     .slice(0, 16);
-  return candidate;
+  return hypothesis;
 }
 
 /**
- * ARC-specific objective vector used as AVO's external scoring function.
- * It is derived only from environment state, proposal baseline, and recorded
- * environment events. Model-authored text never contributes numeric score or
- * acceptance. This local vector is not the official ARC RHAE score.
+ * Compact environment-progress telemetry. It is not an official ARC score and
+ * does not confirm, rank, install, or otherwise select a hypothesis.
  */
 export function objectiveVector({ frame, actions, uniqueStates, baseline = {} }) {
   const won = String(frame?.state || '').toUpperCase().includes('WIN') ? 1 : 0;
@@ -45,22 +42,12 @@ export function objectiveVector({ frame, actions, uniqueStates, baseline = {} })
   };
 }
 
-export function compareObjective(left, right) {
-  const a = left?.values || [];
-  const b = right?.values || [];
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const delta = Number(a[index] || 0) - Number(b[index] || 0);
-    if (delta !== 0) return Math.sign(delta);
-  }
-  return 0;
-}
-
-export class CandidateEvaluator {
-  evaluate({ gameId, proposal, evidenceRefs, frame, actions, uniqueStates, evidenceLedger, bestRecord, currentHead, committedRecords = [] }) {
-    if (!proposal?.id || !proposal?.candidate || !proposal?.baseline) {
-      throw new Error('candidate evaluation requires a durable proposal');
+export class HypothesisEvaluator {
+  evaluate({ gameId, proposal, evidenceRefs, evidenceLedger }) {
+    if (!proposal?.id || !proposal?.baseline) {
+      throw new Error('hypothesis evaluation requires a durable proposal');
     }
-    const candidate = normalizeCandidate(proposal.candidate);
+    const hypothesis = normalizeHypothesis(proposal);
     const requestedRefs = Array.isArray(evidenceRefs)
       ? [...new Set(evidenceRefs.map(String))].slice(0, 64)
       : [];
@@ -68,42 +55,34 @@ export class CandidateEvaluator {
     const byId = new Map(events.map((event) => [event.id, event]));
     const resolvedEvidence = requestedRefs.map((id) => byId.get(id)).filter(Boolean);
     const missingEvidenceRefs = requestedRefs.filter((id) => !byId.has(id));
+    const proposalBelongsToGame = proposal.gameId === gameId;
     const evidenceBelongsToGame = resolvedEvidence.every((event) => event.gameId === gameId);
     const evidencePostdatesProposal = resolvedEvidence.every(
       (event) => nonNegativeInteger(event.actionIndex) > nonNegativeInteger(proposal.baseline.actionIndex),
     );
     const actionEvidence = resolvedEvidence.filter((event) => event.type === 'environment-action');
-    const predictionChecks = checkPredictions(candidate.predictions, actionEvidence);
-    const validFrame = Array.isArray(frame?.frame) && frame.frame.length > 0;
+    const predictionChecks = checkPredictions(hypothesis.predictions, actionEvidence);
     const hasEvidence = requestedRefs.length > 0 && missingEvidenceRefs.length === 0;
-    const hasSubstantiveCandidate = Boolean(candidate.hypothesis && candidate.plan && candidate.predictions.length);
-    const externallyVerified = predictionChecks.totalClaims > 0
-      && predictionChecks.matchedClaims === predictionChecks.totalClaims
-      && predictionChecks.unmatchedPredictions.length === 0;
-    const correctness = validFrame
-      && hasEvidence
+    const hasSubstantiveHypothesis = Boolean(
+      hypothesis.hypothesis && hypothesis.plan && hypothesis.predictions.length,
+    );
+    const evidenceBoundaryValid = hasEvidence
       && evidenceBelongsToGame
       && evidencePostdatesProposal
-      && hasSubstantiveCandidate
-      && externallyVerified;
-    const duplicate = committedRecords.some((record) => record.candidate?.fingerprint === candidate.fingerprint);
-    const expectedParent = currentHead?.id ?? null;
-    const lineageCurrent = (proposal.parent ?? null) === expectedParent;
-    const scoreVector = objectiveVector({
-      frame,
-      actions,
-      uniqueStates,
-      baseline: proposal.baseline,
-    });
-    const bestVector = bestRecord?.evaluation?.scoreVector ?? null;
-    const comparisonToBest = bestVector ? compareObjective(scoreVector, bestVector) : 1;
-    const matchedOrImprovedBest = !bestVector || comparisonToBest >= 0;
-    const accepted = correctness && !duplicate && lineageCurrent && matchedOrImprovedBest;
+      && hasSubstantiveHypothesis
+      && proposalBelongsToGame
+      && predictionChecks.totalClaims > 0
+      && predictionChecks.unmatchedPredictions.length === 0;
+    const outcome = !evidenceBoundaryValid
+      ? 'inconclusive'
+      : predictionChecks.matchedClaims === predictionChecks.totalClaims
+        ? 'confirmed'
+        : 'contradicted';
 
     const reasons = [];
-    if (!validFrame) reasons.push('current environment frame is not structurally valid');
-    if (!hasSubstantiveCandidate) reasons.push('proposal requires a hypothesis, plan, and at least one structured prediction');
-    if (!requestedRefs.length) reasons.push('evaluation supplied no objective evidence references');
+    if (!hasSubstantiveHypothesis) reasons.push('proposal requires a hypothesis, plan, and at least one structured prediction');
+    if (!proposalBelongsToGame) reasons.push('proposal belongs to another game');
+    if (!requestedRefs.length) reasons.push('evaluation supplied no evidence references');
     if (missingEvidenceRefs.length) reasons.push(`unknown evidence references: ${missingEvidenceRefs.join(', ')}`);
     if (!evidenceBelongsToGame) reasons.push('evidence references cross a game boundary');
     if (!evidencePostdatesProposal) reasons.push('all evaluation evidence must be produced after the proposal baseline');
@@ -114,28 +93,18 @@ export class CandidateEvaluator {
     if (predictionChecks.matchedClaims !== predictionChecks.totalClaims) {
       reasons.push(`only ${predictionChecks.matchedClaims}/${predictionChecks.totalClaims} prediction claims matched observed evidence`);
     }
-    if (duplicate) reasons.push('proposal duplicates an already committed hypothesis');
-    if (!lineageCurrent) reasons.push(`proposal is based on stale lineage parent ${proposal.parent ?? '<root>'}; current head is ${expectedParent ?? '<root>'}`);
-    if (!matchedOrImprovedBest) reasons.push('objective score vector is worse than the best committed version');
-    if (accepted) reasons.push(bestVector
-      ? 'external correctness gate passed and objective vector matched or improved best'
-      : 'external correctness gate passed for seed candidate');
+    if (outcome === 'confirmed') {
+      reasons.push('all declared prediction fields matched the cited later evidence; no policy or tool was installed');
+    } else if (outcome === 'contradicted') {
+      reasons.push('cited later evidence contradicted at least one declared prediction field');
+    }
 
     return deepFreeze({
-      evaluator: 'arc-objective-v2',
+      evaluator: 'arc-hypothesis-evidence-v1',
       evaluatedAt: new Date().toISOString(),
       proposalId: proposal.id,
-      correctness,
-      accepted,
-      comparisonToBest,
-      matchedOrImprovedBest,
-      duplicate,
-      lineageCurrent,
-      expectedParent,
-      scoreVector,
-      frameHash: frameHash(frame),
-      levelsCompleted: nonNegativeInteger(frame?.levelsCompleted),
-      actions: nonNegativeInteger(actions),
+      outcome,
+      evidenceBoundaryValid,
       predictionChecks,
       evidence: resolvedEvidence.map((event) => ({
         id: event.id,

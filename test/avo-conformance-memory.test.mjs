@@ -4,99 +4,127 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { normalizeHypothesis } from '../src/core/evaluator.mjs';
 import { PersistentMemory } from '../src/core/memory.mjs';
 
-function candidate(name) {
-  return {
+function hypothesis(name = 'one rule') {
+  return normalizeHypothesis({
     hypothesis: name,
-    plan: `test ${name}`,
+    plan: `Test ${name}`,
     predictions: [{ action: 'ACTION1', data: {}, expected: { changed: true }, rationale: 'probe' }],
-    fingerprint: name,
-  };
+  });
 }
 
-function evaluation({ accepted, values = [0, 1, 1, -1, 1] }) {
+function evaluation(outcome, evidenceId) {
+  const confirmed = outcome === 'confirmed';
   return {
-    evaluator: 'test-objective',
-    accepted,
-    correctness: accepted,
-    scoreVector: {
-      dimensions: ['won', 'levelsCompleted', 'progressGain', 'actionEfficiency', 'stateCoverageGain'],
-      values,
-      named: {},
+    evaluator: 'test-hypothesis-evidence-v1',
+    evaluatedAt: new Date().toISOString(),
+    outcome,
+    evidenceBoundaryValid: true,
+    predictionChecks: {
+      totalPredictions: 1,
+      totalClaims: 1,
+      matchedClaims: confirmed ? 1 : 0,
+      accuracy: confirmed ? 1 : 0,
+      unmatchedPredictions: [],
+      checks: [],
     },
-    reasons: [accepted ? 'accepted by fixture' : 'rejected by fixture'],
+    evidence: [{ id: evidenceId }],
+    missingEvidenceRefs: [],
+    reasons: [],
   };
 }
 
-test('failed attempts persist but never enter committed lineage', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-'));
+test('parallel copies of one hypothesis record evidence independently without parent or best state', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-'));
   try {
     const memory = new PersistentMemory(root, 'demo').load();
-    const proposal = memory.proposeCandidate({
-      gameId: 'demo',
-      candidate: candidate('wrong rule'),
-      baseline: { frameHash: 'a', levelsCompleted: 0, actionIndex: 0, uniqueStates: 1 },
-    });
-    const attempt = memory.evaluateCandidate({
-      proposalId: proposal.id,
-      evaluation: evaluation({ accepted: false }),
-    });
-
-    assert.equal(attempt.accepted, false);
-    assert.equal(memory.lineage.attempts.length, 1);
-    assert.equal(memory.lineage.committed.length, 0);
-    assert.equal(memory.lineage.pendingProposals().length, 0);
-
-    const reloaded = new PersistentMemory(root, 'demo').load();
-    assert.equal(reloaded.lineage.attempts.length, 1);
-    assert.equal(reloaded.lineage.committed.length, 0);
-    assert.equal(reloaded.evolution().attempts[0].candidate.hypothesis, 'wrong rule');
+    for (let index = 0; index < 2; index += 1) {
+      const proposal = memory.proposeHypothesis({
+        gameId: 'demo',
+        hypothesis: hypothesis(),
+        baseline: { frameHash: `frame-${index}`, actionIndex: index },
+      });
+      memory.evaluateHypothesis({
+        proposalId: proposal.id,
+        evaluation: evaluation('confirmed', `evidence-00000${index + 1}-${String(index + 1).repeat(12)}`),
+      });
+    }
+    assert.equal(memory.journal.byOutcome('confirmed').length, 2);
+    const publicState = memory.hypothesisJournal();
+    for (const forbidden of ['committed', 'best', 'head']) assert.equal(forbidden in publicState, false);
+    assert.ok(publicState.evaluations.every((record) => !('parent' in record) && !('accepted' in record)));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('accepted records form a parent-linked continuous lineage and stale proposals are retained', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-lineage-'));
+test('schema v4 migration preserves evidence truth and drops fake selection labels', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-migration-'));
   try {
-    const memory = new PersistentMemory(root, 'demo').load();
-    const first = memory.proposeCandidate({
+    const memory = new PersistentMemory(root, 'demo');
+    fs.mkdirSync(root, { recursive: true });
+    const createdAt = '2026-01-01T00:00:00.000Z';
+    const evaluatedAt = '2026-01-01T00:00:01.000Z';
+    const candidate = hypothesis('legacy prediction');
+    const baseline = { frameHash: 'before', actionIndex: 0 };
+    const proposal = {
+      id: 'proposal-111111111111', parent: null, gameId: 'demo', candidate, baseline, createdAt,
+    };
+    const attempt = {
+      id: 'attempt-222222222222', parent: null, proposalId: proposal.id, gameId: 'demo',
+      candidate, baseline, accepted: false, evaluatedAt,
+      evaluation: {
+        evaluator: 'arc-objective-v2', evaluatedAt, correctness: true, accepted: false,
+        duplicate: true, scoreVector: { dimensions: ['won'], values: [0], named: { won: 0 } },
+        predictionChecks: {
+          totalPredictions: 1, totalClaims: 1, matchedClaims: 1, accuracy: 1,
+          unmatchedPredictions: [], checks: [],
+        },
+        evidence: [{ id: 'evidence-000001-111111111111' }],
+        missingEvidenceRefs: [], reasons: ['duplicate under the removed selection scheme'],
+      },
+    };
+    fs.writeFileSync(memory.file, `${JSON.stringify({
+      schemaVersion: 4,
       gameId: 'demo',
-      candidate: candidate('first rule'),
-      baseline: { frameHash: 'a', levelsCompleted: 0, actionIndex: 0, uniqueStates: 1 },
-    });
-    const stale = memory.proposeCandidate({
+      candidateProposals: [proposal],
+      candidateAttempts: [attempt],
+      committedLineage: [],
+    })}\n`);
+
+    const migrated = memory.load();
+    assert.equal(migrated.journal.proposals.length, 1);
+    assert.equal(migrated.journal.evaluations.length, 1);
+    assert.equal(migrated.journal.evaluations[0].outcome, 'confirmed');
+    assert.equal(migrated.journal.evaluations[0].evaluation.evidence[0].id, 'evidence-000001-111111111111');
+    assert.equal('accepted' in migrated.journal.evaluations[0], false);
+    assert.equal('scoreVector' in migrated.journal.evaluations[0].evaluation, false);
+    migrated.save();
+    const disk = JSON.parse(fs.readFileSync(memory.file, 'utf8'));
+    assert.equal(disk.schemaVersion, 5);
+    for (const oldField of ['candidateProposals', 'candidateAttempts', 'committedLineage', 'lineage']) {
+      assert.equal(oldField in disk, false);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('schema v1 unverifiable prose is retained as a note, never upgraded to confirmation', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-v1-'));
+  try {
+    const memory = new PersistentMemory(root, 'demo');
+    fs.writeFileSync(memory.file, `${JSON.stringify({
+      schemaVersion: 1,
       gameId: 'demo',
-      candidate: candidate('parallel stale branch'),
-      baseline: { frameHash: 'a', levelsCompleted: 0, actionIndex: 0, uniqueStates: 1 },
-    });
-    const committedFirst = memory.evaluateCandidate({
-      proposalId: first.id,
-      evaluation: evaluation({ accepted: true }),
-    });
-    assert.equal(committedFirst.parent, null);
-
-    memory.evaluateCandidate({
-      proposalId: stale.id,
-      evaluation: evaluation({ accepted: false }),
-    });
-
-    const second = memory.proposeCandidate({
-      gameId: 'demo',
-      candidate: candidate('second rule'),
-      baseline: { frameHash: 'b', levelsCompleted: 1, actionIndex: 2, uniqueStates: 3 },
-    });
-    assert.equal(second.parent, committedFirst.id);
-    const committedSecond = memory.evaluateCandidate({
-      proposalId: second.id,
-      evaluation: evaluation({ accepted: true, values: [0, 2, 1, -1, 1] }),
-    });
-
-    assert.equal(memory.lineage.committed.length, 2);
-    assert.equal(memory.lineage.attempts.length, 3);
-    assert.equal(memory.lineage.head.id, committedSecond.id);
-    assert.equal(memory.lineage.best().id, committedSecond.id);
+      lineage: [{ id: 'legacy', hypothesis: 'model prose', evidence: 'model prose', accepted: true }],
+    })}\n`);
+    memory.load();
+    assert.equal(memory.journal.evaluations.length, 0);
+    assert.equal(memory.data.notes[0].type, 'legacy-unverifiable-hypothesis');
+    assert.match(memory.data.notes[0].reason, /without confirmation/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

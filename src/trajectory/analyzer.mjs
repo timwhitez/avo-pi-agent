@@ -358,9 +358,11 @@ function detectContradictoryMemory(context) {
 function detectStaleHypothesis(context, config) {
   const memory = context.memory;
   if (!memory || typeof memory !== 'object') return [];
-  const proposals = memory.proposals || memory.lineage?.proposals || [];
-  const attempts = memory.attempts || memory.lineage?.attempts || [];
-  const evaluated = new Set(attempts.map((entry) => entry.proposalId || entry.proposal_id));
+  const proposals = memory.hypothesisProposals || memory.hypothesisJournal?.proposals
+    || memory.proposals || memory.lineage?.proposals || [];
+  const evaluations = memory.hypothesisEvaluations || memory.hypothesisJournal?.evaluations
+    || memory.attempts || memory.lineage?.attempts || [];
+  const evaluated = new Set(evaluations.map((entry) => entry.proposalId || entry.proposal_id));
   const threshold = Math.max(10, number(config.staleHypothesisActions) || 25);
   const actionCount = context.transitions.length;
   return proposals.flatMap((proposal) => {

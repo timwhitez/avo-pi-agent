@@ -1,21 +1,21 @@
 const ENTRIES = [
   {
-    id: 'avo-operator',
+    id: 'avo-reference-boundary',
     kind: 'method',
     source: 'https://arxiv.org/abs/2603.24517',
-    text: 'AVO makes the agent the complete variation operator: it may consult the full scored lineage and domain knowledge, decide diagnostic actions, invoke external evaluation, diagnose failures, revise, and commit only evaluator-approved candidates.',
+    text: 'The public AVO architecture evaluates and installs behavior-changing candidates. This harness does not implement that mechanism; direct environment interaction remains the policy.',
   },
   {
-    id: 'avo-lineage',
-    kind: 'method',
-    source: 'https://arxiv.org/abs/2603.24517',
-    text: 'The evaluated instantiation is single-lineage continuous evolution. Failed intermediate attempts remain in the internal trajectory and do not enter committed lineage. A committed candidate must pass correctness and match or improve the best objective score.',
+    id: 'hypothesis-journal-boundary',
+    kind: 'project',
+    source: 'project adaptation',
+    text: 'The optional hypothesis journal checks structured predictions against exact later evidence. Confirmation records prediction agreement only: it does not install a policy, alter tools or prompts, rank solutions, or prove objective improvement.',
   },
   {
     id: 'avo-supervisor',
     kind: 'method',
     source: 'https://arxiv.org/abs/2603.24517',
-    text: 'Self-supervision is conditional: detect stagnation or unproductive cycles, review the overall trajectory, and steer toward several fresh candidate directions while leaving the main agent autonomous.',
+    text: 'Self-supervision is conditional: detect stagnation or unproductive cycles, review the overall trajectory, and steer toward several fresh experiment directions while leaving the main agent autonomous.',
   },
   {
     id: 'arc-objective',

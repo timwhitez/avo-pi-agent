@@ -9,7 +9,7 @@ import { frameHash } from '../src/core/observation.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
-test('candidate evaluator accepts externally verified baseline then rejects duplicate self-approval', async () => {
+test('production tools confirm repeated predictions without claiming behavior evolution', async () => {
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-evaluator-'));
   try {
     const environment = new OfflineDemoEnvironment({ id: 'evaluator-game', size: 5 });
@@ -22,47 +22,39 @@ test('candidate evaluator accepts externally verified baseline then rejects dupl
     await agent.initialize();
 
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
-    assert.ok(tools.candidate_propose);
-    assert.ok(tools.candidate_evaluate);
-    assert.equal('score' in tools.candidate_evaluate.parameters.properties, false);
-    assert.equal('accepted' in tools.candidate_evaluate.parameters.properties, false);
+    assert.ok(tools.hypothesis_propose);
+    assert.ok(tools.hypothesis_evaluate);
+    assert.ok(tools.journal_read);
+    assert.equal(tools.candidate_propose, undefined);
+    for (const field of ['outcome', 'score', 'correctness', 'accepted', 'parent']) {
+      assert.equal(field in tools.hypothesis_evaluate.parameters.properties, false);
+    }
 
-    const candidate = {
+    const hypothesis = {
       hypothesis: 'ACTION4 moves the player one cell to the right',
-      plan: 'Persist the prediction, execute ACTION4 once, and compare the exact transition.',
-      predictions: [{
-        action: 'ACTION4',
-        expected: { changed: true },
-        rationale: 'The player begins left of the horizontal boundary.',
-      }],
+      plan: 'Persist the prediction, execute ACTION4 once, and inspect the exact transition.',
+      predictions: [{ action: 'ACTION4', expected: { changed: true }, rationale: 'controlled probe' }],
     };
 
-    const firstProposal = await tools.candidate_propose.execute(candidate);
-    const firstAction = await tools.act.execute({ action: 'ACTION4', reasoning: 'Verify the persisted transition prediction.' });
-    const first = await tools.candidate_evaluate.execute({
-      proposalId: firstProposal.details.proposal.id,
-      evidenceRefs: [firstAction.details.evidenceRef],
-    });
-
-    const secondProposal = await tools.candidate_propose.execute(candidate);
-    const secondAction = await tools.act.execute({ action: 'ACTION4', reasoning: 'Repeat only to verify duplicate rejection.' });
-    const second = await tools.candidate_evaluate.execute({
-      proposalId: secondProposal.details.proposal.id,
-      evidenceRefs: [secondAction.details.evidenceRef],
-    });
-
-    assert.equal(first.details.record.accepted, true);
-    assert.equal(first.details.record.evaluation.correctness, true);
-    assert.equal(first.details.record.evaluation.evidence[0].id, firstAction.details.evidenceRef);
-    assert.equal(second.details.record.accepted, false);
-    assert.equal(second.details.record.evaluation.duplicate, true);
-    assert.match(second.text, /not committed/);
+    for (let index = 0; index < 2; index += 1) {
+      const proposal = await tools.hypothesis_propose.execute(hypothesis);
+      const action = await tools.act.execute({ action: 'ACTION4', reasoning: 'Verify the persisted prediction.' });
+      const result = await tools.hypothesis_evaluate.execute({
+        proposalId: proposal.details.proposal.id,
+        evidenceRefs: [action.details.evidenceRef],
+      });
+      assert.equal(result.details.record.outcome, 'confirmed');
+      assert.equal(result.details.record.evaluation.evidence[0].id, action.details.evidenceRef);
+      assert.match(result.text, /No policy, prompt, tool, or code was installed/);
+      assert.doesNotMatch(result.text, /committed|was improved/i);
+    }
+    assert.equal(agent.memory.journal.byOutcome('confirmed').length, 2);
   } finally {
     fs.rmSync(memoryDir, { recursive: true, force: true });
   }
 });
 
-test('displayed frame hash remains the evaluator afterHash contract', async () => {
+test('a predicted no-op is confirmation only and survives a durable restart', async () => {
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-evaluator-hash-'));
   const raw = {
     game_id: 'evaluator-hash',
@@ -72,39 +64,45 @@ test('displayed frame hash remains the evaluator afterHash contract', async () =
     win_levels: 1,
     available_actions: ['ACTION1'],
   };
+  const environment = { async start() { return raw; }, async step() { return raw; } };
   try {
     const agent = new AvoArcAgent({
-      gameId: 'evaluator-hash',
-      environment: {
-        async start() { return raw; },
-        async step() { return raw; },
-      },
-      loop: inertLoop,
+      gameId: 'evaluator-hash', environment, loop: inertLoop,
       config: { maxActions: 10, stallWindow: 8, memoryDir },
     });
     await agent.initialize();
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
     const expectedHash = frameHash(agent.frame);
-    const proposal = await tools.candidate_propose.execute({
+    const proposal = await tools.hypothesis_propose.execute({
       hypothesis: 'ACTION1 is a no-op in this state',
       plan: 'Compare the displayed frame hash after one action.',
-      predictions: [{
-        action: 'ACTION1',
-        expected: { afterHash: expectedHash },
-        rationale: 'The environment returns the same normalized observation.',
-      }],
+      predictions: [{ action: 'ACTION1', expected: { afterHash: expectedHash, changed: false } }],
     });
     const action = await tools.act.execute({ action: 'ACTION1', reasoning: 'hash compatibility probe' });
-    const event = agent.evidenceLedger.find((entry) => entry.id === action.details.evidenceRef);
-    assert.equal(event.afterHash, expectedHash);
-    assert.equal(event.afterHash.length, 16);
-    assert.equal(event.observationContentHash.length, 64);
-    const evaluation = await tools.candidate_evaluate.execute({
+    const result = await tools.hypothesis_evaluate.execute({
       proposalId: proposal.details.proposal.id,
       evidenceRefs: [action.details.evidenceRef],
     });
-    assert.equal(evaluation.details.record.evaluation.predictionChecks.matchedClaims, 1);
-    assert.equal(evaluation.details.record.evaluation.predictionChecks.totalClaims, 1);
+    assert.equal(result.details.record.outcome, 'confirmed');
+    assert.equal(result.details.record.evaluation.predictionChecks.matchedClaims, 2);
+    assert.equal(result.details.record.evaluation.predictionChecks.totalClaims, 2);
+
+    const restarted = new AvoArcAgent({
+      gameId: 'evaluator-hash', environment, loop: inertLoop,
+      config: { maxActions: 10, stallWindow: 8, memoryDir },
+    });
+    assert.equal(restarted.memory.journal.byOutcome('confirmed').length, 1);
+
+    const forged = JSON.parse(fs.readFileSync(restarted.memory.file, 'utf8'));
+    forged.hypothesisEvaluations[0].evaluation.evidence[0].afterHash = 'forged';
+    fs.writeFileSync(restarted.memory.file, `${JSON.stringify(forged)}\n`);
+    assert.throws(
+      () => new AvoArcAgent({
+        gameId: 'evaluator-hash', environment, loop: inertLoop,
+        config: { maxActions: 10, stallWindow: 8, memoryDir },
+      }),
+      /cannot be reproduced from durable evidence/,
+    );
   } finally {
     fs.rmSync(memoryDir, { recursive: true, force: true });
   }

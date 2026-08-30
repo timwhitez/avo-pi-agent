@@ -53,7 +53,7 @@ const record = (gameId, overrides = {}) => ({
     versionedGameId: `${gameId}-00000000`,
     executionIdSha256: hashExecutionId(`${gameId}-execution`),
   }],
-  lineage: { proposals: 1, pending: 0, committed: 1, attempts: 1 },
+  hypothesisJournal: { proposals: 1, pending: 0, evaluations: 1, confirmed: 1, contradicted: 0 },
   ...overrides,
 });
 const capsuleHash = 'a'.repeat(64);

@@ -8,7 +8,7 @@ private artifacts:
 
 - exact ARC request/response transitions and private frames;
 - bounded supervisor markers (hash, evidence refs, direction count);
-- hash/count durable memory and lineage changes;
+- hash/count durable memory and hypothesis-journal changes;
 - no provider credential, endpoint, model ID, or raw private reasoning text.
 """
 
@@ -303,20 +303,35 @@ def sync_supervisor(game_id: str | None) -> None:
     _seen_supervisor_count[game_id] = len(entries)
 
 
-def lineage_projection(memory: dict[str, Any]) -> dict[str, Any]:
-    lineage = dict_value(memory, "lineage", "evolution")
-    proposals = list_value(memory, "proposals") or list_value(lineage, "proposals")
-    attempts = list_value(memory, "attempts", "evaluatedAttempts") or list_value(lineage, "attempts", "evaluatedAttempts")
-    committed = list_value(memory, "committed", "committedLineage") or list_value(lineage, "committed", "committedLineage")
+def evaluation_outcome(record: Any) -> str:
+    if not isinstance(record, dict):
+        return "inconclusive"
+    evaluation = record.get("evaluation") if isinstance(record.get("evaluation"), dict) else {}
+    outcome = record.get("outcome") or evaluation.get("outcome")
+    if outcome in {"confirmed", "contradicted", "inconclusive", "expired"}:
+        return str(outcome)
+    if evaluation.get("evaluator") == "system-expiry-v1":
+        return "expired"
+    return "confirmed" if evaluation.get("correctness") is True else "inconclusive"
+
+
+def hypothesis_journal_projection(memory: dict[str, Any]) -> dict[str, Any]:
+    journal = dict_value(memory, "hypothesisJournal")
+    legacy = dict_value(memory, "lineage", "evolution")
+    proposals = list_value(memory, "hypothesisProposals") or list_value(journal, "proposals") or list_value(memory, "candidateProposals", "proposals") or list_value(legacy, "proposals")
+    evaluations = list_value(memory, "hypothesisEvaluations") or list_value(journal, "evaluations") or list_value(memory, "candidateAttempts", "attempts") or list_value(legacy, "attempts")
+    outcomes = [evaluation_outcome(record) for record in evaluations]
     supervisors = supervisor_entries(memory)
     return {
         "proposal_count": len(proposals),
-        "attempt_count": len(attempts),
-        "committed_count": len(committed),
+        "evaluation_count": len(evaluations),
+        "confirmed_count": outcomes.count("confirmed"),
+        "contradicted_count": outcomes.count("contradicted"),
+        "inconclusive_count": outcomes.count("inconclusive"),
+        "expired_count": outcomes.count("expired"),
         "supervisor_count": len(supervisors),
         "latest_proposal_sha256": canonical_hash(proposals[-1]) if proposals else None,
-        "latest_attempt_sha256": canonical_hash(attempts[-1]) if attempts else None,
-        "latest_committed_sha256": canonical_hash(committed[-1]) if committed else None,
+        "latest_evaluation_sha256": canonical_hash(evaluations[-1]) if evaluations else None,
         "latest_supervisor_sha256": canonical_hash(supervisors[-1]) if supervisors else None,
     }
 
@@ -336,7 +351,7 @@ def memory_projection(memory: dict[str, Any], game_id: str) -> dict[str, Any]:
         "memory_sha256": canonical_hash(memory),
         "action_semantics_count": len(semantics),
         "action_semantics_sha256": canonical_hash(semantics),
-        **lineage_projection(memory),
+        **hypothesis_journal_projection(memory),
     }
     for name, value in fields.items():
         projection[f"{name}_count"] = len(value)
@@ -365,7 +380,7 @@ def scan_memory() -> None:
                 "previous_file_sha256": prior,
                 "file_sha256": digest,
             })
-            append_record("memory", "lineage.snapshot", {"game_id": game_id, **lineage_projection(memory)})
+            append_record("memory", "hypothesis_journal.snapshot", {"game_id": game_id, **hypothesis_journal_projection(memory)})
         except Exception as error:
             append_record("memory", "memory.watch_error", {
                 "file_name_sha256": hashlib.sha256(file.name.encode()).hexdigest(),

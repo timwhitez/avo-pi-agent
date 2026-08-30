@@ -332,12 +332,12 @@ export default function Page() {
 
                   <section className="panel">
                     <div className="tabs" role="tablist" aria-label="Agent state views">
-                      {['memory', 'lineage', 'supervisor', 'findings', 'summary'].map((name) => (
+                      {['memory', 'hypotheses', 'supervisor', 'findings', 'summary'].map((name) => (
                         <button className="tab" key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>
                       ))}
                     </div>
                     {tab === 'memory' && <JsonView value={memory} empty="No persisted memory is available yet." />}
-                    {tab === 'lineage' && <JsonView value={extractLineage(memory)} empty="No proposal or committed lineage is available yet." />}
+                    {tab === 'hypotheses' && <JsonView value={extractHypothesisJournal(memory)} empty="No hypothesis or evidence evaluation is available yet." />}
                     {tab === 'supervisor' && <JsonView value={extractSupervisor(memory, trajectoryEvents)} empty="No supervisor intervention is available yet." />}
                     {tab === 'findings' && <Findings findings={findings} />}
                     {tab === 'summary' && <JsonView value={{ run: selectedRunListEntry, summary: selected.summary, provider: selected.provider }} empty="No summary is available yet." />}
@@ -400,7 +400,7 @@ function CopilotBindings({ state, start, control, compare, selectRun, seek }) {
   });
   useAction({
     name: 'select_avo_run',
-    description: 'Select a run for memory, lineage, findings, and replay inspection.',
+    description: 'Select a run for memory, hypothesis evidence, findings, and replay inspection.',
     parameters: [{ name: 'runId', type: 'string', required: true }],
     handler: async ({ runId }) => { selectRun(runId); return { selected: runId }; },
   });
@@ -490,15 +490,50 @@ function normalizeFindings(value) {
   return [];
 }
 
-function extractLineage(memory) {
-  // The persisted memory writer uses candidateProposals / candidateAttempts /
-  // committedLineage; keep the older nested-shape fallbacks for robustness.
+function extractHypothesisJournal(memory) {
   return memory.map((entry) => ({
     gameId: entry.gameId,
-    proposals: entry.value?.candidateProposals || entry.value?.proposals || entry.value?.lineage?.proposals || [],
-    attempts: entry.value?.candidateAttempts || entry.value?.attempts || entry.value?.lineage?.attempts || [],
-    committed: entry.value?.committedLineage || entry.value?.committed || entry.value?.lineage?.committed || [],
+    proposals: (entry.value?.hypothesisProposals || entry.value?.candidateProposals
+      || entry.value?.lineage?.proposals || []).map(hypothesisProposalView),
+    evaluations: (entry.value?.hypothesisEvaluations || entry.value?.candidateAttempts
+      || entry.value?.lineage?.attempts || entry.value?.committedLineage || []).map(hypothesisEvaluationView),
   }));
+}
+
+function hypothesisProposalView(record) {
+  if (!record?.candidate) return record;
+  return {
+    id: record.id,
+    gameId: record.gameId,
+    ...record.candidate,
+    baseline: record.baseline,
+    createdAt: record.createdAt,
+    migrationNote: 'Legacy proposal; no behavior artifact was installed.',
+  };
+}
+
+function hypothesisEvaluationView(record) {
+  if (record?.outcome) return record;
+  const evaluation = record?.evaluation || {};
+  const checks = evaluation.predictionChecks || {};
+  const outcome = evaluation.evaluator === 'system-expiry-v1'
+    ? 'expired'
+    : checks.totalClaims > 0 && checks.unmatchedPredictions?.length === 0
+      ? checks.matchedClaims === checks.totalClaims ? 'confirmed' : 'contradicted'
+      : evaluation.correctness === true ? 'confirmed' : 'inconclusive';
+  return {
+    id: record?.id,
+    proposalId: record?.proposalId,
+    gameId: record?.gameId,
+    hypothesis: record?.candidate?.hypothesis,
+    plan: record?.candidate?.plan,
+    predictions: record?.candidate?.predictions,
+    outcome,
+    evidence: evaluation.evidence || [],
+    predictionChecks: checks,
+    reasons: [...(evaluation.reasons || []), 'Legacy labels removed: this record did not install behavior.'],
+    evaluatedAt: evaluation.evaluatedAt || record?.evaluatedAt,
+  };
 }
 
 function extractSupervisor(memory, events) {

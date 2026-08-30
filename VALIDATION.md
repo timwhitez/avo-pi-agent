@@ -16,7 +16,7 @@ python -m py_compile bridge/arc_bridge.py
 ## Interpretation
 
 A passing offline contract demo proves that the agent loop, exact observation,
-action protocol, persistent memory, candidate lineage, supervisor, multi-level
+action protocol, persistent memory, optional hypothesis journal, supervisor, multi-level
 termination and reporting contracts work across 25 complete synthetic runs. It
 does not prove model endpoint reachability, Pi package installation, official
 ARC environment availability, public-game performance or an ARC score.
