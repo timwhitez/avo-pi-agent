@@ -7,26 +7,45 @@ import {
   requireRunMode,
   summarizeMissionControlReport,
 } from '../lib/run-authority.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+  runCapsuleProvenanceFixture,
+} from '../../../test/support/run-capsule.mjs';
+
+const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture();
+const runId = 'test-run';
 
 function authoritative(overrides = {}) {
+  const capsuleProvenance = runCapsuleProvenanceFixture({ runId });
   return {
+    runId,
     status: 'complete',
-    completeness: { complete: true, expectedCount: 25, actualCount: 25 },
+    completeness: {
+      complete: true,
+      expectedCount: 1,
+      actualCount: 1,
+      gameIds: ['g1'],
+      versionedGameIds: ['g1-v1'],
+    },
     loopAttestation: { complete: true, loop: 'pi-sdk' },
     officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+    privateArtifactHashes: {
+      runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+    },
     aggregates: { wins: 3, totalLevels: 10, totalActions: 100 },
+    games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
     provenance: {
+      ...capsuleProvenance,
+      runCapsule: publicRunCapsuleFixture(),
       noMockAttestation: true,
       wireApi: 'responses',
-      publicGameCount: 25,
       providerPreflight: {
         ok: true,
         outputVerified: true,
         challengeVerified: true,
         responseFreshnessVerified: true,
       },
-      arcRuntime: { officialPackageAttested: true },
-      arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
     },
     ...overrides,
   };
@@ -64,18 +83,70 @@ test('complete but non-authoritative competition report is rejected', () => {
   const report = authoritative({
     officialScore: { value: 0.7, origin: 'local.heuristic' },
   });
-  const authority = evaluateCompetitionReportAuthority(report);
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
   assert.equal(authority.accepted, false);
   assert.match(authority.reasons.join(' '), /score origin/);
-  const summary = summarizeMissionControlReport(report, 'competition');
+  const summary = summarizeMissionControlReport(report, 'competition', { privateCapsuleEvidence });
   assert.equal(summary.official, false);
   assert.equal(summary.authorityState, 'rejected');
   assert.equal(summary.officialScore, null);
   assert.equal(summary.reportedScore, 0.7);
 });
 
+test('public report hashes cannot replace actual private capsule evidence', () => {
+  const report = authoritative();
+  report.privateArtifactHashes.runCapsule.sha256 =
+    report.provenance.runCapsule.capsuleEvidenceSha256;
+  const authority = evaluateCompetitionReportAuthority(report);
+  assert.equal(authority.accepted, false);
+  assert.ok(authority.reasons.some((reason) => /private run capsule artifact/.test(reason)));
+
+  const borrowed = authoritative({
+    runId: 'borrower-run',
+    provenance: { ...authoritative().provenance, runId: 'borrower-run' },
+  });
+  const borrowedAuthority = evaluateCompetitionReportAuthority(
+    borrowed,
+    { privateCapsuleEvidence },
+  );
+  assert.equal(borrowedAuthority.accepted, false);
+  assert.ok(borrowedAuthority.reasons.some((reason) => /capsule identity/.test(reason)));
+});
+
+test('actual private capsule binds the complete published provenance and game set', () => {
+  for (const mutate of [
+    (report) => { report.provenance.gitSha = 'f'.repeat(40); },
+    (report) => { report.provenance.providerModelFingerprint = 'f'.repeat(64); },
+    (report) => { report.provenance.arcRuntime.arcAgiVersion = 'different'; },
+    (report) => {
+      const other = runCapsuleProvenanceFixture({
+        runId,
+        versionedGameIds: ['other-v1'],
+      });
+      report.provenance = { ...report.provenance, ...other };
+      report.completeness = {
+        ...report.completeness,
+        gameIds: ['other'],
+        versionedGameIds: ['other-v1'],
+      };
+      report.games = [{ gameId: 'other', versionedGameId: 'other-v1' }];
+    },
+  ]) {
+    const report = authoritative();
+    mutate(report);
+    assert.equal(evaluateCompetitionReportAuthority(
+      report,
+      { privateCapsuleEvidence },
+    ).accepted, false);
+  }
+});
+
 test('official state requires all benchmark provenance gates and preserves score zero', () => {
-  const summary = summarizeMissionControlReport(authoritative(), 'competition');
+  const summary = summarizeMissionControlReport(
+    authoritative(),
+    'competition',
+    { privateCapsuleEvidence },
+  );
   assert.equal(summary.official, true);
   assert.equal(summary.authorityState, 'official');
   assert.equal(summary.officialScore, 0);
@@ -84,9 +155,19 @@ test('official state requires all benchmark provenance gates and preserves score
   for (const report of [
     authoritative({ loopAttestation: { complete: false, loop: 'pi-sdk' } }),
     authoritative({ provenance: { ...authoritative().provenance, noMockAttestation: false } }),
-    authoritative({ completeness: { complete: true, expectedCount: 25, actualCount: 24 } }),
+    authoritative({ completeness: { complete: true, expectedCount: 1, actualCount: 0 } }),
     authoritative({ officialScore: { value: null, origin: 'aggregateScorecard.score' } }),
+    authoritative({
+      provenance: {
+        ...authoritative().provenance,
+        runCapsule: publicRunCapsuleFixture({ runClass: 'diagnostic-migrated', comparable: false }),
+      },
+    }),
   ]) {
-    assert.equal(summarizeMissionControlReport(report, 'competition').official, false);
+    assert.equal(summarizeMissionControlReport(
+      report,
+      'competition',
+      { privateCapsuleEvidence },
+    ).official, false);
   }
 });

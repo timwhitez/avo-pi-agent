@@ -52,6 +52,7 @@ test('game completeness rejects duplicate, missing, unexpected and errored occur
     expectedCount: 2,
     actualCount: 2,
     gameIds: ['aa01', 'bb02'],
+    versionedGameIds: ['aa01-v1', 'bb02-v2'],
   });
   assert.throws(() => validateCompleteGameSet(expected, records.slice(0, 1)), /missing/);
   assert.throws(
@@ -61,6 +62,13 @@ test('game completeness rejects duplicate, missing, unexpected and errored occur
   assert.throws(
     () => validateCompleteGameSet(expected, [...records, { ...records[0], gameId: 'cc03' }]),
     /unexpected/,
+  );
+  assert.throws(
+    () => validateCompleteGameSet(expected, [
+      { ...records[0], versionedGameId: 'aa01-other' },
+      records[1],
+    ]),
+    /missingVersioned.*aa01-v1/,
   );
   assert.throws(
     () => validateCompleteGameSet(expected, records.map((record, index) => index ? { ...record, error: 'runtime failed' } : record)),

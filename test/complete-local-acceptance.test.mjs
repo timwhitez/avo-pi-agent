@@ -12,6 +12,9 @@ function validRepair() {
     final: {
       authoritative: true,
       clean: true,
+      runCapsuleHash: 'a'.repeat(64),
+      runClass: 'cold-start',
+      runCapsuleComparable: true,
       findingCount: 0,
       openFindingCount: 0,
       officialScore: {
@@ -81,4 +84,15 @@ test('non-official score origin and non-authoritative/dirty reports fail closed'
   const incomplete = validRepair();
   incomplete.status = 'exhausted';
   assert.equal(evaluateCompleteLocalAcceptance(incomplete).accepted, false);
+});
+
+test('missing or diagnostic-migrated capsule evidence fails closed', () => {
+  const missing = validRepair();
+  delete missing.final.runCapsuleHash;
+  assert.equal(evaluateCompleteLocalAcceptance(missing).accepted, false);
+
+  const migrated = validRepair();
+  migrated.final.runClass = 'diagnostic-migrated';
+  migrated.final.runCapsuleComparable = false;
+  assert.equal(evaluateCompleteLocalAcceptance(migrated).accepted, false);
 });

@@ -6,6 +6,11 @@ import path from 'node:path';
 import { preflightResponsesProvider } from '../src/benchmark/provider-attestation.mjs';
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+  runCapsuleProvenanceFixture,
+} from './support/run-capsule.mjs';
 
 const challenge = 'canonical_tip_challenge_1234567890';
 const provider = {
@@ -20,6 +25,8 @@ function response(payload) {
 }
 
 test('canonical review tip contains replay-resistant provider proof and null-safe metrics together', async () => {
+  const runId = 'round-1';
+  const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({ runId });
   await assert.rejects(
     () => preflightResponsesProvider(provider, {
       nonce: challenge,
@@ -33,15 +40,27 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
   assert.equal(finiteNumberOrNull(0), 0);
 
   const result = evaluateRoundAuthority({
-    roundId: 'round-1',
+    roundId: runId,
+    privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
-      runId: 'round-1',
+      runId,
       status: 'complete',
-      completeness: { complete: true, expectedCount: 1, actualCount: 1, gameIds: ['g1'] },
+      completeness: {
+        complete: true,
+        expectedCount: 1,
+        actualCount: 1,
+        gameIds: ['g1'],
+        versionedGameIds: ['g1-v1'],
+      },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+      },
       provenance: {
+        ...runCapsuleProvenanceFixture({ runId }),
+        runCapsule: publicRunCapsuleFixture({}, { runId }),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {
@@ -55,14 +74,11 @@ test('canonical review tip contains replay-resistant provider proof and null-saf
           responseHash: 'c'.repeat(64),
           proofHash: 'd'.repeat(64),
         },
-        arcRuntime: { officialPackageAttested: true },
-        arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
-        publicGameCount: 1,
-        publicGameIds: ['g1'],
       },
+      games: [{ gameId: 'g1', versionedGameId: 'g1-v1' }],
     },
     analysis: {
-      runId: 'round-1',
+      runId,
       clean: true,
       findings: [],
       acceptance: {

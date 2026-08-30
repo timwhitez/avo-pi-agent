@@ -1,8 +1,13 @@
 {
   "schemaVersion": 1,
   "runId": "real-public-20260828-high2",
-  "status": "complete",
+  "status": "diagnostic-migrated",
   "completedAt": "2026-08-29T05:47:43.432Z",
+  "classification": {
+    "comparable": false,
+    "official": false,
+    "reason": "The run combined checkpoints across two Git commits and had no immutable run capsule or initial-state snapshot. It is retained as historical diagnostic evidence only."
+  },
   "provenance": {
     "runId": "real-public-20260828-high2",
     "gitSha": "2e7c1e930298de0e286bf0af4930203be38ab072",
@@ -127,8 +132,14 @@
     ]
   },
   "officialScore": {
+    "value": null,
+    "origin": "unavailable",
+    "reason": "Cross-capsule attribution cannot produce an accepted official benchmark score."
+  },
+  "unacceptedScoreEvidence": {
     "value": 0.0010988675559354109,
-    "origin": "aggregateScorecard.score"
+    "origin": "aggregateScorecard.score",
+    "acceptedAsOfficial": false
   },
   "aggregates": {
     "games": 25,

@@ -1,4 +1,5 @@
 import { finiteNumberOrNull, nonNegativeIntegerOrNull } from '../../../src/local/numeric.mjs';
+import { evaluatePublicRunCapsule } from '../../../src/benchmark/run-capsule-authority.mjs';
 
 export const RUN_MODES = Object.freeze(['diagnostic', 'competition']);
 export const REASONING_LEVELS = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -29,7 +30,7 @@ export function initialAuthority(mode) {
   });
 }
 
-export function summarizeMissionControlReport(report, mode) {
+export function summarizeMissionControlReport(report, mode, { privateCapsuleEvidence = null } = {}) {
   const executionMode = requireRunMode(mode);
   if (executionMode === 'diagnostic') {
     const summary = recordOrEmpty(report?.summary);
@@ -51,7 +52,7 @@ export function summarizeMissionControlReport(report, mode) {
     });
   }
 
-  const authority = evaluateCompetitionReportAuthority(report);
+  const authority = evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence });
   const aggregates = recordOrEmpty(report?.aggregates);
   return Object.freeze({
     kind: 'real-public-benchmark',
@@ -64,6 +65,8 @@ export function summarizeMissionControlReport(report, mode) {
     officialScore: authority.accepted ? authority.score : null,
     reportedScore: authority.score,
     scoreOrigin: authority.origin,
+    runCapsuleHash: authority.runCapsuleHash,
+    runClass: authority.runClass,
     games: nonNegativeIntegerOrNull(report?.completeness?.actualCount),
     wins: nonNegativeIntegerOrNull(aggregates.wins),
     totalLevels: nonNegativeIntegerOrNull(aggregates.totalLevels),
@@ -72,7 +75,7 @@ export function summarizeMissionControlReport(report, mode) {
   });
 }
 
-export function evaluateCompetitionReportAuthority(report) {
+export function evaluateCompetitionReportAuthority(report, { privateCapsuleEvidence = null } = {}) {
   const reasons = [];
   const completeness = recordOrEmpty(report?.completeness);
   const provenance = recordOrEmpty(report?.provenance);
@@ -83,8 +86,18 @@ export function evaluateCompetitionReportAuthority(report) {
   const expectedCount = nonNegativeIntegerOrNull(completeness.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(completeness.actualCount);
   const publicGameCount = nonNegativeIntegerOrNull(provenance.publicGameCount);
+  const capsuleAuthority = evaluatePublicRunCapsule(provenance.runCapsule, {
+    privateCapsuleEvidence,
+    expectedRunId: report?.runId,
+    benchmarkReport: report,
+  });
 
   requireCondition(report?.status === 'complete', 'benchmark status is not complete', reasons);
+  requireCondition(
+    typeof report?.runId === 'string' && report.runId === provenance.runId,
+    'benchmark report and provenance run identities differ',
+    reasons,
+  );
   requireCondition(completeness.complete === true, 'public game completeness attestation is absent', reasons);
   requireCondition(expectedCount !== null && expectedCount > 0, 'expected public game count is absent or invalid', reasons);
   requireCondition(actualCount !== null && actualCount === expectedCount, 'actual public game count differs from expected', reasons);
@@ -105,12 +118,15 @@ export function evaluateCompetitionReportAuthority(report) {
   requireCondition(provenance?.arcAuth?.keyAcquired === true, 'ARC runtime did not acquire an authentication key', reasons);
   requireCondition(['anonymous-auto', 'registered'].includes(String(provenance?.arcAuth?.mode || '')), 'ARC auth mode is not accepted', reasons);
   requireCondition(publicGameCount !== null && expectedCount !== null && publicGameCount === expectedCount, 'provenance public game count is inconsistent', reasons);
+  reasons.push(...capsuleAuthority.reasons);
 
   return Object.freeze({
     accepted: reasons.length === 0,
     reasons: Object.freeze(reasons),
     score,
     origin,
+    runCapsuleHash: capsuleAuthority.capsuleHash,
+    runClass: capsuleAuthority.runClass,
   });
 }
 

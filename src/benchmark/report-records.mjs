@@ -18,9 +18,15 @@ export function extractGameRecords(report) {
 }
 
 export function normalizeGameRecord(value, sourcePath = '$') {
-  const rawGameId = firstOwn(value, ['gameId', 'game_id']);
+  const versionedAliases = ownValues(value, ['versionedGameId', 'versioned_game_id']);
+  const explicitAliases = ownValues(value, ['gameId', 'game_id']);
+  const rawGameId = versionedAliases[0] ?? explicitAliases[0];
   const versionedGameId = requireSafeVersionedGameId(rawGameId, sourcePath);
   const gameId = normalizeGameId(versionedGameId);
+  if (versionedAliases.some((candidate) => requireSafeVersionedGameId(candidate, sourcePath) !== versionedGameId)
+      || explicitAliases.some((candidate) => normalizeGameId(requireSafeVersionedGameId(candidate, sourcePath)) !== gameId)) {
+    invalidRecord(sourcePath, 'explicit game identity contradicts its versioned game identity');
+  }
   const state = requireState(firstOwn(value, ['state', 'gameState', 'game_state']), sourcePath);
   const levelsCompleted = optionalCount(
     firstOwn(value, ['levelsCompleted', 'levels_completed', 'levels']),
@@ -69,6 +75,10 @@ export function validateProductionLoops(records, expectedGames) {
 
 export function validateCompleteGameSet(expectedGames, records) {
   const expected = expectedGames.map((game) => normalizeGameId(game.gameId ?? game));
+  const expectedVersioned = expectedGames.map((game) => requireSafeVersionedGameId(
+    game?.versionedGameId ?? game?.gameId ?? game,
+    'expected public game set',
+  ));
   if (expected.length === 0) throw new Error('expected public game set is empty');
   const duplicateExpected = duplicates(expected);
   if (duplicateExpected.length) throw new Error(`expected public game set contains duplicates: ${duplicateExpected.join(', ')}`);
@@ -78,19 +88,34 @@ export function validateCompleteGameSet(expectedGames, records) {
     if (!record || typeof record !== 'object') throw new Error(`public game record at index ${index} is malformed`);
     return normalizeGameId(record.gameId);
   });
+  const actualVersioned = records.map((record, index) => requireSafeVersionedGameId(
+    record?.versionedGameId,
+    `public game record at index ${index}`,
+  ));
   const detail = {
     duplicateIds: duplicates(actual),
+    duplicateVersionedIds: duplicates(actualVersioned),
     missing: expected.filter((id) => !actual.includes(id)),
     unexpected: actual.filter((id) => !expected.includes(id)),
+    missingVersioned: expectedVersioned.filter((id) => !actualVersioned.includes(id)),
+    unexpectedVersioned: actualVersioned.filter((id) => !expectedVersioned.includes(id)),
     errors: records.filter((record) => record.error).map((record) => ({ gameId: record.gameId, error: record.error })),
     expectedCount: expected.length,
     actualCount: actual.length,
   };
-  if (detail.duplicateIds.length || detail.missing.length || detail.unexpected.length
+  if (detail.duplicateIds.length || detail.duplicateVersionedIds.length
+      || detail.missing.length || detail.unexpected.length
+      || detail.missingVersioned.length || detail.unexpectedVersioned.length
       || detail.errors.length || detail.actualCount !== detail.expectedCount) {
     throw new Error(`public game completeness gate failed: ${JSON.stringify(detail)}`);
   }
-  return { complete: true, expectedCount: expected.length, actualCount: actual.length, gameIds: expected };
+  return {
+    complete: true,
+    expectedCount: expected.length,
+    actualCount: actual.length,
+    gameIds: expected,
+    versionedGameIds: expectedVersioned.slice().sort(),
+  };
 }
 
 export function extractOfficialScore(report) {
@@ -130,6 +155,10 @@ export function aggregateGameMetrics(records) {
 function firstOwn(value, keys) {
   for (const key of keys) if (Object.hasOwn(value, key)) return value[key];
   return undefined;
+}
+
+function ownValues(value, keys) {
+  return keys.filter((key) => Object.hasOwn(value, key)).map((key) => value[key]);
 }
 
 function requireSafeVersionedGameId(value, sourcePath) {

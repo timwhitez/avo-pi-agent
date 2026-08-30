@@ -5,9 +5,13 @@ import fs from 'node:fs';
 import { extractOfficialScore, validateCompleteGameSet } from '../src/benchmark/report.mjs';
 
 test('complete public coverage remains valid when some games are not won', () => {
-  const expected = Array.from({ length: 25 }, (_, index) => ({ gameId: `g${index + 1}` }));
+  const expected = Array.from({ length: 25 }, (_, index) => ({
+    gameId: `g${index + 1}`,
+    versionedGameId: `g${index + 1}-v1`,
+  }));
   const records = expected.map((game, index) => ({
     gameId: game.gameId,
+    versionedGameId: game.versionedGameId,
     state: index < 20 ? 'WIN' : 'GAME_OVER',
     won: index < 20,
     levelsCompleted: index < 20 ? 3 : 1,

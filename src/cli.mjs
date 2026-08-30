@@ -8,6 +8,13 @@ import { loadLatestSessionScorecard, loadResumedRecords, resolveResumeDirectory,
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
+import {
+  assertRunStateMatchesInitial,
+  inspectRunState,
+  readRunCapsule,
+  verifyRunCapsuleExecution,
+  verifyRunCapsuleGameSet,
+} from './benchmark/run-capsule.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
@@ -116,6 +123,49 @@ async function runPublic(args) {
   let selected = [];
   let runError = null;
   let resumeDir = null;
+  let runCapsuleHash = null;
+  let runClass = null;
+  let runCapsule = null;
+  let sourceCapsuleHashes = [];
+  let resumedRecords = new Map();
+
+  // The child independently verifies the sealed capsule and durable state
+  // before starting the ARC bridge or making any game action.
+  resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
+  if (process.env.AVO_REQUIRE_REAL_PROVIDER === '1' && !resumeDir) {
+    throw new Error('real-provider public execution requires a capsule-bound resume directory');
+  }
+  if (resumeDir) {
+    runCapsuleHash = requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH);
+    runClass = requiredRunClass(process.env.AVO_RUN_CLASS);
+    sourceCapsuleHashes = process.env.AVO_RESUME_SOURCE_CAPSULE_HASH
+      ? [requiredCapsuleHash(process.env.AVO_RESUME_SOURCE_CAPSULE_HASH)]
+      : [];
+    if (sourceCapsuleHashes.length && runClass !== 'diagnostic-migrated') {
+      throw new Error('cross-capsule checkpoint loading is allowed only for diagnostic-migrated runs');
+    }
+    const capsuleFile = requiredCapsuleFile(process.env.AVO_RUN_CAPSULE_FILE);
+    runCapsule = readRunCapsule(capsuleFile, { root: path.resolve('runs/private') });
+    if (runCapsule.capsuleHash !== runCapsuleHash) throw new Error('active run capsule hash differs from the child contract');
+    const stateBinding = currentStateBinding(config);
+    verifyRunCapsuleExecution({
+      root: process.cwd(),
+      capsule: runCapsule,
+      python: config.python,
+      config,
+      stateBinding,
+      requireInitialState: runClass !== 'recovered',
+    });
+    resumedRecords = loadResumedRecords(resumeDir, {
+      capsuleHash: runCapsuleHash,
+      allowedCapsuleHashes: sourceCapsuleHashes,
+      stateBinding,
+      requireStateMatch: runClass !== 'diagnostic-migrated',
+    });
+    if (runClass === 'recovered' && resumedRecords.size === 0) {
+      assertRunStateMatchesInitial(stateBinding, runCapsule.definition.initialState);
+    }
+  }
 
   try {
     await environment.start();
@@ -125,18 +175,15 @@ async function runPublic(args) {
       return selection.all || selection.games.includes(short) || selection.games.includes(env.game_id);
     });
     if (!selected.length) throw new Error('No matching public ARC environments');
+    if (runCapsule) verifyRunCapsuleGameSet(runCapsule, selected);
 
-    // Interrupted runs checkpoint every finished game under AVO_RESUME_DIR;
-    // a restarted run with the same context skips those games instead of
-    // replaying hours of provider work.
-    resumeDir = resolveResumeDirectory(process.env.AVO_RESUME_DIR);
-    const resumedRecords = loadResumedRecords(resumeDir);
     if (resumedRecords.size) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
 
-    const runOneGame = async (index, info, env) => {
+    const runOneGame = async (index, info, env, initiallyOpen = false) => {
       const gameId = String(info.game_id).split('-')[0];
+      const versionedGameId = String(info.game_id);
       const ordinal = index + 1;
       if (resumedRecords.has(gameId)) {
         results[index] = resumedRecords.get(gameId);
@@ -180,7 +227,7 @@ async function runPublic(args) {
         const maxAttempts = positiveEnvInt('AVO_GAME_ATTEMPTS', 3);
         let result = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          await env.open(gameId);
+          if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
           const agent = configureWorkspace(new AvoArcAgent({
             gameId,
             environment: env,
@@ -190,6 +237,7 @@ async function runPublic(args) {
           }), gameConfig);
           result = {
             ...await agent.run(),
+            versionedGameId,
             actionBudget,
             outerTurnBudget: gameConfig.maxOuterTurns,
           };
@@ -205,7 +253,11 @@ async function runPublic(args) {
         results[index] = result;
         // Never checkpoint an errored attempt: a resume must replay it, not
         // inherit its failure into the completeness gate.
-        if (!result.error) saveResumedRecord(resumeDir, gameId, result);
+        if (!result.error) saveResumedRecord(resumeDir, gameId, result, {
+          capsuleHash: runCapsuleHash,
+          allowedCapsuleHashes: sourceCapsuleHashes,
+          stateBinding: currentStateBinding(config),
+        });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
@@ -243,8 +295,15 @@ async function runPublic(args) {
       console.log(`[concurrency] running up to ${concurrency} games in parallel on one Arcade session`);
       const settled = await runWithConcurrency(selected.map((info, index) => async () => {
         const gameId = String(info.game_id).split('-')[0];
-        const env = await environment.openTracked(gameId, `game-${index}-${gameId}`);
-        await runOneGame(index, info, env);
+        if (resumedRecords.has(gameId)) {
+          await runOneGame(index, info, environment);
+          return;
+        }
+        const env = await environment.openTracked(
+          String(info.game_id),
+          `game-${index}-${gameId}`,
+        );
+        await runOneGame(index, info, env, true);
       }), concurrency);
       const failure = settled.find((item) => item?.error);
       if (failure) throw failure.error;
@@ -256,11 +315,21 @@ async function runPublic(args) {
     if (resumeDir && replayedGames > 0) {
       // The session actually played games: its scorecard is the latest real
       // score evidence for this run.
-      saveSessionScorecard(resumeDir, { replayedGames, scorecard: aggregateScorecard });
+      saveSessionScorecard(resumeDir, {
+        replayedGames,
+        scorecard: aggregateScorecard,
+        capsuleHash: runCapsuleHash,
+        allowedCapsuleHashes: sourceCapsuleHashes,
+        stateBinding: currentStateBinding(config),
+      });
     } else if (resumeDir && replayedGames === 0) {
       // Every game came from checkpoints; a fresh empty session's scorecard
       // must not masquerade as the run's official score.
-      const saved = loadLatestSessionScorecard(resumeDir);
+      const saved = loadLatestSessionScorecard(resumeDir, {
+        capsuleHash: runCapsuleHash,
+        allowedCapsuleHashes: sourceCapsuleHashes,
+        stateBinding: currentStateBinding(config),
+      });
       if (saved?.scorecard) aggregateScorecard = saved.scorecard;
     }
     await environment.close();
@@ -273,6 +342,8 @@ async function runPublic(args) {
     expectedGames: selected.length,
     runError,
   });
+  report.runCapsuleHash = runCapsuleHash;
+  report.runClass = runClass;
   if (resumeDir) {
     report.scorecardCoverage = {
       replayedGames,
@@ -296,6 +367,13 @@ function configureWorkspace(agent, config) {
   agent.workspace.containerRuntime = config.workspaceContainerRuntime || 'docker';
   agent.workspace.containerImage = config.workspaceContainerImage || 'python:3.12-slim';
   return agent;
+}
+
+function currentStateBinding(config) {
+  return inspectRunState({
+    memoryDir: config.memoryDir,
+    workspaceDir: config.workspaceDir,
+  });
 }
 
 function makeReport(kind, results, config, { aggregateScorecard = null, expectedGames = results.length, runError = null } = {}) {
@@ -334,6 +412,30 @@ function extractOfficialScore(scorecard) {
     scorecard.aggregateScore,
   ];
   return candidates.find((value) => typeof value === 'number' && Number.isFinite(value)) ?? null;
+}
+
+function requiredCapsuleHash(value) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error('AVO_RUN_CAPSULE_HASH must be a SHA-256 digest');
+  return text;
+}
+
+function requiredRunClass(value) {
+  const text = String(value || '');
+  if (!['cold-start', 'warm-start', 'recovered', 'diagnostic-migrated'].includes(text)) {
+    throw new Error('AVO_RUN_CLASS is invalid');
+  }
+  return text;
+}
+
+function requiredCapsuleFile(value) {
+  const target = path.resolve(String(value || ''));
+  const root = path.resolve('runs/private');
+  const relative = path.relative(root, target);
+  if (!value || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('AVO_RUN_CAPSULE_FILE must stay inside runs/private');
+  }
+  return target;
 }
 
 function writeReport(report) {

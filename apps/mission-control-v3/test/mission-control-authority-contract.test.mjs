@@ -23,7 +23,8 @@ test('requested competition never starts with official authority', () => {
 });
 
 test('terminal authority is derived from validated report evidence', () => {
-  assert.match(baseSource, /summarizeMissionControlReport\(report, run\.executionMode\)/);
+  assert.match(baseSource, /summarizeVerifiedReport\(loaded\.report, run\.executionMode\)/);
+  assert.match(baseSource, /readPrivateRunCapsuleEvidence/);
   assert.match(baseSource, /run\.official = run\.summary\.official === true/);
   assert.match(baseSource, /run\.authorityState = String\(run\.summary\.authorityState/);
   assert.doesNotMatch(baseSource, /official: report\?\.status === 'complete'/);

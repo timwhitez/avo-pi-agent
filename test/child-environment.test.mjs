@@ -27,6 +27,10 @@ function hostileSource() {
     ARC_API_KEY: 'registered-key-that-must-be-cleared',
     ARC_PYTHON: '.venv/bin/python',
     AVO_MAX_ACTIONS: '1000',
+    AVO_RUN_CAPSULE_HASH: 'a'.repeat(64),
+    AVO_RUN_CLASS: 'cold-start',
+    AVO_GAME_ATTEMPTS: '3',
+    AVO_TRANSCRIPT_MAX_MESSAGES: '160',
     AVO_MISSION_CONTROL_ACCESS_TOKEN: 'control-secret',
     GITHUB_TOKEN: 'github-secret',
     AWS_SECRET_ACCESS_KEY: 'cloud-secret',
@@ -49,6 +53,10 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   assert.equal(env.AVO_ARC_AUTH_MODE, 'anonymous-auto');
   assert.equal(env.AVO_DISABLE_DOTENV, '1');
   assert.equal(env.GITHUB_ACTIONS, '');
+  assert.equal(env.AVO_RUN_CAPSULE_HASH, 'a'.repeat(64));
+  assert.equal(env.AVO_RUN_CLASS, 'cold-start');
+  assert.equal(env.AVO_GAME_ATTEMPTS, '3');
+  assert.equal(env.AVO_TRANSCRIPT_MAX_MESSAGES, '160');
   for (const key of [
     'AVO_MISSION_CONTROL_ACCESS_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY',
     'NPM_TOKEN', 'SSH_AUTH_SOCK', 'NODE_OPTIONS', 'PYTHONPATH', 'LD_PRELOAD',

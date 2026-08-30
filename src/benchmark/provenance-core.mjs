@@ -200,6 +200,7 @@ export async function discoverPublicGames({ python = '.venv/bin/python', cwd = p
 
 export function buildProvenance({ provider, providerPreflight, piStreamPreflight = null, arcRuntime, games, runId, gitSha = null }) {
   const salt = crypto.createHash('sha256').update(String(runId)).digest('hex');
+  const publicVersionedGameIds = games.map((game) => game.versionedGameId).sort();
   return {
     runId,
     gitSha,
@@ -222,7 +223,8 @@ export function buildProvenance({ provider, providerPreflight, piStreamPreflight
     },
     publicGameCount: games.length,
     publicGameIds: games.map((game) => game.gameId),
-    publicGameSetHash: fingerprint(games.map((game) => game.versionedGameId).join('\n'), salt),
+    publicVersionedGameIds,
+    publicGameSetHash: fingerprint(publicVersionedGameIds.join('\n'), salt),
   };
 }
 

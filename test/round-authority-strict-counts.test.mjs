@@ -2,19 +2,41 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+  runCapsuleProvenanceFixture,
+} from './support/run-capsule.mjs';
 
 function fixture() {
   const roundId = 'strict-round-0';
+  const versionedGameIds = ['g1-v1', 'g2-v1'];
+  const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({
+    runId: roundId,
+    versionedGameIds,
+  });
   return {
     roundId,
+    privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
       runId: roundId,
       status: 'complete',
-      completeness: { complete: true, expectedCount: 2, actualCount: 2, gameIds: ['g1', 'g2'] },
+      completeness: {
+        complete: true,
+        expectedCount: 2,
+        actualCount: 2,
+        gameIds: ['g1', 'g2'],
+        versionedGameIds,
+      },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0, origin: 'aggregateScorecard.score' },
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+      },
       provenance: {
+        ...runCapsuleProvenanceFixture({ runId: roundId, versionedGameIds }),
+        runCapsule: publicRunCapsuleFixture({}, { runId: roundId, versionedGameIds }),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {
@@ -28,11 +50,11 @@ function fixture() {
           responseHash: 'c'.repeat(64),
           proofHash: 'd'.repeat(64),
         },
-        arcRuntime: { officialPackageAttested: true },
-        arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
-        publicGameCount: 2,
-        publicGameIds: ['g1', 'g2'],
       },
+      games: versionedGameIds.map((versionedGameId) => ({
+        gameId: versionedGameId.split('-')[0],
+        versionedGameId,
+      })),
     },
     analysis: {
       runId: roundId,

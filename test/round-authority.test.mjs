@@ -1,19 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import {
+  privateRunCapsuleEvidenceFixture,
+  publicRunCapsuleFixture,
+  runCapsuleProvenanceFixture,
+} from './support/run-capsule.mjs';
 
 function fixture() {
   const roundId = 'repair-round-0';
+  const versionedGameIds = ['g1-v1', 'g2-v1'];
+  const privateCapsuleEvidence = privateRunCapsuleEvidenceFixture({
+    runId: roundId,
+    versionedGameIds,
+  });
   return {
     roundId,
+    privateCapsuleEvidence,
     processResult: { code: 0, signal: null },
     benchmark: {
       runId: roundId,
       status: 'complete',
-      completeness: { complete: true, expectedCount: 2, actualCount: 2, gameIds: ['g1', 'g2'] },
+      completeness: {
+        complete: true,
+        expectedCount: 2,
+        actualCount: 2,
+        gameIds: ['g1', 'g2'],
+        versionedGameIds,
+      },
       loopAttestation: { complete: true, loop: 'pi-sdk' },
       officialScore: { value: 0.75, origin: 'aggregateScorecard.score' },
+      privateArtifactHashes: {
+        runCapsule: { file: 'run-capsule.json', sha256: privateCapsuleEvidence.sha256 },
+      },
       provenance: {
+        ...runCapsuleProvenanceFixture({ runId: roundId, versionedGameIds }),
+        runCapsule: publicRunCapsuleFixture({}, { runId: roundId, versionedGameIds }),
         noMockAttestation: true,
         wireApi: 'responses',
         providerPreflight: {
@@ -27,11 +49,11 @@ function fixture() {
           responseHash: 'c'.repeat(64),
           proofHash: 'd'.repeat(64),
         },
-        arcRuntime: { officialPackageAttested: true },
-        arcAuth: { keyAcquired: true, mode: 'anonymous-auto' },
-        publicGameCount: 2,
-        publicGameIds: ['g1', 'g2'],
       },
+      games: versionedGameIds.map((versionedGameId) => ({
+        gameId: versionedGameId.split('-')[0],
+        versionedGameId,
+      })),
     },
     analysis: {
       runId: roundId,
@@ -137,6 +159,17 @@ test('rejects old recorder, incomplete detector coverage or game-set mismatch', 
   assert.equal(evaluateRoundAuthority(games).authoritative, false);
 });
 
+test('rejects records whose short and versioned identities are cross-wired', () => {
+  const input = fixture();
+  [input.benchmark.games[0].versionedGameId, input.benchmark.games[1].versionedGameId] = [
+    input.benchmark.games[1].versionedGameId,
+    input.benchmark.games[0].versionedGameId,
+  ];
+  const result = evaluateRoundAuthority(input);
+  assert.equal(result.authoritative, false);
+  assert.ok(result.reasons.some((reason) => /bind each short identity/.test(reason)));
+});
+
 test('rejects legacy fixed-output attestation and malformed proof digests', () => {
   const legacy = fixture();
   legacy.benchmark.provenance.providerPreflight = {
@@ -166,4 +199,21 @@ test('rejects mismatched run identity and provider/runtime attestation gaps', ()
   const result = evaluateRoundAuthority(input);
   assert.equal(result.authoritative, false);
   assert.ok(result.reasons.length >= 4);
+});
+
+test('rejects missing and migrated run capsules', () => {
+  const missing = fixture();
+  delete missing.benchmark.provenance.runCapsule;
+  const missingResult = evaluateRoundAuthority(missing);
+  assert.equal(missingResult.authoritative, false);
+  assert.ok(missingResult.reasons.some((reason) => /run capsule attestation/.test(reason)));
+
+  const migrated = fixture();
+  migrated.benchmark.provenance.runCapsule = publicRunCapsuleFixture({
+    runClass: 'diagnostic-migrated',
+    comparable: false,
+  });
+  const migratedResult = evaluateRoundAuthority(migrated);
+  assert.equal(migratedResult.authoritative, false);
+  assert.ok(migratedResult.reasons.some((reason) => /not comparable/.test(reason)));
 });

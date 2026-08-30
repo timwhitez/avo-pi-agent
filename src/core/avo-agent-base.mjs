@@ -7,6 +7,29 @@ import { describeFrame, frameHash, normalizeFrame } from './observation.mjs';
 
 const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
 const ACTIONS = ['RESET', 'ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
+export const AVO_TOOL_NAMES = Object.freeze([
+  'observe',
+  'act',
+  'knowledge_read',
+  'workspace_list',
+  'workspace_read',
+  'workspace_write',
+  'workspace_python',
+  'memory_read',
+  'evolution_read',
+  'memory_update',
+  'candidate_propose',
+  'candidate_evaluate',
+  'finish',
+]);
+
+export function effectiveAvoToolNames(workspaceMode = 'files-only') {
+  return AVO_TOOL_NAMES.filter((name) => {
+    if (workspaceMode === 'disabled' && name.startsWith('workspace_')) return false;
+    if (name === 'workspace_python' && workspaceMode !== 'isolated-python') return false;
+    return true;
+  });
+}
 
 export class AvoArcAgent {
   constructor({ gameId, environment, loop, config, logger = console, captureScorecard = true }) {

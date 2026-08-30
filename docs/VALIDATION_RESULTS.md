@@ -1,38 +1,39 @@
 # Validation Results
 
-## Real public-set benchmark — accepted 2026-08-29
+## Historical public-set diagnostic — reclassified 2026-08-30
 
-A complete official ARC-AGI-3 public-set run with the real Responses
-provider is recorded as accepted evidence in
+A real-provider ARC-AGI-3 public-set execution is retained as non-comparable
+diagnostic evidence in
 [`docs/results/real-public-20260828-high2.json`](results/real-public-20260828-high2.json).
 
-- **Official score: 0.0010988675559354109** (origin:
-  `aggregateScorecard.score`, the official arc-agi Arcade session
-  scorecard; never a local metric).
+- **Accepted official score: unavailable.** The observed final-session
+  scorecard value `0.0010988675559354109` is preserved as unaccepted
+  diagnostic evidence, not a comparable benchmark result.
 - **25/25 dynamically discovered public games**, every record produced by
   the production `pi-sdk` loop (loop attestation `complete`, 25/25).
 - Result: **0 wins**, 25 × `GAME_OVER`, 21,128 environment actions against
   official baseline-derived budgets. The agent completed no game on this
   public set at reasoning effort `high`; the score is the official
   scorecard's partial-credit value, not a solved-game percentage.
-- Provenance: challenge-bound non-mock provider attestation
+- Historical provenance: challenge-bound non-mock provider attestation
   (`noMockAttestation: true`), Responses wire API, reasoning effort
   `high`, plaintext endpoint under the documented operator opt-in
   (`providerTransport: http-operator-opt-in`), Git commit `2e7c1e91`
   with the original pass at `c9b3e0a4` disclosed in the `resume` block
-  (the run survived a provider quota cooldown via the checkpoint-resume
-  machinery; both commits are published on the report).
+  (the run crossed commits during checkpoint recovery; both commits remain
+  published on the report).
 - The scoring Arcade session covered the eight replayed games of the
   final pass; the seventeen checkpointed games ran in the original pass
   of the same run under the same configuration. This cross-session
-  resumption is disclosed, not silently merged.
+  resumption was disclosed, but disclosure does not make the mixed condition
+  comparable. No immutable run capsule or initial-state snapshot existed.
 - Redaction gate: the published report contains no provider endpoint, key,
   model identifier or credential (asserted by the runner and re-verified
   by the secret scanner).
 
-Supporting runtime evidence of the same acceptance chain: 325 tests,
+Supporting historical runtime checks from the same execution chain: 325 tests,
 secret scan, and the 25/25 synthetic offline contract demo all pass on
-the accepting commit.
+the then-current commit. They do not restore benchmark attribution.
 
 ## Current exact-tip status
 

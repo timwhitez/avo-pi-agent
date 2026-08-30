@@ -171,14 +171,15 @@ docs/RUNBOOK.md              full public-demo procedure
 
 ## Validation status
 
-A complete real-provider public-set benchmark is recorded as accepted
-evidence (2026-08-29): **official ARC scorecard score 0.0011**, 25/25
-public games on the production Pi loop, 0 wins, 21,128 actions at
-reasoning effort `high`. See
+A historical real-provider public-set execution is retained as
+**non-comparable diagnostic evidence**: 25/25 public games on the production
+Pi loop, 0 wins, 21,128 actions at reasoning effort `high`. It crossed Git
+commits without an immutable run capsule, so its accepted official score is
+unavailable. See
 [`docs/results/real-public-20260828-high2.json`](docs/results/real-public-20260828-high2.json)
 and [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md). The
 committed record explicitly separates completed offline checks from the
-official public run, and never treats synthetic results as an ARC score.
+historical diagnostic, and never treats synthetic results as an ARC score.
 
 ## Upstream references
 

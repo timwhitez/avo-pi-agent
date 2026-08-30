@@ -162,6 +162,8 @@ async function runBenchmark({ roundId, traceDir, memoryDir, workspaceDir, proces
       AVO_TRAJECTORY_DIR: traceDir,
       AVO_MEMORY_DIR: memoryDir,
       AVO_WORKSPACE_DIR: workspaceDir,
+      AVO_BENCHMARK_STATE_MODE: 'warm-start',
+      AVO_BENCHMARK_STATE_SNAPSHOT: `${roundId}-input`,
       AVO_REPAIR_ROUND: String(round),
     },
   });

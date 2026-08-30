@@ -1,3 +1,8 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const applicationRoot = path.dirname(fileURLToPath(import.meta.url));
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   async headers() {
@@ -17,6 +22,7 @@ const nextConfig = {
     ];
   },
   output: 'standalone',
+  outputFileTracingRoot: applicationRoot,
   poweredByHeader: false,
   reactStrictMode: true,
   transpilePackages: [

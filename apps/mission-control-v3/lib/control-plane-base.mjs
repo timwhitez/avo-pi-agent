@@ -18,6 +18,7 @@ import {
   loadFindingsSnapshotEvidence,
   loadMemorySnapshotEvidence,
 } from './mission-control-evidence.mjs';
+import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsule-evidence.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -304,7 +305,7 @@ function finalizeRun(run, state, { code, signal, stdout, stderr }) {
     run.reportEvidence = loaded.evidence;
     run.reportStatus = String(report.status || 'unknown');
     run.summary = {
-      ...summarizeMissionControlReport(report, run.executionMode),
+      ...summarizeVerifiedReport(report, run.executionMode),
       reportEvidence: loaded.evidence,
     };
     run.official = run.summary.official === true;
@@ -445,12 +446,19 @@ function loadSummaryForRun(run) {
   try {
     const loaded = loadExactRunReportEvidence(run.reportContract);
     return {
-      ...summarizeMissionControlReport(loaded.report, run.executionMode),
+      ...summarizeVerifiedReport(loaded.report, run.executionMode),
       reportEvidence: loaded.evidence,
     };
   } catch {
     return null;
   }
+}
+
+function summarizeVerifiedReport(report, mode) {
+  const privateCapsuleEvidence = mode === 'competition'
+    ? readPrivateRunCapsuleEvidence({ repositoryRoot: REPO_ROOT, report })
+    : null;
+  return summarizeMissionControlReport(report, mode, { privateCapsuleEvidence });
 }
 
 function loadTrajectorySnapshot(runId, games) {

@@ -1,4 +1,26 @@
 /** Production loop backed by the official Pi Agent Harness packages. */
+export const CONTINUATION_PROMPT = 'The environment is not complete. Re-ground in exact evidence and durable memory, then continue with a materially useful direct-interaction experiment. Do not stop until WIN or the action budget is exhausted.';
+export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
+  api: 'openai-responses',
+  reasoning: true,
+  input: Object.freeze(['text']),
+  contextWindow: 1_000_000,
+  maxTokens: 64_000,
+  thinkingLevelMap: Object.freeze({
+    off: 'none',
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'xhigh',
+    max: 'max',
+  }),
+  compat: Object.freeze({
+    supportsDeveloperRole: true,
+    supportsReasoningEffort: true,
+  }),
+});
+
 export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   let Agent;
   let createModels;
@@ -21,27 +43,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   const model = {
     id: config.provider.model,
     name: config.provider.model,
-    api: 'openai-responses',
     provider: providerId,
     baseUrl: config.provider.baseUrl,
-    reasoning: true,
-    input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1_000_000,
-    maxTokens: 64_000,
-    thinkingLevelMap: {
-      off: 'none',
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-      max: 'max',
-    },
-    compat: {
-      supportsDeveloperRole: true,
-      supportsReasoningEffort: true,
-    },
+    ...PI_MODEL_CAPABILITY_MANIFEST,
   };
 
   const provider = createProvider({
@@ -87,14 +92,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         if (tool.name === 'workspace_python' && workspaceMode !== 'isolated-python') return false;
         return true;
       });
-      const effectiveSystemPrompt = String(systemPrompt).replace(
-        'The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access.',
-        workspaceMode === 'isolated-python'
-          ? 'Python scratch execution is available only inside a local OS-container boundary with network disabled, a read-only container root, dropped capabilities, resource limits, and a single bound workspace. Python audit hooks are defense in depth and are not the isolation boundary.'
-          : workspaceMode === 'disabled'
-            ? 'The scratch workspace is disabled. No arbitrary-code or workspace-file tool is available.'
-            : 'The scratch workspace is files-only. It rejects symlinks and hard links, and no model-facing arbitrary-code execution tool is available.',
-      );
+      const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
       const piTools = exposedTools.map((tool) => ({
         name: tool.name,
         label: tool.label || tool.name,
@@ -155,7 +153,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
         agent.followUp({
           role: 'user',
-          content: 'The environment is not complete. Re-ground in exact evidence and durable memory, then continue with a materially useful direct-interaction experiment. Do not stop until WIN or the action budget is exhausted.',
+          content: CONTINUATION_PROMPT,
           timestamp: Date.now() + outerTurns,
         });
         await agent.continue();
@@ -173,6 +171,17 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       };
     },
   };
+}
+
+export function effectivePiSystemPrompt(systemPrompt, workspaceMode = 'files-only') {
+  return String(systemPrompt).replace(
+    'The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access.',
+    workspaceMode === 'isolated-python'
+      ? 'Python scratch execution is available only inside a local OS-container boundary with network disabled, a read-only container root, dropped capabilities, resource limits, and a single bound workspace. Python audit hooks are defense in depth and are not the isolation boundary.'
+      : workspaceMode === 'disabled'
+        ? 'The scratch workspace is disabled. No arbitrary-code or workspace-file tool is available.'
+        : 'The scratch workspace is files-only. It rejects symlinks and hard links, and no model-facing arbitrary-code execution tool is available.',
+  );
 }
 
 function toTypeBox(schema, Type) {

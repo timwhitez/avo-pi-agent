@@ -27,6 +27,8 @@ import {
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
+import { resolveRunOutputState } from '../src/trajectory/repair-state.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('repair:local is local-only and refuses GitHub Actions execution');
@@ -38,6 +40,8 @@ const baseRunId = safeId(options.runId || process.env.AVO_REPAIR_RUN_ID || `repa
 const repositoryRoot = path.resolve('.');
 const memoryDir = path.resolve(options.memoryDir || `state/repair-loop/${baseRunId}/memory`);
 const workspaceDir = path.resolve(options.workspaceDir || `state/repair-loop/${baseRunId}/workspaces`);
+let roundMemoryDir = memoryDir;
+let roundWorkspaceDir = workspaceDir;
 const privateRoot = path.resolve(`runs/private/repair-loop/${baseRunId}`);
 const publicRoot = path.resolve('runs/public');
 if (fs.existsSync(privateRoot)) throw new Error('repair run private root already exists; choose a fresh run ID');
@@ -90,8 +94,11 @@ try {
     ensureAuthorityDirectory(roundRoot, { root: privateRoot, purpose: 'repair round directory' });
     ensureAuthorityDirectory(traceDir, { root: repositoryRoot, purpose: 'trajectory evidence directory' });
 
-    const run = await runBenchmark(roundId, traceDir, memoryDir, workspaceDir);
+    const run = await runBenchmark(roundId, traceDir, roundMemoryDir, roundWorkspaceDir);
     if (interrupted) throw interruptedError(interruptSignal);
+    const roundState = resolveRunOutputState({ repositoryRoot, runId: roundId });
+    roundMemoryDir = roundState.memoryDir;
+    roundWorkspaceDir = roundState.workspaceDir;
 
     const benchmarkDocument = readOptionalJsonEvidence(benchmarkFile, {
       root: publicRoot,
@@ -99,7 +106,7 @@ try {
     });
     const benchmark = benchmarkDocument?.value ?? null;
     const loaded = loadTrajectoryEvents(traceDir);
-    const memoryByGame = loadMemoryByGame(memoryDir);
+    const memoryByGame = loadMemoryByGame(roundMemoryDir);
     const expectedGames = extractExpectedGames(benchmark);
     const analysis = analyzeTrajectory({
       events: loaded.events,
@@ -119,10 +126,17 @@ try {
       authoritative: true,
     };
 
-    const authority = evaluateRoundAuthority({ roundId, processResult: run, benchmark, analysis });
+    const privateCapsuleEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot, report: benchmark });
+    const authority = evaluateRoundAuthority({
+      roundId,
+      processResult: run,
+      benchmark,
+      analysis,
+      privateCapsuleEvidence,
+    });
     const plan = buildRepairPlan(analysis, round);
     const outcomes = authority.authoritative && !authority.clean && plan.infrastructureFindingCount === 0
-      ? applyRepairPlan(memoryDir, plan)
+      ? applyRepairPlan(roundMemoryDir, plan)
       : [];
     const provenance = buildRoundProvenance({
       roundId,
@@ -143,6 +157,9 @@ try {
       officialScore: authority.officialScore,
       authoritative: authority.authoritative,
       clean: authority.clean,
+      runCapsuleHash: authority.runCapsuleHash,
+      runClass: authority.runClass,
+      runCapsuleComparable: authority.runCapsuleComparable,
       authorityReasons: authority.reasons,
       trajectoryFileCount: loaded.ingestion.fileCount,
       trajectoryBytes: loaded.ingestion.bytes,
@@ -267,6 +284,8 @@ async function runBenchmark(roundId, traceDir, memoryRoot, workspaceRoot) {
       AVO_TRAJECTORY_DIR: traceDir,
       AVO_MEMORY_DIR: memoryRoot,
       AVO_WORKSPACE_DIR: workspaceRoot,
+      AVO_BENCHMARK_STATE_MODE: 'warm-start',
+      AVO_BENCHMARK_STATE_SNAPSHOT: `${roundId}-input`,
       AVO_REPAIR_ROUND: String(roundId.split('-').at(-1)),
       AVO_LOCAL_LOCK_TOKEN: lock.token,
     },
@@ -338,7 +357,7 @@ function writeSummaries() {
     final: summary.final,
     rounds: summary.rounds.map(publicRound),
     failure: summary.failure,
-    acceptanceRule: 'clean=true only after an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector executed, zero parse errors and zero findings of any status',
+    acceptanceRule: 'clean=true only after one comparable clean-worktree run capsule, an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector executed, zero parse errors and zero findings of any status',
   };
   writeAuthorityJson(path.join(publicRoot, `trajectory-repair-${baseRunId}.redacted.json`), publicSummary, { root: publicRoot });
 }
@@ -352,6 +371,9 @@ function publicRound(record) {
     officialScore: record.officialScore,
     authoritative: record.authoritative,
     clean: record.clean,
+    runCapsuleHash: record.runCapsuleHash,
+    runClass: record.runClass,
+    runCapsuleComparable: record.runCapsuleComparable,
     authorityReasons: record.authorityReasons,
     trajectoryFileCount: record.trajectoryFileCount,
     trajectoryBytes: record.trajectoryBytes,
@@ -374,6 +396,7 @@ function buildRoundProvenance({ roundId, benchmarkFile, benchmarkDocument, trace
     'src/local/authority-directory.mjs',
     'src/local/authority-evidence.mjs',
     'src/trajectory/analyzer-v2.mjs',
+    'src/trajectory/repair-state.mjs',
     'src/trajectory/round-authority.mjs',
     'bridge/recording_python_v4.py',
     'bridge/recording_python_v5.py',

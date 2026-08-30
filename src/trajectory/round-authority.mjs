@@ -2,8 +2,15 @@ import {
   finiteNumberOrNull,
   nonNegativeIntegerOrNull,
 } from '../local/numeric.mjs';
+import { evaluatePublicRunCapsule } from '../benchmark/run-capsule-authority.mjs';
 
-export function evaluateRoundAuthority({ roundId, processResult, benchmark, analysis } = {}) {
+export function evaluateRoundAuthority({
+  roundId,
+  processResult,
+  benchmark,
+  analysis,
+  privateCapsuleEvidence = null,
+} = {}) {
   const reasons = [];
   const expectedSet = normalizeGames(
     benchmark?.completeness?.gameIds ?? benchmark?.provenance?.publicGameIds,
@@ -16,6 +23,12 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   const integrity = recordOrEmpty(analysis?.integrity);
   const provenance = recordOrEmpty(benchmark?.provenance);
   const providerPreflight = recordOrEmpty(provenance.providerPreflight);
+  const runCapsule = recordOrEmpty(provenance.runCapsule);
+  const capsuleAuthority = evaluatePublicRunCapsule(runCapsule, {
+    privateCapsuleEvidence,
+    expectedRunId: benchmark?.runId,
+    benchmarkReport: benchmark,
+  });
 
   const expectedCount = nonNegativeIntegerOrNull(benchmark?.completeness?.expectedCount);
   const actualCount = nonNegativeIntegerOrNull(benchmark?.completeness?.actualCount);
@@ -39,6 +52,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   requireCondition(processResult?.code === 0 && !processResult?.signal, 'benchmark process did not exit cleanly', reasons);
   requireCondition(benchmark?.status === 'complete', 'benchmark report is not complete', reasons);
   requireCondition(String(benchmark?.runId || '') === String(roundId || ''), 'benchmark report runId does not match the requested round', reasons);
+  requireCondition(String(provenance.runId || '') === String(roundId || ''), 'benchmark provenance runId does not match the requested round', reasons);
   requireCondition(benchmark?.completeness?.complete === true, 'benchmark game-completeness attestation is absent', reasons);
   requireCondition(expectedSet.valid, 'benchmark expected game set contains an invalid entry', reasons);
   requireCondition(!expectedSet.duplicate, 'benchmark expected game set contains duplicates', reasons);
@@ -74,6 +88,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
   requireCondition(publicGameCount !== null && publicGameCount === expectedGames.length, 'provenance public-game count is inconsistent', reasons);
   requireCondition(provenanceSet.valid && !provenanceSet.duplicate, 'provenance public-game set is invalid or duplicated', reasons);
   requireCondition(sameGameSet(expectedGames, provenanceSet.games), 'provenance public-game set differs from benchmark completeness', reasons);
+  reasons.push(...capsuleAuthority.reasons);
 
   requireCondition(String(analysis?.runId || '') === String(roundId || ''), 'trajectory analysis runId does not match the requested round', reasons);
   requireCondition(acceptance.allRegisteredDetectorsExecuted === true, 'not every registered trajectory detector executed', reasons);
@@ -110,7 +125,7 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     && openFindingCount === 0;
 
   return Object.freeze({
-    schemaVersion: 3,
+    schemaVersion: 4,
     roundId: String(roundId || ''),
     authoritative,
     clean,
@@ -127,7 +142,10 @@ export function evaluateRoundAuthority({ roundId, processResult, benchmark, anal
     recorderSchemaVersion,
     transitionCount,
     providerAttestationVersion,
-    rule: 'authoritative requires a nonce-bound real-provider freshness proof, official runtime, exact duplicate-free public set, strict numeric official score and counts, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
+    runCapsuleHash: capsuleAuthority.capsuleHash,
+    runClass: capsuleAuthority.runClass,
+    runCapsuleComparable: capsuleAuthority.comparable,
+    rule: 'authoritative requires one comparable clean-worktree run capsule, a nonce-bound real-provider freshness proof, official runtime, exact duplicate-free public set, strict numeric official score and counts, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
   });
 }
 

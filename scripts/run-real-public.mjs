@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { loadLocalEnv } from '../src/config.mjs';
+import { getRuntimeConfig, loadLocalEnv } from '../src/config.mjs';
 import {
   buildProvenance,
   currentGitSha,
@@ -28,6 +27,20 @@ import {
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
+import {
+  assertRunStateMatchesInitial,
+  buildRunCapsule,
+  canonicalJson,
+  classifyCapsuleResult,
+  classifyResume,
+  inspectRunState,
+  prepareRunState,
+  publicRunCapsule,
+  readRunCapsule,
+  verifyRunCapsuleExecution,
+  writeRunCapsule,
+} from '../src/benchmark/run-capsule.mjs';
+import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 
 loadLocalEnv();
@@ -46,18 +59,17 @@ const publicDir = path.join(runsRoot, 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
 fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
 fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
-// AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run:
-// finished games are skipped via the per-game checkpoint cache and the
-// original provenance stays authoritative. The context must match exactly.
+// AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run.
+// Comparable recovery requires the exact original run capsule; changed
+// conditions are allowed only as an explicitly non-comparable diagnostic.
 const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
 let resumeContext = null;
 if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
   if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
   resumeContext = assertResumableContext({ privateDir, publicFile, runId });
   console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
-  // Regenerable private artifacts from earlier passes would trip the
-  // exclusive copy/write guards. Evidence that stays authoritative
-  // (provenance.json, game checkpoints, scorecard checkpoint) is untouched.
+  // Regenerable private artifacts from earlier passes would trip exclusive
+  // copy/write guards. The original capsule, provenance and checkpoints stay.
   for (const stale of ['raw-run-report.json', 'manifest.private.json']) {
     const target = path.join(privateDir, stale);
     if (fs.existsSync(target)) fs.unlinkSync(target);
@@ -74,6 +86,29 @@ const stage = { value: 'configuration' };
 try {
   provider = requireRealProviderEnvironment();
   const explicitSecrets = [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean);
+  const runState = prepareRunState({
+    root,
+    privateDir,
+    runId,
+    resumeCapsule: resumeContext?.originalCapsule || null,
+  });
+  process.env.AVO_MEMORY_DIR = runState.memoryDir;
+  process.env.AVO_WORKSPACE_DIR = runState.workspaceDir;
+  if (resumeContext && String(process.env.AVO_RESUME_MODE || 'recovered') !== 'migrated') {
+    const checkpointDir = path.join(privateDir, 'resume');
+    if (fs.existsSync(checkpointDir)) {
+      const resumed = loadResumedRecords(checkpointDir, {
+        capsuleHash: resumeContext.originalCapsule.capsuleHash,
+        stateBinding: runState.currentState,
+      });
+      if (resumed.size === 0) {
+        assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
+      }
+    } else {
+      assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
+    }
+  }
+  const config = getRuntimeConfig();
 
   stage.value = 'provider-preflight';
   console.log('[real-run] validating a non-mock Responses request');
@@ -103,13 +138,41 @@ try {
     runId,
     gitSha,
   });
+  stage.value = 'run-capsule';
+  const capsule = buildRunCapsule({
+    root,
+    runId,
+    python,
+    provenance,
+    arcRuntime,
+    games,
+    config,
+    initialState: runState.initialState,
+  });
+  const resumeDecision = resumeContext
+    ? classifyResume(resumeContext.originalCapsule, capsule, process.env.AVO_RESUME_MODE || 'recovered')
+    : Object.freeze({ runClass: runState.initialState.mode, comparable: true, sourceCapsuleHash: null });
+  const activeCapsuleFile = persistRunCapsule({ privateDir, capsule, resumeContext });
+  verifyRunCapsuleExecution({
+    root,
+    capsule,
+    python,
+    config,
+    stateBinding: runState.currentState,
+    requireInitialState: !resumeContext || resumeDecision.runClass === 'diagnostic-migrated',
+  });
+  provenance.runCapsule = publicRunCapsule(capsule, resumeDecision);
   if (resumeContext) {
     provenance.resume = Object.freeze({
       resumed: true,
       resumedAt: new Date().toISOString(),
       originalGitSha: resumeContext.originalGitSha,
-      resumedAtGitSha: resumeContext.resumedAtGitSha || gitSha,
+      resumedAtGitSha: gitSha,
       originalCreatedAt: resumeContext.originalCreatedAt,
+      sourceCapsuleHash: resumeContext.originalCapsule.capsuleHash,
+      currentCapsuleHash: capsule.capsuleHash,
+      runClass: resumeDecision.runClass,
+      comparable: resumeDecision.comparable,
     });
   }
   if (resuming && fs.existsSync(path.join(privateDir, 'provenance.json'))) {
@@ -135,6 +198,14 @@ try {
       overrides: {
         AVO_REQUIRE_REAL_PROVIDER: '1',
         AVO_REAL_RUN_ID: runId,
+        AVO_RUN_CAPSULE_HASH: capsule.capsuleHash,
+        AVO_RUN_CAPSULE_FILE: activeCapsuleFile,
+        AVO_RESUME_SOURCE_CAPSULE_HASH: resumeDecision.comparable
+          ? undefined
+          : resumeDecision.sourceCapsuleHash,
+        AVO_RUN_CLASS: resumeDecision.runClass,
+        AVO_MEMORY_DIR: runState.memoryDir,
+        AVO_WORKSPACE_DIR: runState.workspaceDir,
         // Checkpoints are written on fresh runs too: an interruption at any
         // point must leave a resume trail, not just interruptions of runs
         // that were already resumed once.
@@ -176,6 +247,38 @@ try {
     candidateFiles,
     { runId, kind: 'official-public-environments', root: runsRoot },
   );
+  if (selected.report.runCapsuleHash !== capsule.capsuleHash
+      || selected.report.runClass !== resumeDecision.runClass) {
+    throw new Error('production runner report is not bound to the active run capsule');
+  }
+  const finalCapsule = readRunCapsule(activeCapsuleFile, { root: privateDir });
+  if (finalCapsule.capsuleHash !== capsule.capsuleHash) {
+    throw new Error('active run capsule changed after execution');
+  }
+  verifyRunCapsuleExecution({ root, capsule: finalCapsule, python, config });
+  const finalState = inspectRunState({
+    memoryDir: runState.memoryDir,
+    workspaceDir: runState.workspaceDir,
+  });
+  const finalCheckpoints = loadResumedRecords(path.join(privateDir, 'resume'), {
+    capsuleHash: capsule.capsuleHash,
+    allowedCapsuleHashes: resumeDecision.comparable ? [] : [resumeDecision.sourceCapsuleHash],
+    stateBinding: finalState,
+    requireStateMatch: resumeDecision.comparable,
+  });
+  if (finalCheckpoints.size !== selected.records.length) {
+    throw new Error('production report game set differs from the final capsule-bound checkpoint set');
+  }
+  for (const record of selected.records) {
+    const checkpoint = finalCheckpoints.get(record.gameId);
+    if (!checkpoint || canonicalJson(normalizeCheckpointRecord(checkpoint)) !== canonicalJson(normalizeCheckpointRecord(record))) {
+      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+    }
+  }
+  const activeCapsuleSha256 = hashFile(activeCapsuleFile, { root: privateDir });
+  if (activeCapsuleSha256 !== provenance.runCapsule.capsuleEvidenceSha256) {
+    throw new Error('public capsule commitment differs from the private capsule artifact');
+  }
   const rawRunReport = path.join(privateDir, 'raw-run-report.json');
   const copiedReport = copyRegularFileExclusive(selected.file, rawRunReport, {
     sourceRoot: runsRoot,
@@ -193,16 +296,21 @@ try {
   const completeness = validateCompleteGameSet(games, selected.records);
 
   stage.value = 'official-score-origin';
-  const officialScore = extractOfficialScore(selected.report);
+  const observedOfficialScore = extractOfficialScore(selected.report);
   const aggregates = aggregateGameMetrics(selected.records);
+  const resultClassification = classifyCapsuleResult(resumeDecision, observedOfficialScore);
+  const { status: acceptedStatus, officialScore } = resultClassification;
 
   const privateManifest = {
     ...provenance,
     completedAt: new Date().toISOString(),
-    status: 'complete',
+    status: acceptedStatus,
     loopAttestation,
     completeness,
     officialScore,
+    ...(resultClassification.unacceptedScoreEvidence
+      ? { unacceptedScoreEvidence: resultClassification.unacceptedScoreEvidence }
+      : {}),
     aggregates,
     games: selected.records,
     artifacts: {
@@ -212,6 +320,7 @@ try {
       },
       stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile, { root: privateDir }) },
       stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile, { root: privateDir }) },
+      runCapsule: { file: path.basename(activeCapsuleFile), sha256: activeCapsuleSha256 },
     },
   };
   writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest, {
@@ -223,7 +332,7 @@ try {
   const publicReport = redact({
     schemaVersion: 1,
     runId,
-    status: 'complete',
+    status: acceptedStatus,
     completedAt: privateManifest.completedAt,
     provenance,
     loopAttestation,
@@ -237,7 +346,12 @@ try {
   assertNoPrivateMaterial(serialized, { explicitSecrets });
   writeJsonAtomic(publicFile, publicReport, { root: publicDir, exclusive: true });
 
-  console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
+  if (resumeDecision.comparable) {
+    console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
+  } else {
+    console.log('[real-run] DIAGNOSTIC-MIGRATED complete; official score withheld because the capsule changed');
+    process.exitCode = 2;
+  }
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
   console.log(`[real-run] private artifact directory: ${path.relative(root, privateDir)}`);
 } catch (error) {
@@ -270,10 +384,46 @@ function benchmarkTimeout() {
   return Math.trunc(value);
 }
 
+function normalizeCheckpointRecord(value) {
+  const versionedGameId = String(
+    value?.versionedGameId || value?.versioned_game_id || value?.gameId || value?.game_id || '',
+  );
+  return {
+    gameId: versionedGameId.split('-')[0],
+    versionedGameId,
+    state: String(value?.state || '').toUpperCase(),
+    levelsCompleted: Number(value?.levelsCompleted ?? value?.levels_completed ?? 0),
+    winLevels: Number(value?.winLevels ?? value?.win_levels ?? 0),
+    actions: Number(value?.actions ?? value?.actionCount ?? value?.action_count ?? 0),
+    won: value?.won === true,
+    error: value?.error || null,
+    loop: value?.loop || null,
+  };
+}
+
 function safeRunId(value) {
   const result = String(value).replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 120);
   if (!result) throw new Error('AVO_REAL_RUN_ID is invalid');
   return result;
+}
+
+function persistRunCapsule({ privateDir, capsule, resumeContext }) {
+  const originalFile = path.join(privateDir, 'run-capsule.json');
+  if (!resumeContext) {
+    writeRunCapsule(originalFile, capsule, { root: privateDir });
+    return originalFile;
+  }
+  if (capsule.capsuleHash === resumeContext.originalCapsule.capsuleHash) return originalFile;
+  const migratedFile = path.join(privateDir, `run-capsule.${capsule.capsuleHash}.json`);
+  if (!fs.existsSync(migratedFile)) {
+    writeRunCapsule(migratedFile, capsule, { root: privateDir });
+    return migratedFile;
+  }
+  const existing = readRunCapsule(migratedFile, { root: privateDir });
+  if (existing.capsuleHash !== capsule.capsuleHash) {
+    throw new Error('existing migrated run capsule differs from the active capsule');
+  }
+  return migratedFile;
 }
 
 function assertResumableContext({ privateDir, publicFile, runId }) {
@@ -287,36 +437,35 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
   } catch (error) {
     throw new Error(`cannot resume ${runId}: provenance.json is unreadable`, { cause: error });
   }
-  let currentSha = null;
-  if (original.gitSha) {
-    const probe = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' });
-    currentSha = probe.status === 0 ? String(probe.stdout).trim() : null;
-    if (currentSha && original.gitSha !== currentSha) {
-      // Resuming across commits is only honest when the published provenance
-      // discloses both SHAs; AVO_RESUME_ALLOW_SHA_DRIFT is the operator's
-      // explicit acknowledgment of that mixed execution.
-      if (process.env.AVO_RESUME_ALLOW_SHA_DRIFT !== '1') {
-        throw new Error(`cannot resume ${runId}: repository moved from ${original.gitSha.slice(0, 12)} to ${currentSha.slice(0, 12)}; start a fresh run or set AVO_RESUME_ALLOW_SHA_DRIFT=1 to disclose the drift`);
-      }
-      console.warn(`[real-run] resume crosses commits ${original.gitSha.slice(0, 12)} -> ${currentSha.slice(0, 12)}; the public report will disclose both`);
-    }
+  const capsuleFile = path.join(privateDir, 'run-capsule.json');
+  if (!fs.existsSync(capsuleFile)) {
+    throw new Error(`cannot resume ${runId}: original run-capsule.json is missing`);
+  }
+  const originalCapsule = readRunCapsule(capsuleFile, { root: privateDir });
+  if (originalCapsule.definition.runId !== runId) {
+    throw new Error(`cannot resume ${runId}: original run capsule has a different run ID`);
+  }
+  if (original.runId !== runId
+      || original.runCapsule?.capsuleHash !== originalCapsule.capsuleHash
+      || original.gitSha !== originalCapsule.definition.git?.commit) {
+    throw new Error(`cannot resume ${runId}: original provenance is not bound to the run capsule`);
   }
   const manifestFile = path.join(privateDir, 'manifest.private.json');
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    if (manifest.status === 'complete') {
+    if (manifest.status === 'complete' || manifest.status === 'diagnostic-migrated') {
       throw new Error(`cannot resume ${runId}: the run already completed`);
     }
   }
   if (fs.existsSync(publicFile)) {
     const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
-    if (prior.status === 'complete') {
+    if (prior.status === 'complete' || prior.status === 'diagnostic-migrated') {
       throw new Error(`cannot resume ${runId}: a complete public report already exists`);
     }
   }
   return {
     originalGitSha: original.gitSha || null,
-    resumedAtGitSha: currentSha,
     originalCreatedAt: original.createdAt || null,
+    originalCapsule,
   };
 }
