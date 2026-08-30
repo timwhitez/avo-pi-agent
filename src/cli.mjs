@@ -20,8 +20,13 @@ import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
-import { aggregateAttemptTelemetry } from './benchmark/report.mjs';
-import { evaluateScorecardCoverage, hashExecutionId, normalizeScorecardSnapshot } from './benchmark/scorecard-evidence.mjs';
+import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
+import {
+  evaluateScorecardCoverage,
+  hashExecutionId,
+  normalizeScorecardSnapshot,
+  reconcileExactScorecardProgress,
+} from './benchmark/scorecard-evidence.mjs';
 
 const quietLogger = { log() {}, info() {}, warn() {}, error() {} };
 
@@ -204,7 +209,7 @@ async function runPublic(args) {
       };
       let observedActions = 0;
       let observedLevels = 0;
-      let observedWinLevels = Number(info.level_count || 0);
+      let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
           if (event.type !== 'tool_execution_end') return;
@@ -212,15 +217,20 @@ async function runPublic(args) {
           if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
           observedActions += 1;
           const frame = event.result?.details?.frame || {};
-          observedLevels = Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels);
-          observedWinLevels = Number(frame.winLevels ?? frame.win_levels ?? observedWinLevels);
+          observedLevels = Math.max(
+            observedLevels,
+            Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels),
+          );
+          observedTotalLevels ??= positiveCountOrNull(
+            frame.totalLevels ?? frame.total_levels,
+          );
           progress.gameProgress({
             index: ordinal,
             total: selected.length,
             gameId,
             actions: observedActions,
             levelsCompleted: observedLevels,
-            winLevels: observedWinLevels,
+            totalLevels: observedTotalLevels,
             state: String(frame.state || 'PLAYING'),
           });
         },
@@ -257,6 +267,7 @@ async function runPublic(args) {
           result = {
             ...agentResult,
             ...aggregateAttemptTelemetry(attemptResults),
+            ...aggregateAttemptProgress(attemptResults),
             versionedGameId,
             executions: executions.slice(),
             actionBudget,
@@ -280,7 +291,7 @@ async function runPublic(args) {
           stateBinding: currentStateBinding(config),
         });
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
-        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.winLevels} actions=${result.actions}/${actionBudget.total}`);
+        console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.totalLevels ?? '?'} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
         progress.gameFinished({
           index: ordinal,
@@ -289,7 +300,7 @@ async function runPublic(args) {
           result: {
             state: 'ERROR',
             levelsCompleted: observedLevels,
-            winLevels: observedWinLevels,
+            totalLevels: observedTotalLevels,
             actions: observedActions,
             error: true,
           },
@@ -405,11 +416,15 @@ function currentStateBinding(config) {
 }
 
 function makeReport(kind, results, config, { scorecards = [], expectedGames = results.length, runError = null } = {}) {
-  const wins = results.filter((r) => r.won).length;
-  const safeResults = redactRuntimeObject(results);
-  const scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
+  let safeResults = redactRuntimeObject(results);
+  let scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
+  if (scoreAuthority.coverage.exact) {
+    safeResults = reconcileExactScorecardProgress(scoreAuthority.scorecards, safeResults);
+    scoreAuthority = evaluateScorecardCoverage(scorecards, safeResults);
+  }
+  const wins = safeResults.filter((result) => result.won).length;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: process.env.AVO_REAL_RUN_ID || null,
     kind,
     createdAt: new Date().toISOString(),
@@ -420,7 +435,8 @@ function makeReport(kind, results, config, { scorecards = [], expectedGames = re
       games: safeResults.length,
       wins,
       winRate: safeResults.length ? wins / safeResults.length : 0,
-      totalLevels: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
+      totalLevelsCompleted: safeResults.reduce((sum, r) => sum + r.levelsCompleted, 0),
+      totalLevels: sumReportedCount(safeResults, 'totalLevels'),
       totalActions: safeResults.reduce((sum, r) => sum + r.actions, 0),
       totalGameplayActions: sumReportedCount(safeResults, 'gameplayActions'),
       totalResets: sumReportedCount(safeResults, 'resets'),
@@ -450,6 +466,10 @@ function sumReportedCount(results, field) {
   return results.every((result) => Number.isInteger(result?.[field]) && result[field] >= 0)
     ? results.reduce((sum, result) => sum + result[field], 0)
     : null;
+}
+
+function positiveCountOrNull(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function requiredCapsuleHash(value) {

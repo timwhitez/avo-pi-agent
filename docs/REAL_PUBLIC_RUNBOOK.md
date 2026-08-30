@@ -161,7 +161,7 @@ The redacted report contains:
 - official runtime version attestation;
 - frozen game IDs and game-set hash;
 - one normalized record per game;
-- aggregate levels/actions/wins;
+- monotonic completed levels, stable-or-null total levels, actions, and wins;
 - exact scorecard value and its field origin;
 - hashes of the private evidence.
 

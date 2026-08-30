@@ -33,7 +33,16 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     firstOwn(value, ['levelsCompleted', 'levels_completed', 'levels']),
     'levelsCompleted', sourcePath,
   );
-  const winLevels = optionalCount(firstOwn(value, ['winLevels', 'win_levels']), 'winLevels', sourcePath);
+  const totalLevelAliases = ownValues(value, ['totalLevels', 'total_levels']);
+  const legacyLevelAliases = ownValues(value, ['winLevels', 'win_levels']);
+  if (totalLevelAliases.length && legacyLevelAliases.length) {
+    invalidRecord(sourcePath, 'totalLevels cannot be combined with ambiguous legacy winLevels');
+  }
+  const totalLevels = reportedNullableCount(totalLevelAliases, 'totalLevels', sourcePath);
+  const legacyWinLevels = reportedCount(legacyLevelAliases, 'winLevels', sourcePath);
+  const levelMetadata = totalLevelAliases.length
+    ? 'totalLevels'
+    : legacyLevelAliases.length ? 'legacy-winLevels' : 'missing';
   const actions = optionalCount(firstOwn(value, ['actions', 'actionCount', 'action_count']), 'actions', sourcePath);
   const gameplayActions = reportedCount(
     ownValues(value, ['gameplayActions', 'gameplay_actions']),
@@ -62,8 +71,8 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     sourcePath,
   );
   const episodeId = optionalString(firstOwn(value, ['episodeId', 'episode_id']), 'episodeId', sourcePath);
-  if (winLevels > 0 && levelsCompleted > winLevels) {
-    invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds winLevels=${winLevels}`);
+  if (totalLevels !== null && levelsCompleted > totalLevels) {
+    invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds totalLevels=${totalLevels}`);
   }
   const controllerTelemetry = [gameplayActions, resets, rejectedCommands, fullResets, episodeId];
   const unavailableControllerTelemetry = controllerTelemetry.filter((item) => item === null).length;
@@ -103,6 +112,9 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     won = value.won;
     if (won !== stateWon) invalidRecord(sourcePath, `won=${won} contradicts terminal state=${state}`);
   }
+  if (won && totalLevels !== null && levelsCompleted !== totalLevels) {
+    invalidRecord(sourcePath, 'won requires levelsCompleted to equal known totalLevels');
+  }
   const executions = normalizeExecutions(value.executions, versionedGameId, sourcePath);
 
   return Object.freeze({
@@ -110,7 +122,9 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     versionedGameId,
     state,
     levelsCompleted,
-    winLevels,
+    totalLevels,
+    legacyLevelMetadata: legacyWinLevels !== null,
+    levelMetadata,
     actions,
     gameplayActions,
     resets,
@@ -129,6 +143,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
 
 export function validateProductionLoops(records, expectedGames, {
   allowUnavailableControllerTelemetry = false,
+  allowLegacyLevelMetadata = false,
 } = {}) {
   if (!Array.isArray(records) || records.length !== expectedGames) {
     throw new Error(`production loop attestation requires exactly ${expectedGames} game records; found ${records?.length ?? 0}`);
@@ -155,12 +170,19 @@ export function validateProductionLoops(records, expectedGames, {
   if (forwardedAfterTerminal.length) {
     throw new Error(`production loop attestation rejects post-terminal gameplay actions: ${JSON.stringify(forwardedAfterTerminal)}`);
   }
+  const invalidLevelMetadata = records
+    .filter((record) => record.levelMetadata !== 'totalLevels')
+    .map((record) => ({ gameId: record.gameId, metadata: record.levelMetadata }));
+  if (invalidLevelMetadata.length && !allowLegacyLevelMetadata) {
+    throw new Error(`production loop attestation requires explicit totalLevels metadata: ${JSON.stringify(invalidLevelMetadata)}`);
+  }
   return {
     complete: true,
     attestedCount: records.length,
     loop: 'pi-sdk',
     controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
     terminalLifecycleTelemetry: unavailableLifecycle.length ? 'unavailable-diagnostic' : 'complete',
+    levelMetadata: invalidLevelMetadata.length ? 'legacy-diagnostic' : 'totalLevels-v2',
   };
 }
 
@@ -214,7 +236,7 @@ export function aggregateGameMetrics(records) {
     games: records.length,
     wins: records.filter((record) => record.won).length,
     levelsCompleted: records.reduce((sum, record) => sum + record.levelsCompleted, 0),
-    winLevels: records.reduce((sum, record) => sum + record.winLevels, 0),
+    totalLevels: optionalMetricTotal(records, 'totalLevels'),
     actions: records.reduce((sum, record) => sum + record.actions, 0),
     gameplayActions: optionalMetricTotal(records, 'gameplayActions'),
     resets: optionalMetricTotal(records, 'resets'),
@@ -223,6 +245,32 @@ export function aggregateGameMetrics(records) {
     postTerminalGameplayActions: optionalMetricTotal(records, 'postTerminalGameplayActions'),
     fullResets: optionalMetricTotal(records, 'fullResets'),
   };
+}
+
+export function aggregateAttemptProgress(attempts) {
+  if (!Array.isArray(attempts) || attempts.length === 0) {
+    throw new Error('attempt progress requires at least one agent result');
+  }
+  let levelsCompleted = 0;
+  const totals = new Set();
+  for (const [index, attempt] of attempts.entries()) {
+    if (!Number.isSafeInteger(attempt?.levelsCompleted) || attempt.levelsCompleted < 0) {
+      throw new Error(`attempt ${index + 1} levelsCompleted must be a non-negative safe integer`);
+    }
+    levelsCompleted = Math.max(levelsCompleted, attempt.levelsCompleted);
+    if (attempt.totalLevels !== null) {
+      if (!Number.isSafeInteger(attempt.totalLevels) || attempt.totalLevels <= 0) {
+        throw new Error(`attempt ${index + 1} totalLevels must be null or a positive safe integer`);
+      }
+      totals.add(attempt.totalLevels);
+    }
+  }
+  if (totals.size > 1) throw new Error('attempt totalLevels metadata is inconsistent');
+  const totalLevels = totals.size ? [...totals][0] : null;
+  if (totalLevels !== null && levelsCompleted > totalLevels) {
+    throw new Error('attempt levelsCompleted exceeds totalLevels');
+  }
+  return Object.freeze({ levelsCompleted, totalLevels });
 }
 
 export function aggregateAttemptTelemetry(attempts) {
@@ -367,6 +415,20 @@ function optionalCount(value, field, sourcePath) {
 function reportedCount(values, field, sourcePath) {
   if (values.length === 0) return null;
   const normalized = values.map((value) => optionalCount(value, field, sourcePath));
+  if (normalized.some((value) => value !== normalized[0])) {
+    invalidRecord(sourcePath, `${field} aliases disagree`);
+  }
+  return normalized[0];
+}
+
+function reportedNullableCount(values, field, sourcePath) {
+  if (values.length === 0) return null;
+  const normalized = values.map((value) => {
+    if (value === null) return null;
+    const count = optionalCount(value, field, sourcePath);
+    if (count === 0) invalidRecord(sourcePath, `${field} must be null or a positive integer`);
+    return count;
+  });
   if (normalized.some((value) => value !== normalized[0])) {
     invalidRecord(sourcePath, `${field} aliases disagree`);
   }

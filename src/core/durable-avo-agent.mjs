@@ -34,6 +34,7 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
       afterHash: frameHash(frame),
       frameHash: frameHash(frame),
       levelsCompleted: Number(frame?.levelsCompleted || 0),
+      totalLevels: frame?.totalLevels ?? null,
       levelDelta: Number(levelDelta || 0),
       state: String(frame?.state || 'UNKNOWN'),
       availableActions: Array.isArray(frame?.availableActions) ? frame.availableActions.slice() : [],

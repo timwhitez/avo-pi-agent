@@ -6,6 +6,8 @@ import {
   extractPublishedOfficialScore,
   hashExecutionId,
   normalizeScorecardSnapshot,
+  reconcileExactScorecardProgress,
+  validateScorecardEvidence,
 } from '../src/benchmark/scorecard-evidence.mjs';
 
 function snapshot(ids = ['g1-v1', 'g2-v1'], { cardId = 'card-a', score = 0.5 } = {}) {
@@ -19,13 +21,18 @@ function snapshot(ids = ['g1-v1', 'g2-v1'], { cardId = 'card-a', score = 0.5 } =
       score,
       total_environments: ids.length,
       total_actions: ids.length * 3,
+      total_levels_completed: Math.max(0, ids.length - 1),
+      total_levels: ids.length,
       environments: ids.map((versionedGameId, index) => ({
         id: versionedGameId,
+        levels_completed: index > 0 ? 1 : 0,
+        level_count: 1,
+        completed: index > 0,
         runs: [{
           id: versionedGameId,
           guid: `${cardId}-run-${index}`,
           score: index / 10,
-          levels_completed: index,
+          levels_completed: index > 0 ? 1 : 0,
           actions: 3,
           resets: 0,
           state: index ? 'WIN' : 'GAME_OVER',
@@ -54,11 +61,63 @@ test('normalizes native scorecard identity without retaining raw card or run IDs
   assert.equal(evidence.gameCount, 2);
   assert.equal(evidence.executionCount, 2);
   assert.equal(evidence.totalActions, 6);
+  assert.equal(evidence.totalLevelsCompleted, 1);
+  assert.equal(evidence.totalLevels, 2);
+  assert.deepEqual(evidence.games.map((game) => game.totalLevels), [1, 1]);
   assert.doesNotMatch(JSON.stringify(evidence), /card-a|card-a-run/);
   const result = evaluateScorecardCoverage([evidence], records());
   assert.equal(result.scoreStatus, 'official');
   assert.deepEqual(result.officialScore, { value: 0.5, origin: 'scorecardEvidence.score' });
   assert.equal(result.coverage.exact, true);
+});
+
+test('exact scorecard fills unknown totals and rejects progress, total, or outcome contradictions', () => {
+  const evidence = normalizeScorecardSnapshot(snapshot());
+  const published = records().map((record, index) => ({
+    ...record,
+    state: index ? 'WIN' : 'GAME_OVER',
+    levelsCompleted: index,
+    totalLevels: null,
+    actions: 3,
+    won: index > 0,
+  }));
+  const reconciled = reconcileExactScorecardProgress([evidence], published);
+  assert.deepEqual(reconciled.map((record) => record.totalLevels), [1, 1]);
+
+  assert.throws(
+    () => reconcileExactScorecardProgress([evidence], [
+      { ...published[0], levelsCompleted: 1 }, published[1],
+    ]),
+    /levelsCompleted differs/,
+  );
+  assert.throws(
+    () => reconcileExactScorecardProgress([evidence], [
+      { ...published[0], totalLevels: 2 }, published[1],
+    ]),
+    /totalLevels differs/,
+  );
+  assert.throws(
+    () => reconcileExactScorecardProgress([evidence], [
+      { ...published[0], state: 'WIN', won: true }, published[1],
+    ]),
+    /outcome differs/,
+  );
+});
+
+test('legacy v2 evidence migrates progress without inventing unknown totals', () => {
+  const legacy = structuredClone(normalizeScorecardSnapshot(snapshot()));
+  legacy.schema = 'avo.scorecard-evidence.v2';
+  delete legacy.totalLevelsCompleted;
+  delete legacy.totalLevels;
+  for (const game of legacy.games) {
+    delete game.levelsCompleted;
+    delete game.totalLevels;
+    delete game.won;
+  }
+  const migrated = validateScorecardEvidence(legacy);
+  assert.equal(migrated.schema, 'avo.scorecard-evidence.v3');
+  assert.equal(migrated.totalLevelsCompleted, 1);
+  assert.equal(migrated.totalLevels, null);
 });
 
 test('binds SDK-reused GUIDs by their per-game occurrence', () => {
@@ -132,6 +191,7 @@ test('rejects subset, superset, version drift and duplicate scorecard coverage',
   duplicate.scorecard.environments.push(structuredClone(duplicate.scorecard.environments[0]));
   duplicate.scorecard.total_environments += 1;
   duplicate.scorecard.total_actions += 3;
+  duplicate.scorecard.total_levels += 1;
   assert.throws(() => normalizeScorecardSnapshot(duplicate), /duplicate/);
 });
 
@@ -158,9 +218,15 @@ test('malformed timestamps, totals and raw identities fail closed', () => {
   const total = snapshot();
   total.scorecard.total_actions = 999;
   assert.throws(() => normalizeScorecardSnapshot(total), /total_actions/);
+  const levelTotal = snapshot();
+  levelTotal.scorecard.total_levels = 999;
+  assert.throws(() => normalizeScorecardSnapshot(levelTotal), /total_levels/);
   const raw = snapshot();
   raw.scorecard.environments[0].runs[0].id = 'other-v1';
   assert.throws(() => normalizeScorecardSnapshot(raw), /differs/);
+  const outcome = snapshot();
+  outcome.scorecard.environments[0].runs[0].completed = true;
+  assert.throws(() => normalizeScorecardSnapshot(outcome), /contradicts state/);
   const nonString = snapshot();
   nonString.scorecard.environments[0].runs[0].guid = { value: 'run-1' };
   assert.throws(() => normalizeScorecardSnapshot(nonString), /guid is absent or malformed/);

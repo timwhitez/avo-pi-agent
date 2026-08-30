@@ -18,18 +18,18 @@ const expected = [
 ];
 
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   runId: 'run-1',
   kind: 'official-public-environments',
   perGame: [
     {
-      gameId: 'aa01-v1', state: 'WIN', levelsCompleted: 3, winLevels: 3,
+      gameId: 'aa01-v1', state: 'WIN', levelsCompleted: 3, totalLevels: 3,
       actions: 10, gameplayActions: 10, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
     },
     {
-      gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, winLevels: 3,
+      gameId: 'bb02-v2', state: 'PLAYING', levelsCompleted: 1, totalLevels: 3,
       actions: 20, gameplayActions: 20, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
@@ -49,7 +49,7 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     games: 2,
     wins: 1,
     levelsCompleted: 4,
-    winLevels: 6,
+    totalLevels: 6,
     actions: 30,
     gameplayActions: 30,
     resets: 0,
@@ -99,6 +99,7 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     loop: 'pi-sdk',
     controllerTelemetry: 'complete',
     terminalLifecycleTelemetry: 'complete',
+    levelMetadata: 'totalLevels-v2',
   });
   assert.throws(() => validateProductionLoops(records.map((record) => ({ ...record, loop: null })), 2), /missing/);
   assert.throws(() => validateProductionLoops([{ ...records[0], loop: 'portable' }, records[1]], 2), /portable/);

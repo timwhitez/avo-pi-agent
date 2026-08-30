@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  aggregateAttemptProgress,
   aggregateAttemptTelemetry,
   aggregateGameMetrics,
   extractGameRecords,
   normalizeGameRecord,
   validateCompleteGameSet,
+  validateProductionLoops,
 } from '../src/benchmark/report.mjs';
 
 function valid(overrides = {}) {
@@ -13,7 +15,7 @@ function valid(overrides = {}) {
     gameId: 'ls20-9607627b',
     state: 'IN_PROGRESS',
     levelsCompleted: 0,
-    winLevels: 3,
+    totalLevels: 3,
     actions: 0,
     won: false,
     loop: 'pi-sdk',
@@ -28,7 +30,7 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
     { gameId: 'ls20', levels: 0, actions: 0, won: false },
   );
   assert.deepEqual(aggregateGameMetrics([record]), {
-    games: 1, wins: 0, levelsCompleted: 0, winLevels: 3, actions: 0,
+    games: 1, wins: 0, levelsCompleted: 0, totalLevels: 3, actions: 0,
     gameplayActions: null, resets: null, rejectedCommands: null,
     terminalRejectedCommands: null, postTerminalGameplayActions: null, fullResets: null,
   });
@@ -71,7 +73,7 @@ test('preserves controller telemetry and validates total environment-action acco
     games: 1,
     wins: 0,
     levelsCompleted: 0,
-    winLevels: 3,
+    totalLevels: 3,
     actions: 3,
     gameplayActions: 2,
     resets: 1,
@@ -167,10 +169,21 @@ test('aggregates controller telemetry across attempts without dropping prior res
   );
 });
 
+test('aggregates monotonic progress across attempts without inventing totals', () => {
+  assert.deepEqual(aggregateAttemptProgress([
+    { levelsCompleted: 2, totalLevels: null },
+    { levelsCompleted: 1, totalLevels: 4 },
+  ]), { levelsCompleted: 2, totalLevels: 4 });
+  assert.throws(() => aggregateAttemptProgress([
+    { levelsCompleted: 1, totalLevels: 3 },
+    { levelsCompleted: 2, totalLevels: 4 },
+  ]), /inconsistent/);
+});
+
 test('rejects coercible, negative and fractional game metrics', () => {
   const bad = [null, false, true, [], [12], {}, '', ' ', '12', '0x10', -1, 1.5, NaN, Infinity];
   for (const value of bad) {
-    for (const field of ['levelsCompleted', 'winLevels', 'actions']) {
+    for (const field of ['levelsCompleted', 'actions']) {
       assert.throws(
         () => normalizeGameRecord(valid({ [field]: value })),
         /explicit finite non-negative integer/,
@@ -178,14 +191,23 @@ test('rejects coercible, negative and fractional game metrics', () => {
       );
     }
   }
+  for (const value of bad.filter((item) => item !== null).concat(0)) {
+    assert.throws(
+      () => normalizeGameRecord(valid({ totalLevels: value })),
+      /totalLevels/,
+      `totalLevels=${String(value)}`,
+    );
+  }
 });
 
 test('parses won only as a real boolean and rejects state contradictions', () => {
   assert.throws(() => normalizeGameRecord(valid({ won: 'false' })), /won must be a boolean/);
   assert.throws(() => normalizeGameRecord(valid({ state: 'WIN', won: false })), /contradicts/);
   assert.throws(() => normalizeGameRecord(valid({ state: 'GAME_OVER', won: true })), /contradicts/);
-  assert.equal(normalizeGameRecord(valid({ state: 'WIN', won: true })).won, true);
-  const withoutWon = valid({ state: 'WIN' });
+  assert.equal(normalizeGameRecord(valid({
+    state: 'WIN', won: true, levelsCompleted: 3,
+  })).won, true);
+  const withoutWon = valid({ state: 'WIN', levelsCompleted: 3 });
   delete withoutWon.won;
   assert.equal(normalizeGameRecord(withoutWon).won, true);
 });
@@ -193,14 +215,14 @@ test('parses won only as a real boolean and rejects state contradictions', () =>
 test('preserves exact execution occurrences and rejects invalid references', () => {
   const hash = 'a'.repeat(64);
   const record = normalizeGameRecord({
-    gameId: 'g1-v1', state: 'WIN', won: true, levelsCompleted: 1, winLevels: 1, actions: 2,
+    gameId: 'g1-v1', state: 'WIN', won: true, levelsCompleted: 1, totalLevels: 1, actions: 2,
     executions: [{ versionedGameId: 'g1-v1', executionIdSha256: hash }],
   });
   assert.deepEqual(record.executions, [{
     versionedGameId: 'g1-v1', executionIdSha256: hash, executionOccurrence: 0,
   }]);
   const reused = normalizeGameRecord({
-    gameId: 'g1-v1', state: 'WIN', won: true, levelsCompleted: 1, winLevels: 1, actions: 2,
+    gameId: 'g1-v1', state: 'WIN', won: true, levelsCompleted: 1, totalLevels: 1, actions: 2,
     executions: [
       { versionedGameId: 'g1-v1', executionIdSha256: hash, executionOccurrence: 0 },
       { versionedGameId: 'g1-v1', executionIdSha256: hash, executionOccurrence: 1 },
@@ -228,13 +250,39 @@ test('preserves exact execution occurrences and rejects invalid references', () 
 });
 
 test('rejects impossible level totals and malformed identity/state fields', () => {
-  assert.throws(() => normalizeGameRecord(valid({ levelsCompleted: 4, winLevels: 3 })), /exceeds winLevels/);
+  assert.throws(() => normalizeGameRecord(valid({ levelsCompleted: 4, totalLevels: 3 })), /exceeds totalLevels/);
+  assert.throws(() => normalizeGameRecord(valid({ state: 'WIN', won: true, levelsCompleted: 2 })), /equal known totalLevels/);
   for (const gameId of [null, '', ' ls20', '../ls20', 'ls20/x', '💥']) {
     assert.throws(() => normalizeGameRecord(valid({ gameId })), /gameId/);
   }
   for (const state of [null, '', ' ', 'WIN NOW', {}]) {
     assert.throws(() => normalizeGameRecord(valid({ state })), /state/);
   }
+});
+
+test('production rejects missing or ambiguous legacy level metadata while preserving explicit unknown', () => {
+  const current = normalizeGameRecord(valid({ totalLevels: null }));
+  assert.equal(current.totalLevels, null);
+  assert.equal(validateProductionLoops([current], 1, {
+    allowUnavailableControllerTelemetry: true,
+  }).levelMetadata, 'totalLevels-v2');
+
+  const legacyValue = valid();
+  delete legacyValue.totalLevels;
+  legacyValue.winLevels = 3;
+  const legacy = normalizeGameRecord(legacyValue);
+  assert.throws(
+    () => validateProductionLoops([legacy], 1, { allowUnavailableControllerTelemetry: true }),
+    /requires explicit totalLevels/,
+  );
+
+  const missingValue = valid();
+  delete missingValue.totalLevels;
+  const missing = normalizeGameRecord(missingValue);
+  assert.throws(
+    () => validateProductionLoops([missing], 1, { allowUnavailableControllerTelemetry: true }),
+    /requires explicit totalLevels/,
+  );
 });
 
 test('rejects contradictory explicit and versioned identities before canonicalization', () => {

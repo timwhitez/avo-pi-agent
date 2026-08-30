@@ -26,8 +26,13 @@ export function scorecardCoverageFixture({
       score,
       total_environments: versionedGameIds.length,
       total_actions: versionedGameIds.length,
+      total_levels_completed: 0,
+      total_levels: versionedGameIds.length,
       environments: versionedGameIds.map((versionedGameId, index) => ({
         id: versionedGameId,
+        levels_completed: 0,
+        level_count: 1,
+        completed: false,
         runs: [{
           id: versionedGameId,
           guid: `${sessionId}-${index}`,

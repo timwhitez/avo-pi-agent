@@ -225,7 +225,10 @@ class Frame:
         self.frame = env.grid()
         self.state = env.state
         self.levels_completed = env.level
-        self.win_levels = env.win_levels
+        self.win_levels = (
+            0 if env.game_id.startswith("g01-") or env.state == "GAME_OVER"
+            else env.win_levels
+        )
         self.guid = env.guid
         self.full_reset = env.full_reset
         self.available_actions = [
@@ -343,12 +346,20 @@ class Arcade:
                         "state": env.state if is_last else "PLAYING",
                         "completed": is_last and env.state == "WIN",
                     })
-            environments.append({"id": game_id, "runs": runs})
+            environments.append({
+                "id": game_id,
+                "levels_completed": max(run["levels_completed"] for run in runs),
+                "level_count": max(env.win_levels for env in attempts),
+                "completed": any(run["completed"] for run in runs),
+                "runs": runs,
+            })
         return Scorecard({
             "card_id": "contract-scorecard",
             "score": 100.0 if len(grouped) == 25 and completed == 50 else 0.0,
             "total_environments": len(grouped),
             "total_actions": sum(sum(env.run_steps) for env in self.environments),
+            "total_levels_completed": completed,
+            "total_levels": sum(max(env.win_levels for env in attempts) for attempts in grouped.values()),
             "environments": environments,
         })
   `);
@@ -571,6 +582,12 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.scorecardEvidence.length, 1);
   assert.equal(report.scorecardEvidence[0].gameCount, 25);
   assert.equal(report.scorecardEvidence[0].executionCount, 28);
+  assert.equal(report.scorecardEvidence[0].totalLevelsCompleted, 50);
+  assert.equal(report.scorecardEvidence[0].totalLevels, 50);
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.summary.totalLevelsCompleted, 50);
+  assert.equal(report.summary.totalLevels, 50);
+  assert.equal(report.results[0].totalLevels, 2);
   assert.equal(report.results[0].resets, 1);
   assert.equal(report.results[0].fullResets, 1);
   assert.equal(report.results[0].episodeId, 'episode-000002');
@@ -598,10 +615,16 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const checkpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g01.json',
   ), 'utf8'));
-  assert.equal(checkpoint.schema, 'avo.resume-record.v3');
+  assert.equal(checkpoint.schema, 'avo.resume-record.v4');
   assert.equal(checkpoint.capsuleHash, capsule.capsuleHash);
+  assert.equal(checkpoint.record.totalLevels, null);
   assert.equal(checkpoint.record.terminalRejectedCommands, 1);
   assert.equal(checkpoint.record.postTerminalGameplayActions, 0);
+  const scorecardJournal = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'scorecards.json',
+  ), 'utf8'));
+  assert.equal(scorecardJournal.schema, 'avo.session-scorecards.v6');
+  assert.equal(scorecardJournal.entries[0].evidence.schema, 'avo.scorecard-evidence.v3');
   const retryCheckpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g02.json',
   ), 'utf8'));

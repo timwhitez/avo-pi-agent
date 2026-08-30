@@ -163,13 +163,24 @@ def jsonable(value: Any) -> Any:
     return str(value)
 
 
+def total_levels_or_none(value: Any) -> int | None:
+    for name in ("total_levels", "level_count", "win_levels"):
+        candidate = getattr(value, name, None)
+        if candidate is None or candidate == 0:
+            continue
+        if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+        return candidate
+    return None
+
+
 def serialize_frame(raw: Any) -> dict[str, Any]:
     return {
         "game_id": getattr(raw, "game_id", None),
         "frame": jsonable(getattr(raw, "frame", [])),
         "state": jsonable(getattr(raw, "state", "UNKNOWN")),
         "levels_completed": int(getattr(raw, "levels_completed", 0) or 0),
-        "win_levels": int(getattr(raw, "win_levels", 0) or 0),
+        "total_levels": total_levels_or_none(raw),
         "guid": getattr(raw, "guid", None),
         "full_reset": bool(getattr(raw, "full_reset", False)),
         "available_actions": jsonable(getattr(raw, "available_actions", [])),
@@ -183,6 +194,7 @@ def serialize_environment_info(item: Any) -> dict[str, Any]:
         "default_fps": getattr(item, "default_fps", None),
         "baseline_actions": jsonable(getattr(item, "baseline_actions", None)),
         "level_tags": jsonable(getattr(item, "level_tags", None)),
+        "total_levels": total_levels_or_none(item),
     }
 
 

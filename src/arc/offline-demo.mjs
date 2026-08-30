@@ -13,7 +13,7 @@ export class OfflineDemoEnvironment {
     this.gameId = id;
     this.size = size;
     this.seed = seed;
-    this.winLevels = 3;
+    this.totalLevels = 3;
     this.level = 0;
     this.steps = 0;
     this.gameplayActionsForwarded = 0;
@@ -36,7 +36,7 @@ export class OfflineDemoEnvironment {
       frame: grid,
       state: this.state,
       levels_completed: this.level,
-      win_levels: this.winLevels,
+      total_levels: this.totalLevels,
       guid: `${this.gameId}-${this.level}-${this.steps}`,
       full_reset: false,
       available_actions: Object.keys(DIRECTIONS),
@@ -65,7 +65,7 @@ export class OfflineDemoEnvironment {
     this.player = [x, y];
     if (x === this.goal[0] && y === this.goal[1]) {
       this.level += 1;
-      if (this.level >= this.winLevels) this.state = 'WIN';
+      if (this.level >= this.totalLevels) this.state = 'WIN';
       else this.resetLevel();
     }
     return this.frame();

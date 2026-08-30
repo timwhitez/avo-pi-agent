@@ -52,6 +52,8 @@ export class AvoArcAgent {
     this.supervisor = new StallSupervisor(config.stallWindow);
     this.frame = null;
     this.previousFrame = null;
+    this.maxObservedLevelsCompleted = 0;
+    this.observedTotalLevels = null;
     this.actions = 0;
     this.gameplayActions = 0;
     this.resets = 0;
@@ -71,10 +73,35 @@ export class AvoArcAgent {
     const raw = typeof this.environment.start === 'function'
       ? await this.environment.start()
       : await this.environment.observe();
-    this.frame = normalizeFrame(raw);
+    this.frame = this.adoptFrame(raw);
     this.executionGuids.push(this.frame.guid);
     this.uniqueStates.add(frameHash(this.frame));
     this.recordEvidence({ type: 'initial-observation', frame: this.frame });
+  }
+
+  adoptFrame(raw) {
+    const frame = normalizeFrame(raw);
+    this.maxObservedLevelsCompleted = Math.max(
+      this.maxObservedLevelsCompleted,
+      frame.levelsCompleted,
+    );
+    if (frame.totalLevels !== null) {
+      if (this.observedTotalLevels !== null && this.observedTotalLevels !== frame.totalLevels) {
+        throw new Error(
+          `environment totalLevels changed from ${this.observedTotalLevels} to ${frame.totalLevels}`,
+        );
+      }
+      this.observedTotalLevels = frame.totalLevels;
+    }
+    if (this.observedTotalLevels !== null
+        && this.maxObservedLevelsCompleted > this.observedTotalLevels) {
+      throw new Error('environment levelsCompleted exceeds the stable totalLevels');
+    }
+    return {
+      ...frame,
+      levelsCompleted: this.maxObservedLevelsCompleted,
+      totalLevels: this.observedTotalLevels,
+    };
   }
 
   isDone() {
@@ -366,7 +393,7 @@ export class AvoArcAgent {
   acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind }) {
     this.previousFrame = previousFrame;
     const beforeHash = frameHash(previousFrame);
-    this.frame = normalizeFrame(raw);
+    this.frame = this.adoptFrame(raw);
     if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
     if (kind === 'reset') {
@@ -559,6 +586,7 @@ export class AvoArcAgent {
       afterHash: frameHash(frame),
       frameHash: frameHash(frame),
       levelsCompleted: Number(frame?.levelsCompleted || 0),
+      totalLevels: frame?.totalLevels ?? null,
       levelDelta: Number(levelDelta || 0),
       state: String(frame?.state || 'UNKNOWN'),
       availableActions: Array.isArray(frame?.availableActions) ? frame.availableActions.slice() : [],
@@ -610,7 +638,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
       gameId: this.gameId,
       state: this.frame.state,
       levelsCompleted: this.frame.levelsCompleted,
-      winLevels: this.frame.winLevels,
+      totalLevels: this.frame.totalLevels,
       actions: this.actions,
       gameplayActions: this.gameplayActions,
       resets: this.resets,

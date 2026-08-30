@@ -27,7 +27,7 @@ const ENTRIES = [
     id: 'arc-actions',
     kind: 'arc',
     source: 'https://docs.arcprize.org/toolkit/arc_agi',
-    text: 'Gameplay actions must be exposed by the current active frame. GAME_OVER and ERROR end the episode, so the next choice is controller RESET or finish, never another gameplay step. RESET may be available even when absent from gameplay affordances; trust the returned full_reset flag. ACTION6 may require coordinates. State WIN is terminal success.',
+    text: 'Gameplay actions must be exposed by the current active frame. GAME_OVER and ERROR end the episode, so the next choice is controller RESET or finish, never another gameplay step. RESET may be available even when absent from gameplay affordances; trust the returned full_reset flag. ACTION6 may require coordinates. levelsCompleted is monotonic progress, totalLevels is stable task metadata or null when unknown, and state WIN is terminal success.',
   },
   {
     id: 'arc-competition',

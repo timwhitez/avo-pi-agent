@@ -9,13 +9,13 @@ import { episodeState } from '../src/core/avo-agent-base.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
-function frame({ state, fullReset = false }) {
+function frame({ state, fullReset = false, levelsCompleted = 0, totalLevels = 1 }) {
   return {
     game_id: 'reset-contract-v1',
     frame: [[state === 'GAME_OVER' ? 8 : 1]],
     state,
-    levels_completed: 0,
-    win_levels: 1,
+    levels_completed: levelsCompleted,
+    win_levels: totalLevels,
     guid: 'sdk-reused-guid',
     full_reset: fullReset,
     available_actions: ['ACTION1', 'ACTION6'],
@@ -116,6 +116,8 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
         postTerminalGameplayActions: result.postTerminalGameplayActions,
         fullResets: result.fullResets,
         episodeId: result.episodeId,
+        levelsCompleted: result.levelsCompleted,
+        totalLevels: result.totalLevels,
       },
       {
         actions: 3,
@@ -126,12 +128,61 @@ test('production agent keeps RESET reachable outside frame gameplay affordances'
         postTerminalGameplayActions: 0,
         fullResets: 1,
         episodeId: 'episode-000002',
+        levelsCompleted: 0,
+        totalLevels: 1,
       },
     );
     const resetEvidence = agent.evidenceLedger.find((event) => event.type === 'environment-reset');
     assert.equal(resetEvidence.fullReset, true);
     assert.equal(resetEvidence.episodeId, 'episode-000002');
     assert.equal(agent.evidenceLedger.filter((event) => event.type === 'command-rejected').length, 7);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('terminal frame loss cannot erase observed total or completed levels', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-terminal-levels-'));
+  const agent = new AvoArcAgent({
+    gameId: 'terminal-levels',
+    environment: {
+      async start() {
+        return frame({ state: 'PLAYING', levelsCompleted: 1, totalLevels: 2 });
+      },
+      async step() {
+        return frame({ state: 'GAME_OVER', levelsCompleted: 0, totalLevels: 0 });
+      },
+      async lifecycle() {
+        return { gameplay_actions_forwarded: 1, post_terminal_gameplay_actions: 0 };
+      },
+      async scorecard() { return null; },
+    },
+    loop: inertLoop,
+    config: {
+      maxActions: 10,
+      stallWindow: 8,
+      memoryDir: path.join(root, 'memory'),
+      workspaceDir: path.join(root, 'workspace'),
+    },
+  });
+  try {
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const terminal = await tools.act.execute({ action: 'ACTION1', reasoning: 'reach terminal' });
+    assert.deepEqual(
+      {
+        state: terminal.details.frame.state,
+        levelsCompleted: terminal.details.frame.levelsCompleted,
+        totalLevels: terminal.details.frame.totalLevels,
+      },
+      { state: 'GAME_OVER', levelsCompleted: 1, totalLevels: 2 },
+    );
+    await tools.finish.execute({ summary: 'terminal regression check complete' });
+    const result = await agent.run();
+    assert.deepEqual(
+      { levelsCompleted: result.levelsCompleted, totalLevels: result.totalLevels },
+      { levelsCompleted: 1, totalLevels: 2 },
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

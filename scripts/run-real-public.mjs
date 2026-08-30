@@ -26,7 +26,10 @@ import {
   validateProductionLoops,
   writeJsonAtomic,
 } from '../src/benchmark/report.mjs';
-import { evaluateScorecardCoverage } from '../src/benchmark/scorecard-evidence.mjs';
+import {
+  evaluateScorecardCoverage,
+  reconcileExactScorecardProgress,
+} from '../src/benchmark/scorecard-evidence.mjs';
 import { assertNoPrivateMaterial, redact, redactText } from '../src/benchmark/redaction.mjs';
 import {
   assertRunStateMatchesInitial,
@@ -270,9 +273,22 @@ try {
   if (finalCheckpoints.size !== selected.records.length) {
     throw new Error('production report game set differs from the final capsule-bound checkpoint set');
   }
+  let checkpointTotalsEnriched = false;
   for (const record of selected.records) {
     const checkpoint = finalCheckpoints.get(record.gameId);
-    if (!checkpoint || canonicalJson(normalizeCheckpointRecord(checkpoint)) !== canonicalJson(normalizeCheckpointRecord(record))) {
+    if (!checkpoint) {
+      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+    }
+    const normalizedCheckpoint = normalizeCheckpointRecord(checkpoint);
+    const normalizedRecord = normalizeCheckpointRecord(record);
+    if (normalizedCheckpoint.totalLevels !== normalizedRecord.totalLevels) {
+      if (normalizedCheckpoint.totalLevels !== null) {
+        throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
+      }
+      checkpointTotalsEnriched = true;
+    }
+    if (canonicalJson(checkpointBinding(normalizedCheckpoint))
+        !== canonicalJson(checkpointBinding(normalizedRecord))) {
       throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
     }
   }
@@ -293,6 +309,7 @@ try {
   stage.value = 'production-loop-attestation';
   const loopAttestation = validateProductionLoops(selected.records, games.length, {
     allowUnavailableControllerTelemetry: resumeDecision.runClass === 'diagnostic-migrated',
+    allowLegacyLevelMetadata: resumeDecision.runClass === 'diagnostic-migrated',
   });
 
   stage.value = 'game-completeness';
@@ -303,6 +320,25 @@ try {
     selected.report?.scorecardEvidence,
     selected.records,
   );
+  if (checkpointTotalsEnriched && !scorecardAuthority.coverage.exact) {
+    throw new Error('production report enriches checkpoint level metadata without exact scorecard evidence');
+  }
+  if (scorecardAuthority.coverage.exact) {
+    stage.value = 'scorecard-progress-reconciliation';
+    const reconciled = reconcileExactScorecardProgress(
+      scorecardAuthority.scorecards,
+      selected.records,
+    );
+    const progress = (record) => ({
+      versionedGameId: record.versionedGameId,
+      levelsCompleted: record.levelsCompleted,
+      totalLevels: record.totalLevels,
+      won: record.won,
+    });
+    if (canonicalJson(reconciled.map(progress)) !== canonicalJson(selected.records.map(progress))) {
+      throw new Error('production report omits authoritative scorecard level metadata');
+    }
+  }
   const aggregates = aggregateGameMetrics(selected.records);
   const resultClassification = classifyCapsuleResult(resumeDecision, scorecardAuthority);
   const { status: acceptedStatus, officialScore } = resultClassification;
@@ -340,7 +376,7 @@ try {
 
   stage.value = 'redaction-acceptance';
   const publicReport = redact({
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     status: acceptedStatus,
     completedAt: privateManifest.completedAt,
@@ -373,7 +409,7 @@ try {
     ? [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean)
     : [process.env.OPENAI_BASE_URL, process.env.OPENAI_API_KEY, process.env.OPENAI_MODEL, process.env.ARC_API_KEY].filter(Boolean);
   const failure = redact({
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     status: 'failed',
     failedStage: stage.value,
@@ -400,6 +436,16 @@ function benchmarkTimeout() {
 
 function normalizeCheckpointRecord(value) {
   return normalizeGameRecord(value, 'checkpoint comparison');
+}
+
+function checkpointBinding(record) {
+  const {
+    totalLevels: _totalLevels,
+    legacyLevelMetadata: _legacyLevelMetadata,
+    levelMetadata: _levelMetadata,
+    ...bound
+  } = record;
+  return bound;
 }
 
 function safeRunId(value) {

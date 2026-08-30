@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
 
 import { canonicalJson } from '../local/canonical-json.mjs';
-import { normalizeGameId, normalizeVersionedGameId } from './report-records.mjs';
+import { normalizeGameId, normalizeGameRecord, normalizeVersionedGameId } from './report-records.mjs';
 
-export const SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v2';
+export const SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v3';
+const LEGACY_SCORECARD_EVIDENCE_SCHEMA = 'avo.scorecard-evidence.v2';
 
 export function hashExecutionId(value, name = 'execution ID') {
   if (typeof value !== 'string') throw new Error(`${name} is absent or malformed`);
@@ -24,19 +25,38 @@ export function normalizeScorecardSnapshot(snapshot) {
     const runs = requireArray(value.runs, `scorecard environment ${versionedGameId} runs`);
     if (runs.length === 0) throw new Error(`scorecard environment ${versionedGameId} has no executions`);
     const occurrences = new Map();
+    const executions = runs.map((run, runIndex) => {
+      const name = `scorecard environment ${versionedGameId} run ${runIndex}`;
+      const value = requireRecord(run, name);
+      const executionIdSha256 = hashExecutionId(value.guid, `${name} guid`);
+      const executionOccurrence = occurrences.get(executionIdSha256) ?? 0;
+      occurrences.set(executionIdSha256, executionOccurrence + 1);
+      return normalizeRawExecution(value, versionedGameId, name, {
+        executionIdSha256,
+        executionOccurrence,
+      });
+    });
+    const levelsCompleted = Math.max(...executions.map((run) => run.levelsCompleted));
+    const totalLevels = positiveCountOrNull(
+      value.level_count ?? value.total_levels,
+      `scorecard environment ${versionedGameId} level count`,
+    );
+    const won = executions.some((run) => run.completed);
+    if (Object.hasOwn(value, 'levels_completed')
+        && strictCount(value.levels_completed, `scorecard environment ${versionedGameId} levels_completed`) !== levelsCompleted) {
+      throw new Error(`scorecard environment ${versionedGameId} levels_completed differs from its executions`);
+    }
+    if (Object.hasOwn(value, 'completed')
+        && strictBoolean(value.completed, `scorecard environment ${versionedGameId} completed`) !== won) {
+      throw new Error(`scorecard environment ${versionedGameId} completed differs from its executions`);
+    }
+    validateGameProgress({ versionedGameId, levelsCompleted, totalLevels, won });
     return {
       versionedGameId,
-      executions: runs.map((run, runIndex) => {
-        const name = `scorecard environment ${versionedGameId} run ${runIndex}`;
-        const value = requireRecord(run, name);
-        const executionIdSha256 = hashExecutionId(value.guid, `${name} guid`);
-        const executionOccurrence = occurrences.get(executionIdSha256) ?? 0;
-        occurrences.set(executionIdSha256, executionOccurrence + 1);
-        return normalizeRawExecution(value, versionedGameId, name, {
-          executionIdSha256,
-          executionOccurrence,
-        });
-      }),
+      levelsCompleted,
+      totalLevels,
+      won,
+      executions,
     };
   });
   const totalActions = games.reduce(
@@ -51,6 +71,21 @@ export function normalizeScorecardSnapshot(snapshot) {
       && strictCount(scorecard.total_environments, 'scorecard total_environments') !== games.length) {
     throw new Error('scorecard total_environments differs from its environment records');
   }
+  const totalLevelsCompleted = games.reduce((sum, game) => sum + game.levelsCompleted, 0);
+  if (Object.hasOwn(scorecard, 'total_levels_completed')
+      && strictCount(scorecard.total_levels_completed, 'scorecard total_levels_completed') !== totalLevelsCompleted) {
+    throw new Error('scorecard total_levels_completed differs from its environment records');
+  }
+  const totalLevels = games.every((game) => game.totalLevels !== null)
+    ? games.reduce((sum, game) => sum + game.totalLevels, 0)
+    : null;
+  if (Object.hasOwn(scorecard, 'total_levels')) {
+    const reportedTotalLevels = strictCount(scorecard.total_levels, 'scorecard total_levels');
+    if ((totalLevels === null && reportedTotalLevels !== 0)
+        || (totalLevels !== null && reportedTotalLevels !== totalLevels)) {
+      throw new Error('scorecard total_levels differs from its environment records');
+    }
+  }
   return validateScorecardEvidence({
     schema: SCORECARD_EVIDENCE_SCHEMA,
     sessionIdSha256: hashExecutionId(scorecard.card_id, 'scorecard card_id'),
@@ -58,13 +93,18 @@ export function normalizeScorecardSnapshot(snapshot) {
     observedAt: session.observed_at ?? session.observedAt,
     score: strictFinite(scorecard.score, 'scorecard score'),
     totalActions,
+    totalLevelsCompleted,
+    totalLevels,
     games,
   });
 }
 
 export function validateScorecardEvidence(value) {
   const evidence = requireRecord(value, 'scorecard evidence');
-  if (evidence.schema !== SCORECARD_EVIDENCE_SCHEMA) throw new Error('scorecard evidence schema is invalid');
+  const legacy = evidence.schema === LEGACY_SCORECARD_EVIDENCE_SCHEMA;
+  if (!legacy && evidence.schema !== SCORECARD_EVIDENCE_SCHEMA) {
+    throw new Error('scorecard evidence schema is invalid');
+  }
   const sessionIdSha256 = requireSha256(evidence.sessionIdSha256, 'scorecard session hash');
   const startedAt = normalizeTimestamp(evidence.startedAt, 'scorecard start timestamp');
   const observedAt = normalizeTimestamp(evidence.observedAt, 'scorecard observation timestamp');
@@ -83,7 +123,25 @@ export function validateScorecardEvidence(value) {
         || left.executionOccurrence - right.executionOccurrence);
     if (executions.length === 0) throw new Error(`scorecard evidence ${versionedGameId} has no executions`);
     validateExecutionOccurrences(executions, `scorecard evidence ${versionedGameId}`);
-    return { versionedGameId, executions };
+    const derivedLevelsCompleted = Math.max(...executions.map((run) => run.levelsCompleted));
+    const levelsCompleted = legacy
+      ? derivedLevelsCompleted
+      : strictCount(record.levelsCompleted, `scorecard evidence ${versionedGameId} levelsCompleted`);
+    if (levelsCompleted !== derivedLevelsCompleted) {
+      throw new Error(`scorecard evidence ${versionedGameId} levelsCompleted differs from its executions`);
+    }
+    const totalLevels = legacy
+      ? null
+      : normalizePublishedTotal(record.totalLevels, `scorecard evidence ${versionedGameId} totalLevels`);
+    const derivedWon = executions.some((run) => run.completed);
+    const won = legacy
+      ? derivedWon
+      : strictBoolean(record.won, `scorecard evidence ${versionedGameId} won`);
+    if (won !== derivedWon) {
+      throw new Error(`scorecard evidence ${versionedGameId} won differs from its executions`);
+    }
+    validateGameProgress({ versionedGameId, levelsCompleted, totalLevels, won });
+    return { versionedGameId, levelsCompleted, totalLevels, won, executions };
   }).sort((left, right) => left.versionedGameId.localeCompare(right.versionedGameId));
   if (new Set(games.map((game) => game.versionedGameId)).size !== games.length) {
     throw new Error('scorecard evidence contains duplicate versioned game IDs');
@@ -98,6 +156,17 @@ export function validateScorecardEvidence(value) {
   );
   if (strictCount(evidence.totalActions, 'scorecard evidence totalActions') !== totalActions) {
     throw new Error('scorecard evidence totalActions differs from its execution records');
+  }
+  const totalLevelsCompleted = games.reduce((sum, game) => sum + game.levelsCompleted, 0);
+  if (!legacy
+      && strictCount(evidence.totalLevelsCompleted, 'scorecard evidence totalLevelsCompleted') !== totalLevelsCompleted) {
+    throw new Error('scorecard evidence totalLevelsCompleted differs from its game records');
+  }
+  const totalLevels = games.every((game) => game.totalLevels !== null)
+    ? games.reduce((sum, game) => sum + game.totalLevels, 0)
+    : null;
+  if (!legacy && normalizePublishedTotal(evidence.totalLevels, 'scorecard evidence totalLevels') !== totalLevels) {
+    throw new Error('scorecard evidence totalLevels differs from its game records');
   }
   const coverageSetSha256 = sha256(canonicalJson(refs.map((ref) => ({
     versionedGameId: ref.versionedGameId,
@@ -115,14 +184,51 @@ export function validateScorecardEvidence(value) {
     observedAt,
     score: strictFinite(evidence.score, 'scorecard evidence score'),
     totalActions,
+    totalLevelsCompleted,
+    totalLevels,
     gameCount: games.length,
     executionCount: refs.length,
     coverageSetSha256,
     games: Object.freeze(games.map((game) => Object.freeze({
       versionedGameId: game.versionedGameId,
+      levelsCompleted: game.levelsCompleted,
+      totalLevels: game.totalLevels,
+      won: game.won,
       executions: Object.freeze(game.executions.map(Object.freeze)),
     }))),
   });
+}
+
+export function reconcileExactScorecardProgress(values, records) {
+  const authority = evaluateScorecardCoverage(values, records);
+  if (!authority.coverage.exact) {
+    throw new Error(`cannot reconcile non-exact scorecard evidence: ${authority.rejectionReason}`);
+  }
+  const games = new Map(authority.scorecards[0].games.map((game) => [game.versionedGameId, game]));
+  return Object.freeze(records.map((record, index) => {
+    const normalized = normalizeGameRecord(record, `published game record ${index}`);
+    const scorecard = games.get(normalized.versionedGameId);
+    if (normalized.levelsCompleted !== scorecard.levelsCompleted) {
+      throw new Error(`published ${normalized.versionedGameId} levelsCompleted differs from exact scorecard evidence`);
+    }
+    if (normalized.won !== scorecard.won) {
+      throw new Error(`published ${normalized.versionedGameId} outcome differs from exact scorecard evidence`);
+    }
+    if (normalized.totalLevels !== null && scorecard.totalLevels !== null
+        && normalized.totalLevels !== scorecard.totalLevels) {
+      throw new Error(`published ${normalized.versionedGameId} totalLevels differs from exact scorecard evidence`);
+    }
+    const totalLevels = normalized.totalLevels ?? scorecard.totalLevels;
+    validateGameProgress({
+      versionedGameId: normalized.versionedGameId,
+      levelsCompleted: normalized.levelsCompleted,
+      totalLevels,
+      won: normalized.won,
+    });
+    if (totalLevels === normalized.totalLevels) return record;
+    const { winLevels: _camelLegacy, win_levels: _snakeLegacy, ...current } = record;
+    return Object.freeze({ ...current, totalLevels });
+  }));
 }
 
 export function evaluateScorecardCoverage(values, records) {
@@ -212,7 +318,7 @@ function normalizeRawExecution(run, versionedGameId, name, {
   if (run.id !== undefined && normalizeVersionedGameId(run.id, `${name} id`) !== versionedGameId) {
     throw new Error(`${name} id differs from its environment`);
   }
-  return {
+  return validateExecutionOutcome({
     executionIdSha256,
     executionOccurrence,
     score: strictFinite(run.score, `${name} score`),
@@ -221,12 +327,12 @@ function normalizeRawExecution(run, versionedGameId, name, {
     resets: run.resets === undefined || run.resets === null ? 0 : strictCount(run.resets, `${name} resets`),
     state: strictState(run.state, `${name} state`),
     completed: strictBoolean(run.completed, `${name} completed`),
-  };
+  }, name);
 }
 
 function normalizePublishedExecution(value, name) {
   const run = requireRecord(value, name);
-  return {
+  return validateExecutionOutcome({
     executionIdSha256: requireSha256(run.executionIdSha256, `${name} hash`),
     executionOccurrence: strictCount(run.executionOccurrence ?? 0, `${name} occurrence`),
     score: strictFinite(run.score, `${name} score`),
@@ -235,7 +341,7 @@ function normalizePublishedExecution(value, name) {
     resets: strictCount(run.resets, `${name} resets`),
     state: strictState(run.state, `${name} state`),
     completed: strictBoolean(run.completed, `${name} completed`),
-  };
+  }, name);
 }
 
 function normalizeRecordRefs(records) {
@@ -290,6 +396,35 @@ function validateExecutionOccurrences(executions, name) {
 function strictCount(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} is not a non-negative integer`);
   return value;
+}
+
+function positiveCountOrNull(value, name) {
+  if (value === undefined || value === null || value === 0) return null;
+  return strictCount(value, name);
+}
+
+function normalizePublishedTotal(value, name) {
+  if (value === null) return null;
+  if (value === undefined) throw new Error(`${name} is missing`);
+  const count = strictCount(value, name);
+  if (count === 0) throw new Error(`${name} must be null or a positive integer`);
+  return count;
+}
+
+function validateGameProgress({ versionedGameId, levelsCompleted, totalLevels, won }) {
+  if (totalLevels !== null && levelsCompleted > totalLevels) {
+    throw new Error(`scorecard ${versionedGameId} levelsCompleted exceeds totalLevels`);
+  }
+  if (won && totalLevels !== null && levelsCompleted !== totalLevels) {
+    throw new Error(`scorecard ${versionedGameId} win does not complete totalLevels`);
+  }
+}
+
+function validateExecutionOutcome(run, name) {
+  if (run.completed !== (run.state === 'WIN')) {
+    throw new Error(`${name} completed contradicts state`);
+  }
+  return run;
 }
 
 function strictFinite(value, name) {

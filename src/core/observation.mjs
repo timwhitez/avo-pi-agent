@@ -2,16 +2,40 @@ import crypto from 'node:crypto';
 
 export function normalizeFrame(raw) {
   const frame = raw?.frame ?? [];
+  const levelsCompleted = nonNegativeInteger(
+    raw?.levels_completed ?? raw?.levelsCompleted ?? 0,
+    'levelsCompleted',
+  );
+  const totalLevels = positiveIntegerOrNull(
+    raw?.total_levels ?? raw?.totalLevels ?? raw?.level_count
+      ?? raw?.win_levels ?? raw?.winLevels ?? null,
+    'totalLevels',
+  );
+  if (totalLevels !== null && levelsCompleted > totalLevels) {
+    throw new Error(`levelsCompleted=${levelsCompleted} exceeds totalLevels=${totalLevels}`);
+  }
   return {
     gameId: raw?.game_id ?? raw?.gameId ?? null,
     frame: Array.isArray(frame) ? frame : [],
     state: String(raw?.state ?? 'UNKNOWN'),
-    levelsCompleted: Number(raw?.levels_completed ?? raw?.levelsCompleted ?? 0),
-    winLevels: Number(raw?.win_levels ?? raw?.winLevels ?? 0),
+    levelsCompleted,
+    totalLevels,
     guid: raw?.guid ?? null,
     fullReset: Boolean(raw?.full_reset ?? raw?.fullReset ?? false),
     availableActions: normalizeActions(raw?.available_actions ?? raw?.availableActions ?? []),
   };
+}
+
+function nonNegativeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function positiveIntegerOrNull(value, name) {
+  if (value === undefined || value === null || value === 0) return null;
+  return nonNegativeInteger(value, name);
 }
 
 function normalizeActions(actions) {
@@ -56,7 +80,7 @@ export function describeFrame(frame, previousFrame = null) {
     game_id: frame.gameId,
     state: frame.state,
     levels_completed: frame.levelsCompleted,
-    win_levels: frame.winLevels,
+    total_levels: frame.totalLevels,
     available_actions: frame.availableActions,
     grid_shape: [frame.frame.length, frame.frame[0]?.length ?? 0],
     frame_hash: frameHash(frame),

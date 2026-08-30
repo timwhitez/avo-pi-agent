@@ -26,7 +26,7 @@ const record = (gameId, overrides = {}) => ({
   versionedGameId: `${gameId}-00000000`,
   state: 'NOT_FINISHED',
   levelsCompleted: 2,
-  winLevels: 6,
+  totalLevels: 6,
   actions: 41,
   gameplayActions: 41,
   resets: 0,
@@ -68,8 +68,13 @@ function scorecardEvidence(gameIds, { cardId = 'card-a', score = 0.0011 } = {}) 
       score,
       total_environments: gameIds.length,
       total_actions: gameIds.length * 41,
+      total_levels_completed: gameIds.length * 2,
+      total_levels: gameIds.length * 6,
       environments: gameIds.map((gameId) => ({
         id: `${gameId}-00000000`,
+        levels_completed: 2,
+        level_count: 6,
+        completed: false,
         runs: [{
           id: `${gameId}-00000000`,
           guid: `${gameId}-execution`,
@@ -97,7 +102,9 @@ test('checkpoints round-trip and only pi-sdk records are accepted', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-a/resume', { root });
   saveResumedRecord(dir, 'ls20', record('ls20'), options);
-  saveResumedRecord(dir, 'vc33', record('vc33', { state: 'WIN', won: true }), options);
+  saveResumedRecord(dir, 'vc33', record('vc33', {
+    state: 'WIN', won: true, levelsCompleted: 6,
+  }), options);
   const loaded = loadResumedRecords(dir, options);
   assert.equal(loaded.size, 2);
   assert.equal(loaded.get('ls20').state, 'NOT_FINISHED');
@@ -171,6 +178,21 @@ test('session scorecard journal preserves every exact session and validates', ()
   const loaded = loadSessionScorecards(dir, options);
   assert.equal(loaded.length, 2);
   assert.deepEqual(loaded.map((item) => item.score), [0.0011, 0.0022]);
+
+  const legacyJournal = JSON.parse(fs.readFileSync(path.join(dir, 'scorecards.json'), 'utf8'));
+  legacyJournal.schema = 'avo.session-scorecards.v5';
+  for (const entry of legacyJournal.entries) {
+    entry.evidence.schema = 'avo.scorecard-evidence.v2';
+    delete entry.evidence.totalLevelsCompleted;
+    delete entry.evidence.totalLevels;
+    for (const game of entry.evidence.games) {
+      delete game.levelsCompleted;
+      delete game.totalLevels;
+      delete game.won;
+    }
+  }
+  fs.writeFileSync(path.join(dir, 'scorecards.json'), JSON.stringify(legacyJournal));
+  assert.equal(loadSessionScorecards(dir, options)[0].totalLevels, null);
 
   fs.writeFileSync(path.join(dir, 'scorecards.json'), '{"entries": 5}');
   assert.throws(() => loadSessionScorecards(dir, options), /malformed/);

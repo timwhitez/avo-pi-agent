@@ -61,7 +61,7 @@ try {
   const complete = code === 0 && !signal && sourceReport && !failure;
   const summary = sourceReport?.summary || {};
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     kind: 'diagnostic-public-environments',
     executionMode: 'diagnostic',
@@ -74,7 +74,8 @@ try {
       expectedGames: finite(summary.expectedGames),
       games: finite(summary.games),
       wins: finite(summary.wins),
-      totalLevels: finite(summary.totalLevels),
+      totalLevelsCompleted: finite(summary.totalLevelsCompleted),
+      totalLevels: finiteNumberOrNull(summary.totalLevels),
       totalActions: finite(summary.totalActions),
       diagnosticScore: finiteNumberOrNull(summary.officialScore),
       diagnosticScoreOrigin: 'official-sdk-scorecard-observation-not-authoritative-full-public-benchmark',

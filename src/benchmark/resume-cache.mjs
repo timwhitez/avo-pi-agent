@@ -11,9 +11,11 @@ import { evaluateScorecardCoverage, validateScorecardEvidence } from './scorecar
 
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_RECORDS = 64;
-const RESUME_RECORD_SCHEMA = 'avo.resume-record.v3';
+const RESUME_RECORD_SCHEMA = 'avo.resume-record.v4';
+const LEGACY_RESUME_RECORD_SCHEMA = 'avo.resume-record.v3';
 const RESUME_STATE_SCHEMA = 'avo.resume-state.v1';
-const SESSION_SCORECARDS_SCHEMA = 'avo.session-scorecards.v5';
+const SESSION_SCORECARDS_SCHEMA = 'avo.session-scorecards.v6';
+const LEGACY_SESSION_SCORECARDS_SCHEMA = 'avo.session-scorecards.v5';
 const STATE_FILE = 'resume-state.json';
 const SCORECARDS_FILE = 'scorecards.json';
 const LEGACY_SCORECARD_FILE = 'scorecard.json';
@@ -174,7 +176,7 @@ function readScorecardJournal(resumeDir, acceptedCapsules, { allowMissing = fals
     maxBytes: MAX_RECORD_BYTES,
     purpose: 'session scorecard journal',
   }).value;
-  if (value?.schema !== SESSION_SCORECARDS_SCHEMA
+  if (![SESSION_SCORECARDS_SCHEMA, LEGACY_SESSION_SCORECARDS_SCHEMA].includes(value?.schema)
       || !Array.isArray(value?.entries)
       || value.entries.length > MAX_SCORECARDS) {
     throw new Error('session scorecard journal is malformed');
@@ -260,7 +262,8 @@ function readRecordWrappers(resumeDir, acceptedCapsules) {
     } catch (error) {
       throw new Error(`resume checkpoint ${entry.name} is not valid JSON`, { cause: error });
     }
-    if (value?.schema !== RESUME_RECORD_SCHEMA || !value?.record) {
+    if (![RESUME_RECORD_SCHEMA, LEGACY_RESUME_RECORD_SCHEMA].includes(value?.schema)
+        || !value?.record) {
       throw new Error(`resume checkpoint ${entry.name} is not bound to a run capsule`);
     }
     if (!acceptedCapsules.has(value.capsuleHash)) {
@@ -293,7 +296,7 @@ function recordBinding(record) {
     versionedGameId: record.versionedGameId,
     state: record.state,
     levelsCompleted: record.levelsCompleted,
-    winLevels: record.winLevels,
+    totalLevels: record.totalLevels,
     actions: record.actions,
     gameplayActions: record.gameplayActions,
     resets: record.resets,

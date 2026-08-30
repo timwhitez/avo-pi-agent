@@ -56,7 +56,7 @@ export function createProgressStatusReporter(env = process.env) {
         details: Number.isFinite(Number(budget)) ? `budget=${Number(budget)}` : '',
       });
     },
-    gameProgress({ index, total, gameId, actions, levelsCompleted, winLevels, state }) {
+    gameProgress({ index, total, gameId, actions, levelsCompleted, totalLevels, state }) {
       if (!enabled) return;
       const key = progressKey(index, total, gameId);
       const now = Date.now();
@@ -74,14 +74,14 @@ export function createProgressStatusReporter(env = process.env) {
         gameId,
         phase: 'progress',
         state: 'pending',
-        details: `state=${safe(state || 'playing', 20)} levels=${levels}/${Number(winLevels || 0)} actions=${actionCount}`,
+        details: `state=${safe(state || 'playing', 20)} levels=${levels}/${formatTotal(totalLevels)} actions=${actionCount}`,
       });
     },
     gameFinished({ index, total, gameId, result }) {
       const key = progressKey(index, total, gameId);
       last.delete(key);
       const state = result?.error ? 'error' : String(result?.state || 'done').toLowerCase();
-      const levels = `${Number(result?.levelsCompleted || 0)}/${Number(result?.winLevels || 0)}`;
+      const levels = `${Number(result?.levelsCompleted || 0)}/${formatTotal(result?.totalLevels)}`;
       const actions = Number(result?.actions || 0);
       enqueue({
         index,
@@ -111,4 +111,8 @@ function safe(value, limit) {
   return String(value ?? '')
     .replace(/[^a-zA-Z0-9_.:/=-]+/g, '-')
     .slice(0, limit);
+}
+
+function formatTotal(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : '?';
 }

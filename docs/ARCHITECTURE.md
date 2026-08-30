@@ -73,6 +73,13 @@ WIN → levels completed → progress since proposal
 It gates candidate lineage. It is not official ARC scoring. Official score
 claims require the scorecard returned by a real official-runtime execution.
 
+Public report schema v2 keeps three facts separate: `levelsCompleted` is the
+maximum observed progress, `totalLevels` is stable task metadata or `null` when
+unknown, and `state`/`won` is the terminal outcome. A terminal-frame zero cannot
+erase earlier observations. Exact official scorecard evidence must agree with
+progress and outcome; its per-environment `level_count` fills an unknown total,
+while every contradiction fails publication.
+
 ### Conditional supervisor
 
 `StallSupervisor` retains a bounded event window. It intervenes only when it

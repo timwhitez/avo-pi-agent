@@ -73,7 +73,7 @@ print(json.dumps({"calls": target.calls, **lifecycle}))
     gameId: 'g1-v1',
     state: 'GAME_OVER',
     levelsCompleted: 0,
-    winLevels: 1,
+    totalLevels: 1,
     actions: 1,
     gameplayActions: observed.gameplay_actions_forwarded,
     resets: 0,
