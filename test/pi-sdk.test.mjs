@@ -123,6 +123,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     assert.equal(globalThis.__avoFakePi.options.initialState.thinkingLevel, 'max');
     assert.equal(globalThis.__avoFakePi.options.initialState.tools[0].parameters.kind, 'Object');
     assert.equal(globalThis.__avoFakePi.options.followUpMode, 'one-at-a-time');
+    assert.equal(typeof globalThis.__avoFakePi.options.prepareNextTurnWithContext, 'function');
     assert.equal(globalThis.__avoFakePi.continues, 1000);
     assert.equal(globalThis.__avoFakePi.prompt, 'start');
     assert.equal(globalThis.__avoFakePi.handoffs.length, 1001);

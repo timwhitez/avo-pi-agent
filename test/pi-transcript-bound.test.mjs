@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  COMPACTION_NOTICE_TEMPLATE_SHA256,
   boundTranscript,
   replaceRuntimeStatus,
   runtimeStatusMessage,
@@ -116,7 +117,12 @@ test('hard message cap applies across roles and discloses the compaction', () =>
       toolResult(index),
     );
   }
-  const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 30 });
+  const compactions = [];
+  const bounded = boundTranscript(messages, {
+    recentToolResults: 2,
+    maxMessages: 30,
+    onCompaction: (event) => compactions.push(event),
+  });
   assert.ok(bounded.length <= 30, `length=${bounded.length}`);
   const notice = bounded.find((message) => message.content?.[0]?.text?.includes('transcript compaction'));
   assert.match(notice.content[0].text, /trajectory_read from startSequence=1/);
@@ -124,6 +130,9 @@ test('hard message cap applies across roles and discloses the compaction', () =>
   assert.ok(users.some((message) => message.content[0].text.includes('prompt 0')), 'initial prompt survives');
   const recentIds = bounded.filter((message) => message.role === 'toolResult').map((message) => message.toolCallId);
   assert.deepEqual(recentIds.slice(-2), ['call-39', 'call-40']);
+  assert.equal(compactions.length, 1);
+  assert.equal(compactions[0].templateSha256, COMPACTION_NOTICE_TEMPLATE_SHA256);
+  assert.equal(compactions[0].noticeIncluded, true);
   for (const message of bounded) {
     if (message.role === 'toolResult' && message.content[0].text.includes('elided')) {
       assert.equal(message.toolCallId.length > 0, true);
@@ -131,6 +140,58 @@ test('hard message cap applies across roles and discloses the compaction', () =>
       assert.equal('details' in message, true);
     }
   }
+});
+
+test('latest exact evidence outranks the synthetic compaction notice under a tight cap', () => {
+  const messages = [user(0)];
+  for (let index = 1; index <= 4; index += 1) {
+    messages.push(
+      { ...assistant(index), content: [...assistant(index).content, { type: 'toolCall', id: `call-${index}`, name: 'act', arguments: {} }] },
+      {
+        ...toolResult(index),
+        details: { evidenceRef: `evidence-${String(index).padStart(6, '0')}-aaaaaaaaaaaa` },
+      },
+    );
+  }
+  const status = runtimeStatusMessage({
+    state: 'ACTIVE',
+    environmentActions: 4,
+    maxActions: 100,
+    terminalReason: 'none',
+    allowedNext: 'inspect evidence or take one legal gameplay action',
+  }, { outerTurns: 4, maxOuterTurns: 100 });
+  const compactions = [];
+  const bounded = boundTranscript(replaceRuntimeStatus(messages, status.text), {
+    maxMessages: 4,
+    maxTokens: 120_000,
+    onCompaction: (event) => compactions.push(event),
+  });
+  assert.equal(bounded.length, 4);
+  assert.ok(bounded.some((message) => message.content?.[0]?.text === 'prompt 0'));
+  assert.ok(bounded.some((message) => message.toolCallId === 'call-4'
+    && message.details.evidenceRef === 'evidence-000004-aaaaaaaaaaaa'));
+  assert.ok(bounded.some((message) => message.role === 'assistant'
+    && message.content.some((block) => block.id === 'call-4')));
+  assert.ok(bounded.some((message) => message.content?.[0]?.text?.startsWith('[AVO_RUNTIME_STATUS v1]')));
+  assert.equal(bounded.some((message) => message.content?.[0]?.text?.includes('transcript compaction')), false);
+  assert.deepEqual(compactions.map((event) => ({
+    latestEvidenceRef: event.latestEvidenceRef,
+    exactLatestEvidenceRetained: event.exactLatestEvidenceRetained,
+    noticeIncluded: event.noticeIncluded,
+  })), [{
+    latestEvidenceRef: 'evidence-000004-aaaaaaaaaaaa',
+    exactLatestEvidenceRetained: true,
+    noticeIncluded: false,
+  }]);
+
+  const referenceOnly = boundTranscript(replaceRuntimeStatus(messages, status.text), {
+    maxMessages: 3,
+    maxTokens: 120_000,
+  });
+  assert.equal(referenceOnly.length, 3);
+  assert.ok(referenceOnly.some((message) => message.content?.[0]?.text?.includes(
+    'latest_evidence_ref=evidence-000004-aaaaaaaaaaaa',
+  )));
 });
 
 test('token bound preserves one original task and one replaceable runtime status across many user messages', () => {

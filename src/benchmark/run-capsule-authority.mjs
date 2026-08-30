@@ -108,6 +108,7 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(isSha256(prompts.systemSha256), 'run capsule system-prompt digest is absent', reasons);
   requireCondition(isSha256(prompts.initialTemplateSha256), 'run capsule initial-prompt digest is absent', reasons);
   requireCondition(isSha256(prompts.runtimeStatusTemplateSha256), 'run capsule runtime-status template digest is absent', reasons);
+  requireCondition(isSha256(prompts.compactionNoticeTemplateSha256), 'run capsule compaction-notice template digest is absent', reasons);
   requireCondition(prompts.developerPresent === false && prompts.developerSha256 === null, 'run capsule developer-prompt declaration is malformed', reasons);
   requireCondition(isSha256(capsule.toolSchemaSha256), 'run capsule tool-schema digest is absent', reasons);
   requireCondition(isRecord(capsule.nodeDependencies), 'run capsule Node dependency manifest is absent', reasons);

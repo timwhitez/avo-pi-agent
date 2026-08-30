@@ -12,6 +12,7 @@ import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
+  COMPACTION_NOTICE_TEMPLATE_SHA256,
   PI_MODEL_CAPABILITY_MANIFEST,
   RUNTIME_STATUS_TEMPLATE_SHA256,
   boundTranscript,
@@ -250,6 +251,7 @@ export function buildRunCapsule({
       developerSha256: null,
       initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
       runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+      compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),
@@ -503,6 +505,7 @@ export function verifyRunCapsuleExecution({
       developerSha256: null,
       initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
       runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+      compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
       schemaSha256: sha256(canonicalJson(toolSchemas)),

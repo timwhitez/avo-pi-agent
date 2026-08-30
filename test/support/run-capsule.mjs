@@ -162,6 +162,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       developerSha256: null,
       initialTemplateSha256: '8'.repeat(64),
       runtimeStatusTemplateSha256: '9'.repeat(64),
+      compactionNoticeTemplateSha256: '6'.repeat(64),
     },
     tools: {
       schemaSha256: 'a'.repeat(64),

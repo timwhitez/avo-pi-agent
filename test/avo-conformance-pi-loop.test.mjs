@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const source = fs.readFileSync(new URL('../src/loop/pi-sdk.mjs', import.meta.url), 'utf8');
+const cliSource = fs.readFileSync(new URL('../src/cli.mjs', import.meta.url), 'utf8');
 
 test('production Pi loop uses official SDK and sequential tools', () => {
   assert.match(source, /@earendil-works\/pi-agent-core/);
@@ -17,7 +18,8 @@ test('production Pi loop uses official SDK and sequential tools', () => {
 
 test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustion', () => {
   assert.doesNotMatch(source, /agent\.followUp\(/);
-  assert.match(source, /replaceRuntimeStatus\(agent\.state\.messages/);
+  assert.match(source, /injectRuntimeStatus\(agent\.state\.messages/);
+  assert.match(source, /prepareNextTurnWithContext:.*prepareRuntimeStatusTurn/s);
   assert.match(source, /await agent\.continue\(\)/);
   assert.match(source, /outerTurns >= config\.maxOuterTurns/);
   // transient provider errors recover in place instead of ending the game
@@ -26,6 +28,8 @@ test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustio
   assert.match(source, /exhaustedOuterTurns/);
   assert.match(source, /outer-turn budget exhausted/);
   assert.doesNotMatch(source, /portable-pi/);
+  assert.match(cliSource, /avo_runtime_status.*avo_context_compaction/s);
+  assert.match(cliSource, /\[avo-context\]/);
 });
 
 test('runtime model is configured for Responses and extended reasoning', () => {

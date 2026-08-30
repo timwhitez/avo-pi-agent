@@ -12,6 +12,11 @@ export const RUNTIME_STATUS_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
   .update(RUNTIME_STATUS_TEMPLATE)
   .digest('hex');
+export const COMPACTION_NOTICE_TEMPLATE = '[transcript compaction: {dropped} of the oldest messages were elided; latest_evidence_ref={latestEvidenceRef}; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]';
+export const COMPACTION_NOTICE_TEMPLATE_SHA256 = crypto
+  .createHash('sha256')
+  .update(COMPACTION_NOTICE_TEMPLATE)
+  .digest('hex');
 export const PI_MODEL_CAPABILITY_MANIFEST = Object.freeze({
   api: 'openai-responses',
   reasoning: true,
@@ -93,6 +98,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     maxMessages: positiveEnvInt('AVO_TRANSCRIPT_MAX_MESSAGES', 160),
     maxTokens: positiveEnvInt('AVO_TRANSCRIPT_MAX_TOKENS', 120_000),
     estimateMessageTokens: estimateTokens,
+    onCompaction: onEvent,
   };
   // A single fat read (full lineage, a whole workspace file) kept verbatim in
   // the recent window can exceed the provider context by itself.
@@ -131,6 +137,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         },
       }));
 
+      let outerTurns = 1;
       const agent = new Agent({
         initialState: {
           systemPrompt: effectiveSystemPrompt,
@@ -145,9 +152,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
         shouldStopAfterTurn: async () => shouldStop(),
+        prepareNextTurnWithContext: (turn) => prepareRuntimeStatusTurn(turn, {
+          runtimeStatus,
+          shouldStop,
+          outerTurns,
+          maxOuterTurns: config.maxOuterTurns,
+          onEvent,
+        }),
       });
       agent.subscribe((event) => onEvent(event));
-      let outerTurns = 1;
       await agent.prompt(initialPrompt);
       // Provider-side stream drops surface as session errors. Recovering the
       // turn in place keeps every prior action; a whole-game retry would
@@ -169,15 +182,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           agent.state.errorMessage = undefined;
         }
         if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
-        const status = runtimeStatusMessage(runtimeStatus(), {
+        agent.state.messages = injectRuntimeStatus(agent.state.messages, {
+          runtimeStatus,
           outerTurns,
           maxOuterTurns: config.maxOuterTurns,
-        });
-        agent.state.messages = replaceRuntimeStatus(agent.state.messages, status.text, Date.now() + outerTurns);
-        onEvent({
-          type: 'avo_runtime_status',
-          templateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
-          status: status.value,
+          onEvent,
+          timestamp: Date.now() + outerTurns,
         });
         await agent.continue();
         outerTurns += 1;
@@ -305,6 +315,47 @@ export function replaceRuntimeStatus(messages, text, timestamp = Date.now()) {
   ];
 }
 
+export function prepareRuntimeStatusTurn({ message, context } = {}, {
+  runtimeStatus,
+  shouldStop,
+  outerTurns,
+  maxOuterTurns,
+  onEvent = () => {},
+  timestamp = Date.now(),
+} = {}) {
+  const hasToolCall = Array.isArray(message?.content)
+    && message.content.some((block) => block?.type === 'toolCall');
+  if (!hasToolCall || shouldStop()) return undefined;
+  return {
+    context: {
+      ...context,
+      messages: injectRuntimeStatus(context?.messages, {
+        runtimeStatus,
+        outerTurns,
+        maxOuterTurns,
+        onEvent,
+        timestamp,
+      }),
+    },
+  };
+}
+
+function injectRuntimeStatus(messages, {
+  runtimeStatus,
+  outerTurns,
+  maxOuterTurns,
+  onEvent,
+  timestamp,
+}) {
+  const status = runtimeStatusMessage(runtimeStatus(), { outerTurns, maxOuterTurns });
+  onEvent({
+    type: 'avo_runtime_status',
+    templateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+    status: status.value,
+  });
+  return replaceRuntimeStatus(messages, status.text, timestamp);
+}
+
 function statusField(input, name) {
   const value = String(input ?? '').trim();
   if (!value || /[\r\n]/.test(value)) throw new Error(`runtime status ${name} must be one non-empty line`);
@@ -339,6 +390,7 @@ export function boundTranscript(messages, {
   maxMessages = 160,
   maxTokens = 120_000,
   estimateMessageTokens = fallbackEstimateTokens,
+  onCompaction = () => {},
 } = {}) {
   if (!Array.isArray(messages)) return messages;
   if (!Number.isInteger(maxMessages) || maxMessages <= 0) throw new Error('maxMessages must be a positive integer');
@@ -391,10 +443,20 @@ export function boundTranscript(messages, {
   if (kept.length <= maxMessages && transcriptTokens(kept, estimateMessageTokens) <= maxTokens) {
     return repairToolPairs(kept);
   }
-  return hardBoundTranscript(kept, { maxMessages, maxTokens, estimateMessageTokens });
+  return hardBoundTranscript(kept, {
+    maxMessages,
+    maxTokens,
+    estimateMessageTokens,
+    onCompaction,
+  });
 }
 
-function hardBoundTranscript(messages, { maxMessages, maxTokens, estimateMessageTokens }) {
+function hardBoundTranscript(messages, {
+  maxMessages,
+  maxTokens,
+  estimateMessageTokens,
+  onCompaction,
+}) {
   const taskIndex = messages.findIndex((message) => message?.role === 'user'
     && !isRuntimeStatus(message)
     && !isCompactionNotice(message));
@@ -403,38 +465,100 @@ function hardBoundTranscript(messages, { maxMessages, maxTokens, estimateMessage
     if (isRuntimeStatus(messages[index])) { statusIndex = index; break; }
   }
   const selected = new Set([taskIndex, statusIndex].filter((index) => index >= 0));
-  const provisionalNotice = compactionNotice(messages.length, messages[0]?.timestamp);
-  let tokens = transcriptTokens([...selected].map((index) => messages[index]), estimateMessageTokens)
-    + messageTokens(provisionalNotice, estimateMessageTokens);
-  if (selected.size + 1 > maxMessages || tokens > maxTokens) {
+  let tokens = transcriptTokens([...selected].map((index) => messages[index]), estimateMessageTokens);
+  if (selected.size > maxMessages || tokens > maxTokens) {
     throw new Error('transcript bounds cannot preserve the original task and current runtime status');
   }
+  const latestEvidence = latestEvidencePair(messages);
+  const evidenceIndexes = latestEvidence.indexes.filter((index) => !selected.has(index));
+  const evidenceTokens = transcriptTokens(
+    evidenceIndexes.map((index) => messages[index]),
+    estimateMessageTokens,
+  );
+  const keepsExactEvidence = latestEvidence.indexes.length === 2
+    && selected.size + evidenceIndexes.length <= maxMessages
+    && tokens + evidenceTokens <= maxTokens;
+  if (keepsExactEvidence) {
+    for (const index of evidenceIndexes) selected.add(index);
+    tokens += evidenceTokens;
+  }
+  const provisionalNotice = compactionNotice(
+    messages.length,
+    messages[0]?.timestamp,
+    latestEvidence.ref,
+  );
+  const noticeTokens = messageTokens(provisionalNotice, estimateMessageTokens);
+  const reserveNotice = selected.size + 1 <= maxMessages && tokens + noticeTokens <= maxTokens;
+  if (reserveNotice) tokens += noticeTokens;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (selected.has(index)) continue;
-    if (selected.size + 1 >= maxMessages) break;
+    if (selected.size + (reserveNotice ? 1 : 0) >= maxMessages) break;
     const candidateTokens = messageTokens(messages[index], estimateMessageTokens);
     if (tokens + candidateTokens > maxTokens) break;
     selected.add(index);
     tokens += candidateTokens;
   }
   let retained = repairToolPairs(messages.filter((_message, index) => selected.has(index)));
-  const notice = compactionNotice(messages.length - retained.length, messages[0]?.timestamp);
-  const retainedTaskIndex = retained.indexOf(messages[taskIndex]);
-  const insertAt = retainedTaskIndex >= 0 ? retainedTaskIndex + 1 : 0;
-  retained.splice(insertAt, 0, notice);
+  const droppedMessages = messages.length - retained.length;
+  let noticeIncluded = false;
+  if (reserveNotice) {
+    const notice = compactionNotice(
+      droppedMessages,
+      messages[0]?.timestamp,
+      latestEvidence.ref,
+    );
+    const retainedTaskIndex = retained.indexOf(messages[taskIndex]);
+    retained.splice(retainedTaskIndex >= 0 ? retainedTaskIndex + 1 : 0, 0, notice);
+    noticeIncluded = true;
+  }
   if (retained.length > maxMessages
       || transcriptTokens(retained, estimateMessageTokens) > maxTokens) {
     throw new Error('transcript hard bound failed after compaction');
   }
+  onCompaction({
+    type: 'avo_context_compaction',
+    templateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
+    droppedMessages,
+    latestEvidenceRef: latestEvidence.ref,
+    exactLatestEvidenceRetained: keepsExactEvidence,
+    noticeIncluded,
+  });
   return retained;
 }
 
-function compactionNotice(dropped, timestamp = Date.now()) {
+function compactionNotice(dropped, timestamp = Date.now(), latestEvidenceRef = null) {
   return {
     role: 'user',
-    content: [{ type: 'text', text: `[transcript compaction: ${dropped} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]` }],
+    content: [{
+      type: 'text',
+      text: COMPACTION_NOTICE_TEMPLATE
+        .replace('{dropped}', String(dropped))
+        .replace('{latestEvidenceRef}', latestEvidenceRef || 'none'),
+    }],
     timestamp,
   };
+}
+
+function latestEvidencePair(messages) {
+  for (let resultIndex = messages.length - 1; resultIndex >= 0; resultIndex -= 1) {
+    const result = messages[resultIndex];
+    const ref = String(result?.details?.evidenceRef || '');
+    if (result?.role !== 'toolResult' || !ref) continue;
+    const callId = String(result.toolCallId || '').split('|')[0];
+    let callIndex = -1;
+    for (let index = resultIndex - 1; index >= 0; index -= 1) {
+      const blocks = messages[index]?.role === 'assistant' && Array.isArray(messages[index].content)
+        ? messages[index].content
+        : [];
+      if (blocks.some((block) => block?.type === 'toolCall'
+        && String(block.id || '').split('|')[0] === callId)) {
+        callIndex = index;
+        break;
+      }
+    }
+    return { ref, indexes: [callIndex, resultIndex].filter((index) => index >= 0) };
+  }
+  return { ref: null, indexes: [] };
 }
 
 function isCompactionNotice(message) {

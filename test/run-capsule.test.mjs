@@ -128,6 +128,8 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
   assert.equal(tokenBound.definition.transcript.maxTokens, 90_000);
+  assert.match(baseline.definition.prompts.runtimeStatusTemplateSha256, /^[a-f0-9]{64}$/);
+  assert.match(baseline.definition.prompts.compactionNoticeTemplateSha256, /^[a-f0-9]{64}$/);
   assert.ok(baseline.definition.tools.enabled.includes('trajectory_read'));
   for (const file of [
     'src/core/durable-avo-agent.mjs',

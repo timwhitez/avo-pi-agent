@@ -212,6 +212,10 @@ async function runPublic(args) {
       let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
       const loop = await createPiSdkLoop(gameConfig, {
         onEvent(event) {
+          if (event.type === 'avo_runtime_status' || event.type === 'avo_context_compaction') {
+            process.stdout.write(`\n[avo-context] ${JSON.stringify(redactRuntimeObject(event))}\n`);
+            return;
+          }
           if (event.type !== 'tool_execution_end') return;
           process.stdout.write('.');
           if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
