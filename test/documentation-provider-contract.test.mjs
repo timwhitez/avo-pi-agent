@@ -89,6 +89,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
   assert.match(ledger, /\| #180 \|[^\n]+#201\]/);
   assert.doesNotMatch(ledger, /Open Draft PRs:/);
+  assert.doesNotMatch(ledger, /the Draft PR remains unmerged|both Drafts unmerged|with Drafts unmerged|exact-head approval remains required/);
   assert.match(ledger, /Public benchmark: \*\*not run\*\*/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
