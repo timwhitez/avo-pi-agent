@@ -3,7 +3,7 @@ import { AvoArcAgent as BaseAvoArcAgent } from './avo-agent-base.mjs';
 import { DurableMemory } from './durable-memory.mjs';
 import { EvidenceStore } from './evidence-store.mjs';
 import { normalizeCandidate } from './evaluator.mjs';
-import { frameHash } from './observation.mjs';
+import { EPISODE_OBSERVATION_SCHEMA, frameHash } from './observation.mjs';
 
 export class DurableAvoArcAgent extends BaseAvoArcAgent {
   constructor(options) {
@@ -18,6 +18,12 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
         authorityRoot: config.memoryDir,
       },
     ).load();
+    const trajectory = this.evidenceStore.summary();
+    if (trajectory.highWaterSequence > 0
+        && (trajectory.complete !== true
+          || trajectory.identitySchema !== EPISODE_OBSERVATION_SCHEMA)) {
+      throw new Error('durable trajectory contains legacy or compacted evidence without exact current-schema observations; start from a new state directory');
+    }
     this.evidenceLedger = this.evidenceStore.events.slice();
     this.evidenceSequence = this.evidenceStore.sequence;
     this.attemptId = `attempt-${String(this.evidenceSequence + 1).padStart(6, '0')}`;

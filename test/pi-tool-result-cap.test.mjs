@@ -79,6 +79,8 @@ test('tool results are capped before entering the model context', async () => {
     const text = output.content[0].text;
     assert.ok(text.length < 26_000, `length=${text.length}`);
     assert.match(text, /\[tool output truncated at 24000 characters/);
+    assert.match(text, /do not repeat/);
+    assert.doesNotMatch(text, /re-call|re-query/);
     assert.equal(output.details.ok, true, 'details pass through untouched');
   } finally {
     cleanup();

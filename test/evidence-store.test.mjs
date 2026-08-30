@@ -50,6 +50,7 @@ test('trajectory summary never upgrades legacy records to the current identity s
       identitySchema: 'avo.episode-observation.v1',
     });
     assert.equal(store.summary().identitySchema, null);
+    assert.equal(store.summary().complete, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

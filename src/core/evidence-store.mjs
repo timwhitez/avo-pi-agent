@@ -132,10 +132,13 @@ export class EvidenceStore {
       digest: event.digest,
     }));
     const identitySchemas = [...new Set(this.events.map((event) => event.identitySchema ?? null))];
+    const identitySchema = identitySchemas.length === 1 ? identitySchemas[0] : null;
     return Object.freeze({
       schema: TRAJECTORY_EVIDENCE_SCHEMA,
-      identitySchema: identitySchemas.length === 1 ? identitySchemas[0] : null,
-      complete: this.historyComplete && this.events.length === this.sequence,
+      identitySchema,
+      complete: this.historyComplete
+        && this.events.length === this.sequence
+        && (this.events.length === 0 || identitySchema !== null),
       eventCount: this.events.length,
       highWaterSequence: this.sequence,
       firstEvidenceRef: this.events[0]?.id ?? null,

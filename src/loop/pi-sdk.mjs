@@ -103,7 +103,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           const result = await tool.execute(params);
           let text = String(result.text ?? '');
           if (text.length > maxToolResultChars) {
-            text = `${text.slice(0, maxToolResultChars)}\n[tool output truncated at ${maxToolResultChars} characters to stay within the model context window; re-query with narrower limits or specific entries]`;
+            text = `${text.slice(0, maxToolResultChars)}\n[tool output truncated at ${maxToolResultChars} characters to stay within the model context window; ${toolRecoveryHint(tool.name, result.details)}]`;
           }
           return {
             content: [{ type: 'text', text }],
@@ -258,7 +258,7 @@ function positiveEnvInt(name, fallback) {
  * eventually exceeds the provider context window (observed as
  * context_too_large after roughly twenty actions), so older tool outputs are
  * replaced by a reference to the append-only per-game trajectory when one
- * exists. Non-environment tools can be called again with narrower bounds.
+ * exists. Read-only non-environment tools can be called again with narrower bounds.
  */
 export function boundTranscript(messages, { recentToolResults = 6, maxMessages = 160 } = {}) {
   if (!Array.isArray(messages)) return messages;
@@ -310,7 +310,7 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
   if (droppedOverflow > 0) {
     kept.unshift({
       role: 'user',
-      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and re-call other tools when needed]` }],
+      content: [{ type: 'text', text: `[transcript compaction: ${droppedOverflow} of the oldest messages were elided; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]` }],
       timestamp: messages[0]?.timestamp ?? Date.now(),
     });
   }
@@ -331,8 +331,24 @@ export function boundTranscript(messages, { recentToolResults = 6, maxMessages =
 }
 
 function elidedToolOutput(message) {
-  const ref = String(message?.details?.evidenceRef || '');
-  return ref
-    ? `[older tool output elided; exact environment evidence remains available via trajectory_read ref=${ref}]`
-    : '[older tool output elided; no environment evidence ref was attached, so re-call this tool with narrower bounds if its result is needed]';
+  const toolName = String(message?.toolName || 'unknown');
+  return `[older ${toolName} output elided; ${toolRecoveryHint(toolName, message?.details)}]`;
 }
+
+function toolRecoveryHint(toolName, details) {
+  const ref = String(details?.evidenceRef || '');
+  if (ref) return `exact environment evidence remains available via trajectory_read ref=${ref}`;
+  if (RECALL_SAFE_TOOLS.has(toolName)) {
+    return 're-call this read-only tool with narrower bounds if its result is needed';
+  }
+  return 'no exact evidence ref was attached. This tool may mutate durable state: do not repeat it to recover output; inspect state with read-only tools instead';
+}
+
+const RECALL_SAFE_TOOLS = new Set([
+  'trajectory_read',
+  'knowledge_read',
+  'workspace_list',
+  'workspace_read',
+  'memory_read',
+  'evolution_read',
+]);

@@ -67,6 +67,20 @@ test('elided environment output preserves its durable evidence lookup key', () =
   assert.match(first.content[0].text, new RegExp(ref));
 });
 
+test('elided state-changing tool output never advises replaying the mutation', () => {
+  const messages = [user(0)];
+  for (let index = 1; index <= 8; index += 1) {
+    messages.push(
+      { ...assistant(index), content: [...assistant(index).content, { type: 'toolCall', id: `call-${index}`, name: 'candidate_propose', arguments: {} }] },
+      { ...toolResult(index), toolName: 'candidate_propose' },
+    );
+  }
+  const bounded = boundTranscript(messages, { recentToolResults: 2, maxMessages: 160 });
+  const first = bounded.find((message) => message.toolCallId === 'call-1');
+  assert.match(first.content[0].text, /do not repeat/);
+  assert.doesNotMatch(first.content[0].text, /re-call/);
+});
+
 test('historical reasoning blocks are elided while the latest turn keeps its thinking', () => {
   const messages = [user(0)];
   for (let index = 1; index <= 8; index += 1) {

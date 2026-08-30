@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { inspectRunState } from '../src/benchmark/run-capsule.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
+import { EvidenceStore } from '../src/core/evidence-store.mjs';
 import { boundTranscript } from '../src/loop/pi-sdk.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
@@ -129,6 +130,39 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
       }),
       /evidence line .* belongs to another game/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('production agent refuses legacy lossy evidence before opening the environment', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-legacy-trajectory-'));
+  const memoryDir = path.join(root, 'memory');
+  fs.mkdirSync(memoryDir, { recursive: true });
+  new EvidenceStore(path.join(memoryDir, 'evidence'), 'legacy-v1', {
+    authorityRoot: memoryDir,
+  }).load().append({
+    type: 'observation',
+    frameHash: 'legacy-hash-only',
+    actionIndex: 0,
+  });
+  let starts = 0;
+  try {
+    assert.throws(
+      () => new AvoArcAgent({
+        gameId: 'legacy-v1',
+        environment: { async start() { starts += 1; return {}; } },
+        loop: inertLoop,
+        config: {
+          maxActions: 10,
+          stallWindow: 8,
+          memoryDir,
+          workspaceDir: path.join(root, 'workspace'),
+        },
+      }),
+      /legacy or compacted evidence without exact current-schema observations/,
+    );
+    assert.equal(starts, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
