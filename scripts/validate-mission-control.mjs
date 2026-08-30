@@ -56,6 +56,20 @@ try {
   });
   assertMissionControlContractUnchanged(before, inspectMissionControlContract({ repositoryRoot }));
 
+  stage = 'dependency-audit';
+  runCommand(npmExecutable(), [
+    'audit',
+    '--omit=dev',
+    '--audit-level=moderate',
+    '--ignore-scripts',
+  ], {
+    cwd: before.applicationRoot,
+    env: childEnvironment,
+    timeoutMs: 5 * 60 * 1000,
+    label: 'Mission Control production dependency audit',
+  });
+  assertMissionControlContractUnchanged(before, inspectMissionControlContract({ repositoryRoot }));
+
   if (options.stopAfter !== 'install') {
     stage = 'tests';
     runCommand(process.execPath, ['--test', ...before.testFiles], {
@@ -94,8 +108,10 @@ try {
     packageManager: before.packageManager,
     nodeEngine: before.nodeEngine,
     dependencies: before.dependencies,
+    overrides: before.overrides,
     package: before.package,
     lock: before.lock,
+    audit: Object.freeze({ productionDependencies: true, minimumSeverity: 'moderate' }),
     tests: Object.freeze({
       count: before.testFiles.length,
       files: before.testFiles.map((file) => path.relative(before.applicationRoot, file).split(path.sep).join('/')),

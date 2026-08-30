@@ -51,10 +51,11 @@ export function inspectMissionControlContract({
   const manifest = assertObject(packageEvidence.value, 'Mission Control package manifest');
   const lock = assertObject(lockEvidence.value, 'Mission Control package lock');
   const dependencies = validateManifestDependencies(manifest);
+  const overrides = validateManifestOverrides(manifest.overrides);
   const packageManager = validatePackageManager(manifest.packageManager);
   const engineMinimum = validateNodeEngine(manifest?.engines?.node);
   validateSecurityFloors(dependencies);
-  validateLockfile({ manifest, lock, dependencies });
+  validateLockfile({ manifest, lock, dependencies, overrides });
 
   const testFiles = discoverMissionControlTests(path.join(applicationRoot, 'test'), { root });
 
@@ -66,6 +67,7 @@ export function inspectMissionControlContract({
     nodeEngine: String(manifest.engines.node),
     nodeMinimum: engineMinimum.text,
     dependencies: Object.freeze({ ...dependencies }),
+    overrides: Object.freeze({ ...overrides }),
     testFiles: Object.freeze(testFiles),
     package: freezeFileEvidence(packageEvidence),
     lock: freezeFileEvidence(lockEvidence),
@@ -97,6 +99,15 @@ export function validateManifestDependencies(manifest) {
     throw new Error('Mission Control CopilotKit package versions must match exactly');
   }
   return Object.freeze({ ...dependencies });
+}
+
+export function validateManifestOverrides(value) {
+  if (value === undefined) return Object.freeze({});
+  const overrides = assertObject(value, 'Mission Control overrides');
+  for (const [name, version] of Object.entries(overrides)) {
+    assertExactPackageVersion(name, version);
+  }
+  return Object.freeze({ ...overrides });
 }
 
 export function assertExactPackageVersion(name, value) {
@@ -198,7 +209,7 @@ export function validateSecurityFloors(dependencies) {
     label: 'Next.js',
     floors: new Map([
       ['15', '15.5.21'],
-      ['16', '16.2.11'],
+      ['16', '16.3.3'],
     ]),
   });
   for (const name of ['react', 'react-dom']) {
@@ -232,7 +243,7 @@ export function discoverMissionControlTests(testRoot, { root = path.dirname(path
   return files;
 }
 
-function validateLockfile({ manifest, lock, dependencies }) {
+function validateLockfile({ manifest, lock, dependencies, overrides }) {
   if (lock.lockfileVersion !== 3 || lock.requires !== true) {
     throw new Error('Mission Control package lock must use npm lockfileVersion 3 with requires=true');
   }
@@ -270,6 +281,33 @@ function validateLockfile({ manifest, lock, dependencies }) {
   for (const [name, version] of Object.entries(dependencies)) {
     const entry = assertObject(packages[`node_modules/${name}`], `Mission Control package lock entry ${name}`);
     if (entry.version !== version) throw new Error(`Mission Control package lock version is out of sync: ${name}`);
+  }
+  for (const [name, version] of Object.entries(overrides)) {
+    const entry = assertObject(packages[`node_modules/${name}`], `Mission Control overridden lock entry ${name}`);
+    if (entry.version !== version) throw new Error(`Mission Control override is out of sync: ${name}`);
+  }
+  validateLockedSecurityFloors(packages);
+}
+
+export function validateLockedSecurityFloors(packages) {
+  const entries = assertObject(packages, 'Mission Control package lock packages');
+  for (const [location, entry] of Object.entries(entries)) {
+    if (location.endsWith('node_modules/postcss')) {
+      assertLockedAtLeast(entry?.version, '8.5.23', 'PostCSS');
+    } else if (location.endsWith('node_modules/undici')) {
+      assertLockedAtLeast(entry?.version, '6.28.0', 'Undici');
+    } else if (location.endsWith('node_modules/@ai-sdk/provider-utils')) {
+      assertLockedAtLeast(entry?.version, '4.0.46', '@ai-sdk/provider-utils');
+    } else if (location.endsWith('node_modules/@ai-sdk/google-vertex')) {
+      assertLockedAtLeast(entry?.version, '4.0.0', '@ai-sdk/google-vertex');
+    }
+  }
+  return true;
+}
+
+function assertLockedAtLeast(value, floor, label) {
+  if (compareVersions(parseVersion(value, label), parseVersion(floor, `${label} security floor`)) < 0) {
+    throw new Error(`${label} locked version is below the current security floor`);
   }
 }
 
