@@ -28,6 +28,8 @@ const report = {
       actions: 10, gameplayActions: 10, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: true, loop: 'pi-sdk',
+      actionSequences: 1, sequenceActionsRequested: 3, sequenceActionsExecuted: 3,
+      sequenceActionsSkipped: 0, sequenceCancellations: 0,
       trajectoryEvidence: trajectoryEvidenceFixture(),
     },
     {
@@ -35,6 +37,8 @@ const report = {
       actions: 20, gameplayActions: 20, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk',
+      actionSequences: 2, sequenceActionsRequested: 6, sequenceActionsExecuted: 5,
+      sequenceActionsSkipped: 1, sequenceCancellations: 1,
       trajectoryEvidence: trajectoryEvidenceFixture(),
     },
   ],
@@ -60,6 +64,11 @@ test('report extraction normalizes versioned IDs, preserves occurrences and keep
     terminalRejectedCommands: 0,
     postTerminalGameplayActions: 0,
     fullResets: 0,
+    actionSequences: 3,
+    sequenceActionsRequested: 9,
+    sequenceActionsExecuted: 8,
+    sequenceActionsSkipped: 1,
+    sequenceCancellations: 1,
   });
 });
 
@@ -102,6 +111,7 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     loop: 'pi-sdk',
     controllerTelemetry: 'complete',
     terminalLifecycleTelemetry: 'complete',
+    actionSequenceTelemetry: 'complete',
     levelMetadata: 'totalLevels-v2',
     trajectoryEvidence: 'content-addressed-v1',
   });
@@ -116,6 +126,11 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
     terminalRejectedCommands: null,
     postTerminalGameplayActions: null,
     fullResets: null,
+    actionSequences: null,
+    sequenceActionsRequested: null,
+    sequenceActionsExecuted: null,
+    sequenceActionsSkipped: null,
+    sequenceCancellations: null,
     episodeId: null,
   }));
   assert.throws(() => validateProductionLoops(legacy, 2), /requires complete controller telemetry/);
@@ -125,6 +140,9 @@ test('production loop attestation requires one explicit pi-sdk value per expecte
   assert.equal(validateProductionLoops(legacy, 2, {
     allowUnavailableControllerTelemetry: true,
   }).terminalLifecycleTelemetry, 'unavailable-diagnostic');
+  assert.equal(validateProductionLoops(legacy, 2, {
+    allowUnavailableControllerTelemetry: true,
+  }).actionSequenceTelemetry, 'unavailable-diagnostic');
   const missingLifecycle = records.map((record) => ({
     ...record,
     terminalRejectedCommands: null,

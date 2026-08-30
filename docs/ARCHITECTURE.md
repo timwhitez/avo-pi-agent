@@ -18,7 +18,7 @@ real Responses-compatible provider
                 │
                 ▼
 AvoArcAgent — autonomous variation operator
-  ├─ exact observe / scarce gameplay act / controller reset
+  ├─ exact observe / guarded act or bounded act_sequence / controller reset
   ├─ source-backed domain knowledge
   ├─ persistent structured memory
   ├─ pre-experiment candidate proposals
@@ -94,7 +94,10 @@ healthy turns.
 The production path uses `@earendil-works/pi-agent-core`; the portable loop is
 restricted to offline deterministic tests. After a Pi prompt settles, the
 wrapper queues a neutral follow-up while the run remains open. An active
-episode may take gameplay actions. `GAME_OVER` or `ERROR` ends that episode,
+episode may take one gameplay action or a bounded sequence routed through the
+same single-step guard; sequences cancel their unexecuted tail on objective
+progress, terminal state, rejection, failed expectation or exhausted budget.
+`GAME_OVER` or `ERROR` ends that episode,
 so only controller reset or explicit finish remains legal. The run stops on:
 
 - environment WIN;

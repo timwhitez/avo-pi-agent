@@ -35,6 +35,8 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
     games: 1, wins: 0, levelsCompleted: 0, totalLevels: 3, actions: 0,
     gameplayActions: null, resets: null, rejectedCommands: null,
     terminalRejectedCommands: null, postTerminalGameplayActions: null, fullResets: null,
+    actionSequences: null, sequenceActionsRequested: null, sequenceActionsExecuted: null,
+    sequenceActionsSkipped: null, sequenceCancellations: null,
   });
 });
 
@@ -47,6 +49,11 @@ test('preserves controller telemetry and validates total environment-action acco
     terminalRejectedCommands: 2,
     postTerminalGameplayActions: 0,
     fullResets: 1,
+    actionSequences: 1,
+    sequenceActionsRequested: 3,
+    sequenceActionsExecuted: 2,
+    sequenceActionsSkipped: 1,
+    sequenceCancellations: 1,
     episodeId: 'episode-000002',
   }));
   assert.deepEqual(
@@ -58,6 +65,11 @@ test('preserves controller telemetry and validates total environment-action acco
       terminalRejectedCommands: record.terminalRejectedCommands,
       postTerminalGameplayActions: record.postTerminalGameplayActions,
       fullResets: record.fullResets,
+      actionSequences: record.actionSequences,
+      sequenceActionsRequested: record.sequenceActionsRequested,
+      sequenceActionsExecuted: record.sequenceActionsExecuted,
+      sequenceActionsSkipped: record.sequenceActionsSkipped,
+      sequenceCancellations: record.sequenceCancellations,
       episodeId: record.episodeId,
     },
     {
@@ -68,6 +80,11 @@ test('preserves controller telemetry and validates total environment-action acco
       terminalRejectedCommands: 2,
       postTerminalGameplayActions: 0,
       fullResets: 1,
+      actionSequences: 1,
+      sequenceActionsRequested: 3,
+      sequenceActionsExecuted: 2,
+      sequenceActionsSkipped: 1,
+      sequenceCancellations: 1,
       episodeId: 'episode-000002',
     },
   );
@@ -83,7 +100,32 @@ test('preserves controller telemetry and validates total environment-action acco
     terminalRejectedCommands: 2,
     postTerminalGameplayActions: 0,
     fullResets: 1,
+    actionSequences: 1,
+    sequenceActionsRequested: 3,
+    sequenceActionsExecuted: 2,
+    sequenceActionsSkipped: 1,
+    sequenceCancellations: 1,
   });
+  assert.throws(
+    () => normalizeGameRecord({ ...record, sequenceActionsRequested: 2 }),
+    /must equal executed plus skipped/,
+  );
+  assert.throws(
+    () => normalizeGameRecord({
+      ...record,
+      actionSequences: 1,
+      sequenceActionsRequested: 21,
+      sequenceActionsExecuted: 2,
+      sequenceActionsSkipped: 19,
+    }),
+    /exceeds 20 actions per sequence/,
+  );
+  const incompleteSequenceTelemetry = { ...record };
+  delete incompleteSequenceTelemetry.sequenceActionsSkipped;
+  assert.throws(
+    () => normalizeGameRecord(incompleteSequenceTelemetry),
+    /action-sequence telemetry must be either complete or entirely unavailable/,
+  );
   assert.throws(
     () => normalizeGameRecord(valid({
       actions: 3, gameplayActions: 3, resets: 1, rejectedCommands: 0,
@@ -144,11 +186,15 @@ test('aggregates controller telemetry across attempts without dropping prior res
       actions: 1, gameplayActions: 0, resets: 1, rejectedCommands: 2,
       terminalRejectedCommands: 2, postTerminalGameplayActions: 0,
       fullResets: 1, episodeId: 'episode-000002',
+      actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
+      sequenceActionsSkipped: 0, sequenceCancellations: 0,
     },
     {
       actions: 3, gameplayActions: 3, resets: 0, rejectedCommands: 1,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000001',
+      actionSequences: 1, sequenceActionsRequested: 4, sequenceActionsExecuted: 3,
+      sequenceActionsSkipped: 1, sequenceCancellations: 1,
     },
   ]);
   assert.deepEqual(aggregate, {
@@ -159,6 +205,11 @@ test('aggregates controller telemetry across attempts without dropping prior res
     terminalRejectedCommands: 2,
     postTerminalGameplayActions: 0,
     fullResets: 1,
+    actionSequences: 1,
+    sequenceActionsRequested: 4,
+    sequenceActionsExecuted: 3,
+    sequenceActionsSkipped: 1,
+    sequenceCancellations: 1,
     episodeId: 'episode-000002',
   });
   assert.throws(
@@ -166,6 +217,8 @@ test('aggregates controller telemetry across attempts without dropping prior res
       actions: 1, gameplayActions: 1, resets: 0, rejectedCommands: 0,
       terminalRejectedCommands: 0, postTerminalGameplayActions: 0,
       fullResets: 0, episodeId: 'episode-000002',
+      actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0,
+      sequenceActionsSkipped: 0, sequenceCancellations: 0,
     }]),
     /episodeId is inconsistent/,
   );

@@ -7,6 +7,14 @@ const SAFE_EPISODE_ID = /^episode-[0-9]{6}$/;
 const TRAJECTORY_EVIDENCE_SCHEMA = 'avo.trajectory-evidence.v1';
 const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
 const SAFE_EVIDENCE_REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
+const MAX_SEQUENCE_ACTIONS = 20;
+const SEQUENCE_TELEMETRY_FIELDS = Object.freeze([
+  'actionSequences',
+  'sequenceActionsRequested',
+  'sequenceActionsExecuted',
+  'sequenceActionsSkipped',
+  'sequenceCancellations',
+]);
 
 export function extractGameRecords(report) {
   const records = [];
@@ -73,6 +81,10 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     'fullResets',
     sourcePath,
   );
+  const sequenceTelemetry = Object.fromEntries(SEQUENCE_TELEMETRY_FIELDS.map((field) => [
+    field,
+    reportedCount(ownValues(value, [field, camelToSnake(field)]), field, sourcePath),
+  ]));
   const episodeId = optionalString(firstOwn(value, ['episodeId', 'episode_id']), 'episodeId', sourcePath);
   if (totalLevels !== null && levelsCompleted > totalLevels) {
     invalidRecord(sourcePath, `levelsCompleted=${levelsCompleted} exceeds totalLevels=${totalLevels}`);
@@ -86,6 +98,12 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   const unavailableLifecycleTelemetry = lifecycleTelemetry.filter((item) => item === null).length;
   if (unavailableLifecycleTelemetry !== 0 && unavailableLifecycleTelemetry !== lifecycleTelemetry.length) {
     invalidRecord(sourcePath, 'terminal lifecycle telemetry must be either complete or entirely unavailable');
+  }
+  const unavailableSequenceTelemetry = Object.values(sequenceTelemetry)
+    .filter((item) => item === null).length;
+  if (unavailableSequenceTelemetry !== 0
+      && unavailableSequenceTelemetry !== SEQUENCE_TELEMETRY_FIELDS.length) {
+    invalidRecord(sourcePath, 'action-sequence telemetry must be either complete or entirely unavailable');
   }
   if (unavailableControllerTelemetry === 0) {
     if (actions !== gameplayActions + resets) {
@@ -106,6 +124,13 @@ export function normalizeGameRecord(value, sourcePath = '$') {
         invalidRecord(sourcePath, 'postTerminalGameplayActions cannot exceed gameplayActions');
       }
     }
+    if (unavailableSequenceTelemetry === 0
+        && sequenceTelemetry.sequenceActionsExecuted > gameplayActions) {
+      invalidRecord(sourcePath, 'sequenceActionsExecuted cannot exceed gameplayActions');
+    }
+  }
+  if (unavailableSequenceTelemetry === 0) {
+    validateSequenceTelemetry(sequenceTelemetry, (message) => invalidRecord(sourcePath, message));
   }
 
   const stateWon = state === 'WIN';
@@ -139,6 +164,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     terminalRejectedCommands,
     postTerminalGameplayActions,
     fullResets,
+    ...sequenceTelemetry,
     episodeId,
     won,
     error: optionalString(value.error, 'error', sourcePath),
@@ -179,6 +205,12 @@ export function validateProductionLoops(records, expectedGames, {
   if (forwardedAfterTerminal.length) {
     throw new Error(`production loop attestation rejects post-terminal gameplay actions: ${JSON.stringify(forwardedAfterTerminal)}`);
   }
+  const unavailableSequences = records
+    .filter((record) => record.actionSequences === null)
+    .map((record) => record.gameId);
+  if (unavailableSequences.length && !allowUnavailableControllerTelemetry) {
+    throw new Error(`production loop attestation requires complete action-sequence telemetry: ${unavailableSequences.join(', ')}`);
+  }
   const invalidLevelMetadata = records
     .filter((record) => record.levelMetadata !== 'totalLevels')
     .map((record) => ({ gameId: record.gameId, metadata: record.levelMetadata }));
@@ -197,6 +229,7 @@ export function validateProductionLoops(records, expectedGames, {
     loop: 'pi-sdk',
     controllerTelemetry: unavailable.length ? 'unavailable-diagnostic' : 'complete',
     terminalLifecycleTelemetry: unavailableLifecycle.length ? 'unavailable-diagnostic' : 'complete',
+    actionSequenceTelemetry: unavailableSequences.length ? 'unavailable-diagnostic' : 'complete',
     levelMetadata: invalidLevelMetadata.length ? 'legacy-diagnostic' : 'totalLevels-v2',
     trajectoryEvidence: unavailableTrajectory.length ? 'unavailable-diagnostic' : 'content-addressed-v1',
   };
@@ -260,6 +293,11 @@ export function aggregateGameMetrics(records) {
     terminalRejectedCommands: optionalMetricTotal(records, 'terminalRejectedCommands'),
     postTerminalGameplayActions: optionalMetricTotal(records, 'postTerminalGameplayActions'),
     fullResets: optionalMetricTotal(records, 'fullResets'),
+    actionSequences: optionalMetricTotal(records, 'actionSequences'),
+    sequenceActionsRequested: optionalMetricTotal(records, 'sequenceActionsRequested'),
+    sequenceActionsExecuted: optionalMetricTotal(records, 'sequenceActionsExecuted'),
+    sequenceActionsSkipped: optionalMetricTotal(records, 'sequenceActionsSkipped'),
+    sequenceCancellations: optionalMetricTotal(records, 'sequenceCancellations'),
   };
 }
 
@@ -301,6 +339,11 @@ export function aggregateAttemptTelemetry(attempts) {
     terminalRejectedCommands: 0,
     postTerminalGameplayActions: 0,
     fullResets: 0,
+    actionSequences: 0,
+    sequenceActionsRequested: 0,
+    sequenceActionsExecuted: 0,
+    sequenceActionsSkipped: 0,
+    sequenceCancellations: 0,
   };
   for (const [index, attempt] of attempts.entries()) {
     for (const field of Object.keys(totals)) {
@@ -322,6 +365,12 @@ export function aggregateAttemptTelemetry(attempts) {
     if (attempt.postTerminalGameplayActions > attempt.gameplayActions) {
       throw new Error(`attempt ${index + 1} postTerminalGameplayActions exceeds gameplayActions`);
     }
+    validateSequenceTelemetry(attempt, (message) => {
+      throw new Error(`attempt ${index + 1} ${message}`);
+    });
+    if (attempt.sequenceActionsExecuted > attempt.gameplayActions) {
+      throw new Error(`attempt ${index + 1} sequenceActionsExecuted exceeds gameplayActions`);
+    }
     if (!SAFE_EPISODE_ID.test(attempt.episodeId)
         || Number(attempt.episodeId.slice('episode-'.length)) !== attempt.resets + 1) {
       throw new Error(`attempt ${index + 1} episodeId is inconsistent with resets`);
@@ -333,10 +382,32 @@ export function aggregateAttemptTelemetry(attempts) {
   });
 }
 
+function validateSequenceTelemetry(value, fail) {
+  if (value.sequenceActionsRequested
+      !== value.sequenceActionsExecuted + value.sequenceActionsSkipped) {
+    fail('sequenceActionsRequested must equal executed plus skipped actions');
+  }
+  if (value.sequenceCancellations > value.actionSequences
+      || value.sequenceCancellations > value.sequenceActionsSkipped) {
+    fail('sequenceCancellations exceeds sequence or skipped-action counts');
+  }
+  if ((value.actionSequences === 0 && value.sequenceActionsRequested !== 0)
+      || (value.actionSequences > 0 && value.sequenceActionsRequested < value.actionSequences)) {
+    fail('actionSequences is inconsistent with requested actions');
+  }
+  if (value.sequenceActionsRequested > value.actionSequences * MAX_SEQUENCE_ACTIONS) {
+    fail(`sequenceActionsRequested exceeds ${MAX_SEQUENCE_ACTIONS} actions per sequence`);
+  }
+}
+
 function optionalMetricTotal(records, field) {
   return records.every((record) => Number.isInteger(record[field]))
     ? records.reduce((sum, record) => sum + record[field], 0)
     : null;
+}
+
+function camelToSnake(value) {
+  return value.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
 function firstOwn(value, keys) {
