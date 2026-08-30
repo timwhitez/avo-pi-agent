@@ -8,10 +8,12 @@ import {
 
 function capsule(overrides = {}) {
   return sealRunCapsule({
-    schema: 'avo.run-capsule.v1',
+    schema: 'avo.run-capsule.v2',
     runId: 'run-x',
     git: { commit: 'a'.repeat(40) },
+    policyProfile: { requested: 'current-v1', effective: 'current-v1' },
     prompts: { systemSha256: 'b'.repeat(64) },
+    runtime: { config: { policyProfile: 'current-v1' } },
     ...overrides,
   }, { createdAt: '2026-08-28T06:45:00Z' });
 }

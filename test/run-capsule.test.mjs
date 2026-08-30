@@ -19,6 +19,7 @@ import {
   publicRunCapsule,
   readRunCapsule,
   RUN_CAPSULE_COMPONENT_FILES,
+  sealRunCapsule,
   verifyRunCapsuleGameSet,
   verifyRunCapsuleExecution,
   writeRunCapsule,
@@ -74,6 +75,7 @@ function runtimeConfig(overrides = {}) {
     maxActions: 1000,
     maxOuterTurns: 1000,
     stallWindow: 8,
+    policyProfile: 'current-v1',
     memorySurfaceLimit: 4,
     workspaceMode: 'files-only',
     workspacePythonTimeoutMs: 10_000,
@@ -86,7 +88,10 @@ function runtimeConfig(overrides = {}) {
 function providerProvenance(runId, config) {
   const salt = crypto.createHash('sha256').update(runId).digest('hex');
   const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
-  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(config.workspaceMode);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(
+    config.workspaceMode,
+    config.policyProfile,
+  );
   return {
     providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
     providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
@@ -169,16 +174,35 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   const transcript = capsule({ env: { AVO_TRANSCRIPT_MAX_MESSAGES: '80' } });
   const tokenBound = capsule({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '90000' } });
   const memoryOff = capsule({ config: runtimeConfig({ memorySurfaceLimit: 0 }) });
+  const minimal = capsule({ config: runtimeConfig({ policyProfile: 'minimal-v1' }) });
   const warm = capsule({
     initialState: initialState({ mode: 'warm-start', snapshotName: 'snapshot-a' }),
   });
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
   assert.notEqual(tokenBound.capsuleHash, baseline.capsuleHash);
   assert.notEqual(memoryOff.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(minimal.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
   assert.notEqual(transcript.definition.transcript.maxMessages, baseline.definition.transcript.maxMessages);
   assert.equal(tokenBound.definition.transcript.maxTokens, 90_000);
   assert.equal(memoryOff.definition.runtime.config.memorySurfaceLimit, 0);
+  assert.deepEqual(minimal.definition.policyProfile, {
+    requested: 'minimal-v1',
+    effective: 'minimal-v1',
+  });
+  assert.equal(minimal.definition.runtime.config.policyProfile, 'minimal-v1');
+  assert.notEqual(minimal.definition.prompts.systemSha256, baseline.definition.prompts.systemSha256);
+  assert.notEqual(
+    minimal.definition.prompts.initialTemplateSha256,
+    baseline.definition.prompts.initialTemplateSha256,
+  );
+  assert.notEqual(
+    minimal.definition.prompts.runtimeStatusTemplateSha256,
+    baseline.definition.prompts.runtimeStatusTemplateSha256,
+  );
+  assert.notEqual(minimal.definition.tools.schemaSha256, baseline.definition.tools.schemaSha256);
+  assert.equal(minimal.definition.tools.enabled.includes('memory_read'), false);
+  assert.equal(minimal.definition.tools.enabled.includes('hypothesis_propose'), false);
   assert.match(baseline.definition.prompts.runtimeStatusTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.prompts.compactionNoticeTemplateSha256, /^[a-f0-9]{64}$/);
   assert.match(baseline.definition.transcript.toolResultElisionTemplateSha256, /^[a-f0-9]{64}$/);
@@ -203,6 +227,7 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
     'src/core/hypothesis-journal.mjs',
     'src/core/memory.mjs',
     'src/core/observation.mjs',
+    'src/core/policy-profile.mjs',
     'src/core/supervisor.mjs',
   ]) {
     assert.ok(RUN_CAPSULE_COMPONENT_FILES.includes(file), `${file} is outside the run capsule`);
@@ -360,6 +385,32 @@ test('execution verification rejects code and effective runtime drift after seal
   assert.throws(
     () => verifyRunCapsuleExecution({
       ...options,
+      config: runtimeConfig({ policyProfile: 'minimal-v1' }),
+    }),
+    /effective execution config differs/,
+  );
+  const promptDrift = sealRunCapsule({
+    ...structuredClone(value.definition),
+    prompts: { ...value.definition.prompts, systemSha256: 'f'.repeat(64) },
+  });
+  assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, capsule: promptDrift }),
+    /prompt, tool, or transcript contract differs/,
+  );
+  const toolDrift = sealRunCapsule({
+    ...structuredClone(value.definition),
+    tools: {
+      ...value.definition.tools,
+      enabled: value.definition.tools.enabled.slice(1),
+    },
+  });
+  assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, capsule: toolDrift }),
+    /prompt, tool, or transcript contract differs/,
+  );
+  assert.throws(
+    () => verifyRunCapsuleExecution({
+      ...options,
       config: runtimeConfig({
         provider: { ...runtimeConfig().provider, reasoningEffort: 'minimal' },
       }),
@@ -420,12 +471,18 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   const published = publicRunCapsule(value, { runClass: 'cold-start', comparable: true });
   assert.equal(published.capsuleHash, value.capsuleHash);
   assert.equal(published.comparable, true);
+  assert.deepEqual(published.policyProfile, {
+    requested: 'current-v1', effective: 'current-v1',
+  });
   assert.equal(published.modelCapabilityStatus, 'configured-with-bounded-probes');
   assert.equal(published.modelInterface.effectiveCapabilityManifest.limits.contextWindowTokens, 128_000);
   assert.equal(published.modelInterface.effectiveCapabilityManifest.visualObservation.enabled, false);
   assert.equal(published.providerToolSchemaSha256, published.modelInterface.attestation.productionToolSchemaSha256);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
+  const missingProfile = structuredClone(published);
+  delete missingProfile.policyProfile;
+  assert.equal(evaluatePublicRunCapsule(missingProfile, { privateCapsuleEvidence }).accepted, false);
   const changedComponent = structuredClone(published);
   changedComponent.components['src/cli.mjs'] = 'f'.repeat(64);
   assert.equal(evaluatePublicRunCapsule(changedComponent, { privateCapsuleEvidence }).accepted, false);

@@ -15,6 +15,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     fs.mkdirSync(path.join(scoped, 'pi-ai', 'utils'), { recursive: true });
     fs.mkdirSync(path.join(root, 'src', 'loop'), { recursive: true });
     fs.mkdirSync(path.join(root, 'src', 'local'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src', 'core'), { recursive: true });
 
     fs.writeFileSync(path.join(scoped, 'pi-agent-core', 'package.json'), JSON.stringify({
       name: '@earendil-works/pi-agent-core', type: 'module', exports: './index.js',
@@ -98,6 +99,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     fs.copyFileSync('src/loop/pi-sdk.mjs', path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
     fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
     fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
+    fs.copyFileSync('src/core/policy-profile.mjs', path.join(root, 'src', 'core', 'policy-profile.mjs'));
     const module = await import(`${pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href}?test=${Date.now()}`);
     const events = [];
     const loop = await module.createPiSdkLoop({

@@ -10,7 +10,7 @@ export function projectPublicRunCapsule(capsule, {
   const definition = capsule.definition;
   const actualClass = String(runClass || definition.initialState.mode);
   const published = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: definition.runId,
     capsuleHash: capsule.capsuleHash,
     capsuleEvidenceSha256: requiredSha(capsuleEvidenceSha256),
@@ -21,6 +21,7 @@ export function projectPublicRunCapsule(capsule, {
     gitClean: definition.git.clean === true,
     components: definition.components.files,
     componentSetSha256: definition.components.setSha256,
+    policyProfile: definition.policyProfile,
     prompts: definition.prompts,
     toolSchemaSha256: definition.tools.schemaSha256,
     providerToolSchemaSha256: definition.tools.providerSchemaSha256,

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 
+import { POLICY_PROFILE_NAMES } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 import {
@@ -9,6 +10,7 @@ import {
 
 const OFFICIAL_RUN_CLASSES = new Set(['cold-start', 'warm-start', 'recovered']);
 const INITIAL_STATE_MODES = new Set(['cold-start', 'warm-start']);
+const POLICY_PROFILES = new Set(POLICY_PROFILE_NAMES);
 
 export function evaluatePublicRunCapsule(value, {
   privateCapsuleEvidence = null,
@@ -17,15 +19,15 @@ export function evaluatePublicRunCapsule(value, {
 } = {}) {
   const capsule = recordOrEmpty(value);
   const reasons = [];
-  requireCondition(capsule.schemaVersion === 1, 'run capsule attestation is absent or malformed', reasons);
+  requireCondition(capsule.schemaVersion === 2, 'run capsule attestation is absent or malformed', reasons);
   requireCondition(isSha256(capsule.capsuleHash), 'run capsule hash is absent or malformed', reasons);
   requireCondition(isSha256(capsule.capsuleEvidenceSha256), 'run capsule file commitment is absent or malformed', reasons);
   const privateCapsule = recordOrEmpty(privateCapsuleEvidence?.value);
   const privateDefinition = recordOrEmpty(privateCapsule.definition);
   const privateRunId = String(privateDefinition.runId || '');
   const publicRunId = String(capsule.runId || '');
-  const privateHashValid = privateCapsule.schemaVersion === 1
-    && privateDefinition.schema === 'avo.run-capsule.v1'
+  const privateHashValid = privateCapsule.schemaVersion === 2
+    && privateDefinition.schema === 'avo.run-capsule.v2'
     && isSha256(privateCapsule.capsuleHash)
     && privateCapsule.capsuleHash === sha256(canonicalJson(privateDefinition));
   requireCondition(privateHashValid, 'private run capsule artifact is absent or internally invalid', reasons);
@@ -99,6 +101,13 @@ export function evaluatePublicRunCapsule(value, {
   const tools = Array.isArray(capsule.enabledTools) ? capsule.enabledTools : [];
   requireCondition(tools.length > 0 && tools.every((name) => typeof name === 'string' && name.length > 0), 'run capsule enabled-tool set is absent or malformed', reasons);
   requireCondition(new Set(tools).size === tools.length, 'run capsule enabled-tool set contains duplicates', reasons);
+  const policyProfile = recordOrEmpty(capsule.policyProfile);
+  requireCondition(
+    POLICY_PROFILES.has(String(policyProfile.requested || ''))
+      && policyProfile.effective === policyProfile.requested,
+    'run capsule requested/effective policy profile is absent or inconsistent',
+    reasons,
+  );
   requireCondition(typeof capsule.initialStateSnapshot === 'string' && capsule.initialStateSnapshot.length > 0, 'run capsule initial-state snapshot name is absent', reasons);
   requireCondition(capsule.modelCapabilityStatus === 'configured-with-bounded-probes', 'run capsule model-capability status lacks bounded probes', reasons);
   const components = recordOrEmpty(capsule.components);
@@ -160,6 +169,11 @@ export function evaluatePublicRunCapsule(value, {
   requireCondition(runtime.sessionTopology === 'one-arcade-session-per-process-pass', 'run capsule session topology is unknown', reasons);
   requireCondition(runtime.scorecardBinding === 'exact-session-execution-v5', 'run capsule scorecard binding is unknown', reasons);
   requireCondition(isRecord(runtime.config), 'run capsule effective runtime config is absent', reasons);
+  requireCondition(
+    runtime.config?.policyProfile === policyProfile.effective,
+    'run capsule runtime policy profile differs from its attestation',
+    reasons,
+  );
   const workspaceCapability = recordOrEmpty(capsule.workspaceCapability);
   const workspaceAttestation = recordOrEmpty(workspaceCapability.attestation);
   try {

@@ -45,9 +45,11 @@ test('the production runner refuses legacy resume evidence before any provider r
 test('the production runner refuses to resume a completed diagnostic migration', () => {
   const interrupted = interruptedRun();
   const capsule = sealRunCapsule({
-    schema: 'avo.run-capsule.v1',
+    schema: 'avo.run-capsule.v2',
     runId: interrupted.runId,
     git: { commit: 'a'.repeat(40) },
+    policyProfile: { requested: 'current-v1', effective: 'current-v1' },
+    runtime: { config: { policyProfile: 'current-v1' } },
   });
   writeRunCapsule(path.join(interrupted.privateDir, 'run-capsule.json'), capsule, {
     root: interrupted.privateDir,

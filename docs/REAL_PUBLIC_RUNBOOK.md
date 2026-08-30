@@ -65,6 +65,9 @@ Optional local runtime variables:
 - `AVO_MAX_ACTIONS` — default `1000`
 - `AVO_MAX_OUTER_TURNS` — default `1000`
 - `AVO_STALL_WINDOW` — default `8`
+- `AVO_POLICY_PROFILE` — exactly `minimal-v1` or `current-v1`; the
+  compatibility default `current-v1` is not a performance claim, and every run
+  capsule discloses the requested/effective value
 - `AVO_MEMORY_SURFACE_LIMIT` — default `4`, bounded `0..8`; `0` disables only
   automatic claim surfacing for controlled comparisons
 

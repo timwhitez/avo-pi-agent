@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { Type } from '@earendil-works/pi-ai';
 import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-responses-shared';
 import { getRuntimeConfig, loadLocalEnv } from '../src/config.mjs';
-import { AvoArcAgent, effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
+import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
 import { canonicalJson } from '../src/local/canonical-json.mjs';
 import {
   createPiSdkLoop,
@@ -53,9 +53,7 @@ try {
     },
   });
   const state = { observed: false, done: false };
-  const enabled = new Set(effectiveAvoToolNames(config.workspaceMode));
-  const tools = AvoArcAgent.prototype.tools.call({})
-    .filter((tool) => enabled.has(tool.name))
+  const tools = effectiveAvoTools(config.workspaceMode, config.policyProfile)
     .map((tool) => ({
       ...tool,
       async execute(params = {}) {

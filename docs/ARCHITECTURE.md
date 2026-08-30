@@ -110,7 +110,15 @@ so only controller reset or explicit finish remains legal. The run stops on:
 
 ## Persistent state
 
-Per-game memory schema v5 stores:
+The production policy surface has exactly two versioned profiles. `minimal-v1`
+keeps environment semantics, evidence, controller actions, sequences, finish,
+reliability/accounting, and the selected workspace while omitting
+memory/knowledge/journal tools, automatic memory surfacing, and supervisor
+strategy. `current-v1` preserves the corrected existing behavior. The default
+is compatibility-only; measured selection belongs to Issue #180. Run capsule
+v2 binds the requested/effective profile plus exact prompt and tool hashes.
+
+Per-game memory schema v5 stores for `current-v1`:
 
 - action semantics, objects, goals and invariants;
 - failed hypotheses and proven strategies;

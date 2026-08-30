@@ -16,17 +16,20 @@ const ARC_RUNTIME = Object.freeze({
 
 export function workspaceAttestationFixture(config = {}) {
   const mode = String(config.workspaceMode || 'files-only');
+  const policyProfile = String(config.policyProfile || 'current-v1');
   const isolated = mode === 'isolated-python';
   return Object.freeze({
-    schema: 'avo.workspace-capability.v1',
+    schema: 'avo.workspace-capability.v2',
     requested: {
       mode,
+      policyProfile,
       containerRuntime: isolated ? String(config.workspaceContainerRuntime || 'docker') : null,
       containerImage: isolated ? String(config.workspaceContainerImage || 'python:3.12-slim') : null,
     },
     effective: {
       mode,
-      enabledTools: effectiveAvoToolNames(mode),
+      policyProfile,
+      enabledTools: effectiveAvoToolNames(mode, policyProfile),
       container: isolated ? {
         runtimeVersionSha256: 'a'.repeat(64),
         imageId: `sha256:${'b'.repeat(64)}`,
@@ -240,7 +243,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
   const nodeTree = { name: 'avo-pi-arc-agi3', version: '0.1.0', dependencies: {} };
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
   return sealRunCapsule({
-    schema: 'avo.run-capsule.v1',
+    schema: 'avo.run-capsule.v2',
     runId,
     git: {
       commit: '1'.repeat(40),
@@ -249,6 +252,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
       dirtyStateSha256: '4'.repeat(64),
     },
     components: { files: components, setSha256: digest(components) },
+    policyProfile: { requested: 'current-v1', effective: 'current-v1' },
     prompts: {
       systemSha256: '7'.repeat(64),
       developerPresent: false,
@@ -337,6 +341,7 @@ function privateRunCapsuleFixture(runId, versionedGameIds) {
         maxActions: 1000,
         maxOuterTurns: 1000,
         stallWindow: 8,
+        policyProfile: 'current-v1',
         workspaceMode: 'files-only',
         workspacePythonTimeoutMs: 10_000,
         workspaceContainerRuntime: 'docker',

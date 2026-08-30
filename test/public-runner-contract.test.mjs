@@ -127,7 +127,19 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           await call('finish', { summary: nonce });
           return;
         }
-        await call('memory_read');
+        for (const name of [
+          'knowledge_read',
+          'memory_read',
+          'journal_read',
+          'memory_update',
+          'hypothesis_propose',
+          'hypothesis_evaluate',
+        ]) {
+          if (tools.has(name)) throw new Error('minimal profile exposed strategic tool: ' + name);
+        }
+        if (/memory|hypothesis|journal|knowledge|supervisor/i.test(this.options.initialState.systemPrompt)) {
+          throw new Error('minimal profile injected strategic system guidance');
+        }
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
@@ -483,6 +495,7 @@ process.exit(result.status ?? 1);
     maxActions: 200,
     maxOuterTurns: 1000,
     stallWindow: 8,
+    policyProfile: 'minimal-v1',
     workspaceMode: 'files-only',
     workspacePythonTimeoutMs: 10_000,
     workspaceContainerRuntime: 'docker',
@@ -495,7 +508,10 @@ process.exit(result.status ?? 1);
     providerModelFingerprint: fingerprint(config.provider.model, providerSalt),
   };
   const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
-  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(config.workspaceMode);
+  const providerToolSchemaSha256 = productionProviderToolSchemaDigest(
+    config.workspaceMode,
+    config.policyProfile,
+  );
   const capabilityProvenance = {
     providerPreflight: {
       ok: true,
@@ -569,6 +585,7 @@ process.exit(result.status ?? 1);
     OPENAI_REASONING_EFFORT: 'max',
     ...providerEnvironment(),
     AVO_GAME_CONCURRENCY: '4',
+    AVO_POLICY_PROFILE: 'minimal-v1',
     AVO_MAX_ACTIONS: '200',
     AVO_MEMORY_DIR: runState.memoryDir,
     AVO_WORKSPACE_DIR: runState.workspaceDir,
@@ -639,6 +656,16 @@ try {
   assert.equal(missingCapsule.status, 1, missingCapsule.stderr || missingCapsule.stdout);
   assert.match(missingCapsule.stderr, /requires a capsule-bound resume directory/);
   assert.doesNotMatch(missingCapsule.stdout, /\[1\/25\]/);
+
+  const profileDrift = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { ...childEnv, AVO_POLICY_PROFILE: 'current-v1' },
+  });
+  assert.equal(profileDrift.status, 1, profileDrift.stderr || profileDrift.stdout);
+  assert.match(profileDrift.stderr, /effective execution config differs/);
+  assert.doesNotMatch(profileDrift.stdout, /\[1\/25\]/);
 
   const configFile = path.join(root, 'src', 'config.mjs');
   const originalConfig = fs.readFileSync(configFile);
@@ -722,6 +749,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.scorecardEvidence[0].totalLevelsCompleted, 50);
   assert.equal(report.scorecardEvidence[0].totalLevels, 50);
   assert.equal(report.schemaVersion, 2);
+  assert.equal(report.config.policyProfile, 'minimal-v1');
   assert.equal(report.summary.totalLevelsCompleted, 50);
   assert.equal(report.summary.totalLevels, 50);
   assert.equal(report.results[0].totalLevels, 2);
@@ -748,6 +776,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.deepEqual(report.results[0].executions.map((item) => item.executionOccurrence), [0, 1]);
   assert.match(report.results[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
   assert.equal(report.runCapsuleHash, capsule.capsuleHash);
+  assert.deepEqual(capsule.definition.policyProfile, {
+    requested: 'minimal-v1', effective: 'minimal-v1',
+  });
   assert.equal(report.runClass, 'cold-start');
   const checkpoint = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'g01.json',
@@ -856,6 +887,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       OPENAI_REASONING_EFFORT: 'max',
       ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
+      AVO_POLICY_PROFILE: 'minimal-v1',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
     },
   });
@@ -876,6 +908,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     /raw-card-private-123|raw-guid-private-456/,
   );
   assert.equal(publishedReport.completeness.actualCount, 25);
+  assert.deepEqual(publishedReport.provenance.runCapsule.policyProfile, {
+    requested: 'minimal-v1', effective: 'minimal-v1',
+  });
   assert.equal(publishedReport.games[0].resets, 1);
   assert.equal(publishedReport.games[0].fullResets, 1);
   assert.equal(publishedReport.games[0].episodeId, 'episode-000002');
@@ -914,6 +949,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       OPENAI_REASONING_EFFORT: 'max',
       ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
+      AVO_POLICY_PROFILE: 'minimal-v1',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
       AVO_DEBUG: 'contract-mutate-after-child',
     },

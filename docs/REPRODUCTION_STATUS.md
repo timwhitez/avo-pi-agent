@@ -19,9 +19,10 @@ exact review commit.
 |---|---|---|
 | Pi Agent production loop | Implemented | `src/loop/pi-sdk.mjs` uses the official Pi packages and dynamic continuation. |
 | Public AVO claim audit | Gap documented | `docs/AVO_CONFORMANCE.md` records that behavior-changing AVO candidates are not implemented. |
-| Optional hypothesis/evidence journal | Implemented | Pre-action proposals and exact later evidence checks; no behavior installation or improvement claim. |
+| Versioned policy profiles | Implemented, effect unknown | `minimal-v1` and `current-v1` have capsule-bound prompt/tool surfaces; selection awaits Issue #180. |
+| Optional hypothesis/evidence journal | Implemented in `current-v1` | Pre-action proposals and exact later evidence checks; no behavior installation or improvement claim. |
 | Executable candidate evolution | Not implemented | Deferred unless controlled ablation evidence justifies the added mechanism. |
-| Conditional evidence-backed supervisor | Implemented | Repeated-state/cycle episodes with bounded interventions. |
+| Conditional evidence-backed supervisor | Implemented in `current-v1` | Repeated-state/cycle episodes with bounded interventions. |
 | Files-only workspace default | Implemented engineering boundary | Arbitrary Python is unavailable unless a separately attested OS-isolation backend is configured. |
 | Official ARC-AGI-3 public-set run | No accepted result recorded | The complete local runner remains fail-closed. |
 | Concrete official score | Unavailable | Must come from an accepted official runtime/scorecard origin. |

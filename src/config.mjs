@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { normalizePolicyProfile } from './core/policy-profile.mjs';
 import { providerCapabilitiesFromEnvironment } from './provider-capabilities.mjs';
 
 function parseDotEnv(text) {
@@ -72,6 +73,7 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
     maxActions: integer('AVO_MAX_ACTIONS', 1000),
     maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 1000),
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
+    policyProfile: normalizePolicyProfile(process.env.AVO_POLICY_PROFILE),
     toolResultMaxChars: integer('AVO_TOOL_RESULT_MAX_CHARS', 24_000),
     memorySurfaceLimit: integer('AVO_MEMORY_SURFACE_LIMIT', 4, 0, 8),
     memoryDir: process.env.AVO_MEMORY_DIR || '.avo-memory',
@@ -93,6 +95,7 @@ export function publicConfigSummary(config) {
     maxActions: config.maxActions,
     maxOuterTurns: config.maxOuterTurns,
     stallWindow: config.stallWindow,
+    policyProfile: normalizePolicyProfile(config.policyProfile),
     toolResultMaxChars: config.toolResultMaxChars,
     memorySurfaceLimit: config.memorySurfaceLimit,
     memoryDir: config.memoryDir,

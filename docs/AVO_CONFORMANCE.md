@@ -8,7 +8,7 @@ imply access to NVIDIA's private code, prompts, trajectories, or policies.
 
 The repository is an AVO-inspired ARC harness, not an executable AVO
 reconstruction. Its policy is still the model using direct environment tools.
-The optional hypothesis journal records predictions and checks later evidence;
+In `current-v1`, the optional hypothesis journal records predictions and checks later evidence;
 it never creates, selects, installs, repairs, or rolls back a behavior-changing
 candidate artifact.
 
@@ -20,7 +20,7 @@ candidate artifact.
 | Candidate artifacts can change future behavior. | **Not implemented.** No policy, prompt, tool, world model or code candidate is installed. | Source and model-visible wording tests. |
 | External evaluation controls candidate selection. | **Not implemented as selection.** `HypothesisEvaluator` only compares declared predictions with exact later action evidence. | Evaluator and durable-restart tests. |
 | Evaluated variants form scored evolutionary history. | **Not implemented.** The journal has no score, parent, head, best, commit or rollback state. | Memory migration and public-schema tests. |
-| Conditional supervision reacts to stagnation. | Implemented as a bounded engineering adaptation, without a claim of equivalence to NVIDIA's private supervisor. | Supervisor tests. |
+| Conditional supervision reacts to stagnation. | Available only in `current-v1` as a bounded engineering adaptation, without a claim of equivalence to NVIDIA's private supervisor. | Policy-profile and supervisor tests. |
 | Direct interaction remains general rather than game-scripted. | Implemented: exact observations and legal ARC actions are the primary policy; scratch execution is confined and optional. | Observation, reset, workspace and prompt tests. |
 
 ## Hypothesis-journal invariant

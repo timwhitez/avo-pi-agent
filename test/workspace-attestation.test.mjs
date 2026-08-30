@@ -10,8 +10,14 @@ import {
   workspaceCapabilityDigest,
 } from '../src/benchmark/workspace-attestation.mjs';
 
-function config(mode, runtime = 'unused-runtime', image = 'local-python:test') {
+function config(
+  mode,
+  runtime = 'unused-runtime',
+  image = 'local-python:test',
+  policyProfile = 'current-v1',
+) {
   return {
+    policyProfile,
     workspaceMode: mode,
     workspacePythonTimeoutMs: 5_000,
     workspaceContainerRuntime: runtime,
@@ -27,6 +33,18 @@ test('disabled and files-only attest without invoking a container runtime', asyn
     assert.equal(value.effective.container, null);
     assert.match(workspaceCapabilityDigest(value), /^[a-f0-9]{64}$/);
   }
+  const minimal = await attestWorkspaceCapability(
+    config('files-only', 'unused-runtime', 'unused-image', 'minimal-v1'),
+  );
+  assert.equal(minimal.requested.policyProfile, 'minimal-v1');
+  assert.equal(minimal.effective.policyProfile, 'minimal-v1');
+  assert.equal(minimal.effective.enabledTools.includes('memory_read'), false);
+  const mismatched = structuredClone(minimal);
+  mismatched.effective.policyProfile = 'current-v1';
+  assert.throws(
+    () => validateWorkspaceCapabilityAttestation(mismatched),
+    /requested and effective policy profiles differ/,
+  );
 });
 
 test('isolated Python attests restrictions and runs Docker or Podman immutable image IDs', async (t) => {

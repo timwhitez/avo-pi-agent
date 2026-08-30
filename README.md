@@ -6,7 +6,7 @@ the official ARC runtime.
 
 This is not NVIDIA's private implementation, prompt, trace set, or collection
 of solved public-game scripts. It does **not** currently implement AVO's
-behavior-changing candidate mechanism. What is implemented is:
+behavior-changing candidate mechanism. The `current-v1` profile implements:
 
 - autonomous inspect → hypothesize → act → evaluate → revise cycles;
 - persistent knowledge across a long run;
@@ -21,17 +21,17 @@ ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values
 Python bridge
    ⇅ narrow model tools
-ARC controller: direct interaction + memory + optional journal + supervisor
+ARC controller: direct interaction + selected policy profile
    ⇅
 @earendil-works/pi-agent-core
    ⇅ OpenAI Responses-compatible API
 runtime-configured reasoning model
 ```
 
-The agent receives only these capabilities: observe, take a frame-authorized
-gameplay action, invoke the separate reset controller, read/update structured
-memory, check a prior hypothesis against evidence, use a confined scratch
-workspace, and finish.
+Both profiles expose observation/history, frame-authorized gameplay, the
+separate reset controller, bounded action sequences, finish, and the selected
+confined workspace. `current-v1` additionally exposes structured memory,
+knowledge, and the optional hypothesis journal; `minimal-v1` does not.
 There is no shell, arbitrary host filesystem, browser, or generic networking
 tool in the model's tool set.
 
@@ -120,6 +120,15 @@ secret scanner. It is not an ARC public score and the output labels it
 
 ## Design boundaries
 
+### Policy profiles
+
+`AVO_POLICY_PROFILE` accepts exactly `minimal-v1` or `current-v1`. The default
+is `current-v1` only for backward compatibility, not because it is proven
+better. The minimal profile removes memory/knowledge/journal tools, automatic
+memory surfacing, and StallSupervisor strategy while retaining environment
+semantics, evidence, accounting, reliability, and workspace safety. Run
+capsules disclose and bind the requested/effective profile, prompt, and tools.
+
 ### Persistent memory
 
 Each game has a structured memory record containing legacy harness notes plus
@@ -138,7 +147,7 @@ result is `confirmed`, `contradicted`, or `inconclusive`. Confirmation means the
 declared predictions matched. It does not install or change a policy, prompt,
 tool, world model, or code artifact, and it is not an improvement claim.
 
-### Supervisor
+### Supervisor (`current-v1` only)
 
 A sliding window detects repeated-state plateaus and action cycles. A stall
 injects a concrete intervention: falsify the current assumption, compare exact

@@ -7,15 +7,18 @@ import { convertResponsesTools } from '@earendil-works/pi-ai/api/openai-response
 
 import {
   AvoArcAgent,
-  effectiveAvoToolNames,
+  effectiveAvoTools,
 } from '../core/avo-agent-base.mjs';
+import {
+  normalizePolicyProfile,
+  policyInitialPrompt,
+} from '../core/policy-profile.mjs';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
   COMPACTION_NOTICE_TEMPLATE_SHA256,
-  RUNTIME_STATUS_TEMPLATE_SHA256,
   THINKING_ELISION_POLICY_SHA256,
   TOOL_RESULT_ELISION_TEMPLATE_SHA256,
   TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
@@ -24,6 +27,7 @@ import {
   estimateStaticPiContextTokens,
   effectivePiSystemPrompt,
   piToolContract,
+  runtimeStatusTemplateSha256,
 } from '../loop/pi-sdk.mjs';
 import {
   assertProviderCapabilities,
@@ -38,7 +42,7 @@ import {
   workspaceCapabilityDigest,
 } from './workspace-attestation.mjs';
 
-export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v1';
+export const RUN_CAPSULE_SCHEMA = 'avo.run-capsule.v2';
 export const RUN_STATE_SCHEMA = 'avo.run-state.v1';
 export { canonicalJson } from '../local/canonical-json.mjs';
 
@@ -76,6 +80,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/core/knowledge-base.mjs',
   'src/core/memory.mjs',
   'src/core/observation.mjs',
+  'src/core/policy-profile.mjs',
   'src/core/supervisor.mjs',
   'src/core/workspace.mjs',
   'src/local/authority-directory.mjs',
@@ -249,6 +254,7 @@ export function buildRunCapsule({
   }
   const workspaceMode = String(config?.workspaceMode || 'files-only');
   if (!WORKSPACE_MODES.has(workspaceMode)) throw new Error('run capsule workspace mode is invalid');
+  const policyProfile = normalizePolicyProfile(config?.policyProfile);
   validateWorkspaceCapabilityAttestation(workspaceAttestation, { config });
   const reasoningEffort = String(config?.provider?.reasoningEffort || provenance?.reasoningEffort || '');
   if (!reasoningEffort) throw new Error('run capsule reasoning effort is absent');
@@ -259,14 +265,14 @@ export function buildRunCapsule({
       || providerIdentity.modelFingerprint !== provenance?.providerModelFingerprint) {
     throw new Error('run provenance provider identity differs from the effective provider config');
   }
-  const toolSchemas = canonicalToolSchemas(workspaceMode);
+  const toolSchemas = canonicalToolSchemas(workspaceMode, policyProfile);
   const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
   const providerToolSchemas = convertResponsesTools(piTools, {
     supportsStrictMode: false,
     supportsOpenAIGrammarTools: false,
   });
   const systemPrompt = effectivePiSystemPrompt(
-    AvoArcAgent.prototype.systemPrompt.call({}),
+    AvoArcAgent.prototype.systemPrompt.call({ policyProfile }),
     workspaceMode,
   );
   const definition = {
@@ -277,12 +283,16 @@ export function buildRunCapsule({
       files: componentHashes,
       setSha256: sha256(canonicalJson(componentHashes)),
     },
+    policyProfile: {
+      requested: policyProfile,
+      effective: policyProfile,
+    },
     prompts: {
       systemSha256: sha256(systemPrompt),
       developerPresent: false,
       developerSha256: null,
-      initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+      initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
       compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
@@ -331,6 +341,7 @@ export function buildRunCapsule({
         maxActions: positiveInteger(config?.maxActions, 1000, 'maxActions'),
         maxOuterTurns: positiveInteger(config?.maxOuterTurns, 1000, 'maxOuterTurns'),
         stallWindow: positiveInteger(config?.stallWindow, 8, 'stallWindow'),
+        policyProfile,
         memorySurfaceLimit: boundedInteger(config?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
         workspaceMode,
         workspacePythonTimeoutMs: positiveInteger(config?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
@@ -347,19 +358,21 @@ export function buildRunCapsule({
   return sealRunCapsule(definition, { createdAt });
 }
 
-function canonicalToolSchemas(workspaceMode) {
-  const enabled = new Set(effectiveAvoToolNames(workspaceMode));
-  const schemas = AvoArcAgent.prototype.tools.call({})
-    .filter((tool) => enabled.has(tool.name))
+function canonicalToolSchemas(workspaceMode, policyProfile) {
+  return effectiveAvoTools(workspaceMode, policyProfile)
     .map(({ name, label, description, parameters }) => ({ name, label, description, parameters }));
-  if (schemas.length !== enabled.size || schemas.some((tool) => !enabled.has(tool.name))) {
-    throw new Error('effective tool schema set differs from the production tool allowlist');
-  }
-  return schemas;
 }
 
-export function productionProviderToolSchemaDigest(workspaceMode = 'files-only') {
-  const piTools = canonicalToolSchemas(workspaceMode).map((tool) => piToolContract(tool, Type));
+function initialPromptTemplateSha256(policyProfile) {
+  return sha256(canonicalJson({
+    policyProfile: normalizePolicyProfile(policyProfile),
+    renderer: policyInitialPrompt.toString(),
+  }));
+}
+
+export function productionProviderToolSchemaDigest(workspaceMode = 'files-only', policyProfile) {
+  const piTools = canonicalToolSchemas(workspaceMode, policyProfile)
+    .map((tool) => piToolContract(tool, Type));
   const providerTools = convertResponsesTools(piTools, {
     supportsStrictMode: false,
     supportsOpenAIGrammarTools: false,
@@ -373,7 +386,7 @@ export function sealRunCapsule(definition, { createdAt = new Date().toISOString(
   }
   const capsuleHash = sha256(canonicalJson(definition));
   return deepFreeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     capsuleHash,
     createdAt: String(createdAt),
     definition: structuredClone(definition),
@@ -542,14 +555,22 @@ export function verifyRunCapsuleExecution({
     throw new Error('effective workspace capability differs from the sealed run capsule');
   }
   const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
-  const toolSchemas = canonicalToolSchemas(definition.runtime.config.workspaceMode);
+  const policyProfile = normalizePolicyProfile(definition.runtime.config.policyProfile);
+  if (canonicalJson(definition.policyProfile)
+      !== canonicalJson({ requested: policyProfile, effective: policyProfile })) {
+    throw new Error('requested and effective policy profiles differ from the sealed runtime');
+  }
+  const toolSchemas = canonicalToolSchemas(
+    definition.runtime.config.workspaceMode,
+    policyProfile,
+  );
   const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
   const providerToolSchemas = convertResponsesTools(piTools, {
     supportsStrictMode: false,
     supportsOpenAIGrammarTools: false,
   });
   const prompt = effectivePiSystemPrompt(
-    AvoArcAgent.prototype.systemPrompt.call({}),
+    AvoArcAgent.prototype.systemPrompt.call({ policyProfile }),
     definition.runtime.config.workspaceMode,
   );
   const observedHarness = {
@@ -557,8 +578,8 @@ export function verifyRunCapsuleExecution({
       systemSha256: sha256(prompt),
       developerPresent: false,
       developerSha256: null,
-      initialTemplateSha256: sha256(AvoArcAgent.prototype.run.toString()),
-      runtimeStatusTemplateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+      initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
       compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
@@ -685,8 +706,18 @@ function scanDirectoryTree(directory) {
 }
 
 function validateRunCapsule(capsule) {
-  if (capsule?.schemaVersion !== 1 || capsule?.definition?.schema !== RUN_CAPSULE_SCHEMA) {
+  if (capsule?.schemaVersion !== 2 || capsule?.definition?.schema !== RUN_CAPSULE_SCHEMA) {
     throw new Error('run capsule schema is invalid');
+  }
+  if (!capsule.definition.policyProfile
+      || typeof capsule.definition.policyProfile !== 'object'
+      || Array.isArray(capsule.definition.policyProfile)) {
+    throw new Error('run capsule policy profile is absent or inconsistent');
+  }
+  const profile = normalizePolicyProfile(capsule.definition.runtime?.config?.policyProfile);
+  if (canonicalJson(capsule.definition.policyProfile)
+      !== canonicalJson({ requested: profile, effective: profile })) {
+    throw new Error('run capsule policy profile is absent or inconsistent');
   }
   const actual = sha256(canonicalJson(capsule.definition));
   if (!/^[a-f0-9]{64}$/.test(String(capsule.capsuleHash || '')) || capsule.capsuleHash !== actual) {
@@ -888,6 +919,7 @@ function verifyEffectiveConfig(actual, expected) {
     maxActions: positiveInteger(actual?.maxActions, 1000, 'maxActions'),
     maxOuterTurns: positiveInteger(actual?.maxOuterTurns, 1000, 'maxOuterTurns'),
     stallWindow: positiveInteger(actual?.stallWindow, 8, 'stallWindow'),
+    policyProfile: normalizePolicyProfile(actual?.policyProfile),
     memorySurfaceLimit: boundedInteger(actual?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
     workspaceMode: String(actual?.workspaceMode || 'files-only'),
     workspacePythonTimeoutMs: positiveInteger(actual?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),

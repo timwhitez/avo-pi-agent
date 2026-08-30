@@ -4,6 +4,13 @@ import { PersistentMemory } from './memory.mjs';
 import { StallSupervisor } from './supervisor.mjs';
 import { HypothesisEvaluator, normalizeHypothesis, objectiveVector } from './evaluator.mjs';
 import { ArcKnowledgeBase } from './knowledge-base.mjs';
+import {
+  filterToolsForPolicy,
+  normalizePolicyProfile,
+  policyInitialPrompt,
+  policySystemPrompt,
+  policyUsesStrategy,
+} from './policy-profile.mjs';
 import { WorkspaceSandbox } from './workspace.mjs';
 import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
 import {
@@ -33,31 +40,17 @@ const ACTION_EXPECTATION_SCHEMA = {
     afterHash: { type: 'string', pattern: '^[a-f0-9]{16}$' },
   },
 };
-export const AVO_TOOL_NAMES = Object.freeze([
-  'observe',
-  'trajectory_read',
-  'act',
-  'act_sequence',
-  'reset',
-  'knowledge_read',
-  'workspace_list',
-  'workspace_read',
-  'workspace_write',
-  'workspace_python',
-  'memory_read',
-  'journal_read',
-  'memory_update',
-  'hypothesis_propose',
-  'hypothesis_evaluate',
-  'finish',
-]);
 
-export function effectiveAvoToolNames(workspaceMode = 'files-only') {
-  return AVO_TOOL_NAMES.filter((name) => {
-    if (workspaceMode === 'disabled' && name.startsWith('workspace_')) return false;
-    if (name === 'workspace_python' && workspaceMode !== 'isolated-python') return false;
-    return true;
-  });
+export function effectiveAvoTools(workspaceMode = 'files-only', policyProfile) {
+  return filterToolsForPolicy(
+    AvoArcAgent.prototype.tools.call({}),
+    workspaceMode,
+    policyProfile,
+  );
+}
+
+export function effectiveAvoToolNames(workspaceMode = 'files-only', policyProfile) {
+  return effectiveAvoTools(workspaceMode, policyProfile).map((tool) => tool.name);
 }
 
 export class AvoArcAgent {
@@ -66,6 +59,8 @@ export class AvoArcAgent {
     this.environment = environment;
     this.loop = loop;
     this.config = config;
+    this.policyProfile = normalizePolicyProfile(config.policyProfile);
+    this.strategyEnabled = policyUsesStrategy(this.policyProfile);
     this.logger = logger;
     this.captureScorecard = captureScorecard;
     this.memory = new PersistentMemory(config.memoryDir, gameId).load();
@@ -194,7 +189,9 @@ export class AvoArcAgent {
       environmentActions: this.actions,
       maxActions: this.config.maxActions,
       terminalReason: 'none',
-      allowedNext: 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful',
+      allowedNext: this.strategyEnabled
+        ? 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful'
+        : 'inspect evidence, take one currently legal gameplay action, use the scratch workspace, or finish',
     };
   }
 
@@ -262,7 +259,7 @@ export class AvoArcAgent {
       {
         name: 'act_sequence',
         label: 'Execute a bounded gameplay action sequence',
-        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or execution failure. Use single-step act while uncertain.',
+        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or execution failure.',
         parameters: {
           type: 'object',
           required: ['steps'],
@@ -302,6 +299,7 @@ export class AvoArcAgent {
       },
       {
         name: 'knowledge_read',
+        strategic: true,
         label: 'Consult AVO and ARC domain knowledge',
         description: 'Search the domain-specific knowledge base. Use it when choosing experiments, interpreting competition constraints, or revising a stalled strategy.',
         parameters: {
@@ -343,7 +341,7 @@ export class AvoArcAgent {
       {
         name: 'workspace_write',
         label: 'Write an analysis workspace file',
-        description: 'Create or replace a bounded scratch file for transition tables, hypotheses, calculations, or reusable analysis code. Do not replace direct environment interaction with a hand-coded game solver.',
+        description: 'Create or replace a bounded scratch file for notes, tables, calculations, or analysis code. Workspace writes do not interact with the ARC environment.',
         parameters: {
           type: 'object', required: ['path', 'content'],
           properties: { path: { type: 'string' }, content: { type: 'string' } }, additionalProperties: false,
@@ -356,7 +354,7 @@ export class AvoArcAgent {
       {
         name: 'workspace_python',
         label: 'Run bounded Python analysis',
-        description: 'Run bounded Python scratch analysis with stripped secrets, resource limits, no subprocesses, and no network. Use it for compact grid calculations when useful; it does not consume an ARC action and must not become the primary ARC policy.',
+        description: 'Run bounded Python scratch analysis with stripped secrets, resource limits, no subprocesses, and no network. It does not consume an ARC action or interact with the ARC environment.',
         parameters: {
           type: 'object', required: ['code'],
           properties: { code: { type: 'string' } }, additionalProperties: false,
@@ -371,6 +369,7 @@ export class AvoArcAgent {
       },
       {
         name: 'memory_read',
+        strategic: true,
         label: 'Read persistent game memory',
         description: 'Read harness notes, hypothesis-journal counts, and one bounded page of typed claims. Page or filter claims by stable ID sequence, status, and local text query.',
         parameters: {
@@ -392,6 +391,7 @@ export class AvoArcAgent {
       },
       {
         name: 'journal_read',
+        strategic: true,
         label: 'Read hypothesis and evidence history',
         description: 'Inspect optional pre-experiment hypotheses, pending proposals, later evidence evaluations, and supervisor history. Confirmation records prediction agreement only; it does not install behavior.',
         parameters: {
@@ -409,6 +409,7 @@ export class AvoArcAgent {
       },
       {
         name: 'memory_update',
+        strategic: true,
         label: 'Curate one typed persistent-memory claim',
         description: 'Propose a hypothesis, confirm it with retrievable evidence, or create an evidence-backed contradiction/supersession while retaining the old claim.',
         parameters: {
@@ -434,6 +435,7 @@ export class AvoArcAgent {
       },
       {
         name: 'hypothesis_propose',
+        strategic: true,
         label: 'Persist a testable hypothesis before acting',
         description: 'Create a durable pre-experiment proposal with structured action predictions. This is optional; use it only when an evidence-linked record is useful.',
         parameters: {
@@ -469,6 +471,7 @@ export class AvoArcAgent {
       },
       {
         name: 'hypothesis_evaluate',
+        strategic: true,
         label: 'Check one hypothesis against later evidence',
         description: 'Compare a durable proposal with exact post-proposal action evidence. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
         parameters: {
@@ -485,7 +488,7 @@ export class AvoArcAgent {
       {
         name: 'finish',
         label: 'Finish the current run',
-        description: 'Explicitly finish after WIN, GAME_OVER, ERROR, action-budget exhaustion, or when no useful valid experiment remains. On GAME_OVER, choose either finish or the separate reset controller.',
+        description: 'Explicitly end the run after WIN, GAME_OVER, ERROR, action-budget exhaustion, or from ACTIVE. GAME_OVER and ERROR also permit the separate reset controller.',
         parameters: {
           type: 'object', required: ['summary'],
           properties: { summary: { type: 'string' } }, additionalProperties: false,
@@ -682,27 +685,29 @@ export class AvoArcAgent {
     const wasNew = !this.uniqueStates.has(evidence.observationContentHash);
     this.uniqueStates.add(evidence.observationContentHash);
 
-    this.supervisor.observe(evidence);
-    const knowledgeHints = this.knowledge.search('stall experiment action semantics', 3);
-    const stall = this.supervisor.status({
-      legalActions: this.frame.availableActions,
-      memory: this.memory.snapshot(),
-      knowledgeHints,
-    });
-
-    if (progressed) {
-      this.memory.merge({
-        provenStrategies: [`Evidence ${evidence.id}: ${action} produced objective progress to level ${this.frame.levelsCompleted}; state=${this.frame.state}.`],
+    let stall = null;
+    let supervisorText = '';
+    if (this.strategyEnabled) {
+      this.supervisor.observe(evidence);
+      const knowledgeHints = this.knowledge.search('stall experiment action semantics', 3);
+      stall = this.supervisor.status({
+        legalActions: this.frame.availableActions,
+        memory: this.memory.snapshot(),
+        knowledgeHints,
       });
+      if (progressed) {
+        this.memory.merge({
+          provenStrategies: [`Evidence ${evidence.id}: ${action} produced objective progress to level ${this.frame.levelsCompleted}; state=${this.frame.state}.`],
+        });
+      }
+      if (stall.stalled && !stall.repeated) {
+        this.memory.merge({ failedHypotheses: [`Supervisor detected ${stall.reason} at evidence ${evidence.id}.`] });
+        this.memory.recordSupervisor(stall);
+      }
+      supervisorText = stall.stalled
+        ? `\nSUPERVISOR_INTERVENTION ${stall.id}:\n${stall.directions.map((direction, index) => `${index + 1}. ${direction.rationale} Next: ${direction.nextExperiment}`).join('\n')}`
+        : '';
     }
-    if (stall.stalled && !stall.repeated) {
-      this.memory.merge({ failedHypotheses: [`Supervisor detected ${stall.reason} at evidence ${evidence.id}.`] });
-      this.memory.recordSupervisor(stall);
-    }
-
-    const supervisorText = stall.stalled
-      ? `\nSUPERVISOR_INTERVENTION ${stall.id}:\n${stall.directions.map((direction, index) => `${index + 1}. ${direction.rationale} Next: ${direction.nextExperiment}`).join('\n')}`
-      : '';
     return this.toolResult(
       `${this.describe(previousFrame, this.currentObservationRef)}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
       {
@@ -713,7 +718,7 @@ export class AvoArcAgent {
         progressed,
         novelState: wasNew,
         objective: this.objectiveState(),
-        stall,
+        ...(stall ? { stall } : {}),
         fullReset: kind === 'reset' ? this.frame.fullReset : false,
         episodeId: this.episodeId(),
         telemetry: this.commandTelemetry(),
@@ -1029,6 +1034,11 @@ export class AvoArcAgent {
   }
 
   withRelevantMemory(result, query = '', jsonType = null) {
+    if (!this.strategyEnabled) {
+      return jsonType
+        ? { ...result, text: JSON.stringify({ type: jsonType, ...result.details }) }
+        : result;
+    }
     const candidates = this.memory.relevantClaims({
       query: String(query || ''),
       state: this.frame?.state ?? null,
@@ -1072,45 +1082,35 @@ export class AvoArcAgent {
   }
 
   exposedTools() {
-    const enabled = new Set(effectiveAvoToolNames(this.workspace.mode));
-    const tools = this.tools().filter((tool) => enabled.has(tool.name));
-    if (tools.length !== enabled.size) {
-      throw new Error('initialized workspace mode cannot provide its exact tool set');
-    }
-    return tools;
+    return filterToolsForPolicy(this.tools(), this.workspace.mode, this.policyProfile);
   }
 
   systemPrompt() {
-    return `You are an autonomous agent for one ARC-AGI-3 game, running inside the official Pi agent loop.
-
-Operating contract:
-1. You control the whole long-horizon loop. Decide what prior memory, hypothesis records, failed attempts, and knowledge to consult; which direct environment experiment to run; when to preserve a testable hypothesis; and how to recover after incorrect assumptions.
-2. Use direct interaction with compact typed previews, exact referenced text grids, and currently legal gameplay actions as the primary ARC policy. When a delta is truncated or the shape changes, use trajectory_read after/region/diff before relying on missing cells. Build competing hypotheses, take the smallest discriminating action, observe the consequence, update durable state, and continue.
-3. Gameplay actions and the separate reset controller both consume environment actions. Use one act while uncertain; act_sequence may execute a tested 1–20 step plan but cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or execution failure. RESET may remain available when it is absent from frame gameplay affordances and may perform a full reset; trust the returned fullReset and episode evidence. Observation, memory curation, history inspection, and bounded scratch analysis do not consume environment actions. Do not replace direct interaction with a hand-coded game-specific solver.
-4. The hypothesis journal is optional. For a hypothesis worth preserving, call hypothesis_propose before the experiment with structured predictions; hypothesis_evaluate later accepts only its ID and exact post-proposal evidence. A confirmed entry means only that those predictions matched. It does not install behavior or prove improvement.
-5. Do not follow a rigid fixed workflow. Relevant typed memory claims may be surfaced automatically with their status and evidence refs; use memory_update to distinguish unverified proposals from evidence-backed confirmations or corrections. Consult full memory, journal history, knowledge, or scratch files only when useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
-6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
-7. Continue through every level while useful valid experiments remain. You may explicitly finish an active episode only when no useful valid experiment remains. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
-
-You have ARC interaction, domain knowledge, structured memory, an optional hypothesis/evidence journal, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
+    return policySystemPrompt(this?.policyProfile);
   }
 
   async run() {
     if (!this.frame) await this.initialize();
     const initialEvidence = this.currentObservationRef;
-    const initialMemory = this.memory.relevantClaims({
+    const initialMemory = this.strategyEnabled ? this.memory.relevantClaims({
       query: 'initial objective legal actions',
       state: this.frame.state,
       levelsCompleted: this.frame.levelsCompleted,
       availableActions: this.frame.availableActions,
-    }, this.config.memorySurfaceLimit ?? 4);
+    }, this.config.memorySurfaceLimit ?? 4) : [];
     this.memoryClaimsSurfaced += initialMemory.length;
-    const memoryText = initialMemory.length ? `\n\nRELEVANT_MEMORY ${JSON.stringify(initialMemory)}` : '';
-    const initialPrompt = `Solve game ${this.gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${this.describe(null, initialEvidence)}${memoryText}`;
+    const initialPrompt = policyInitialPrompt({
+      policyProfile: this.policyProfile,
+      gameId: this.gameId,
+      initialEvidence,
+      frameDescription: this.describe(null, initialEvidence),
+      relevantMemory: initialMemory,
+    });
     this.lastResult = await this.loop.run({
       systemPrompt: this.systemPrompt(),
       tools: this.exposedTools(),
       workspaceMode: this.workspace.mode,
+      policyProfile: this.policyProfile,
       initialPrompt,
       shouldStop: () => this.isDone(),
       runtimeStatus: () => this.runtimeStatus(),
@@ -1118,6 +1118,7 @@ You have ARC interaction, domain knowledge, structured memory, an optional hypot
     const forwardingLifecycle = await this.forwardingLifecycleTelemetry();
     return {
       gameId: this.gameId,
+      policyProfile: this.policyProfile,
       state: this.frame.state,
       levelsCompleted: this.frame.levelsCompleted,
       totalLevels: this.frame.totalLevels,

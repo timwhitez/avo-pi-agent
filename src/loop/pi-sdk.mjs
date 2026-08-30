@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
 
+import {
+  filterToolsForPolicy,
+  normalizePolicyProfile,
+  policySystemPrompt,
+} from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import {
   assertProviderCapabilities,
@@ -15,6 +20,13 @@ outer_turns={outerTurns}/{maxOuterTurns}
 terminal_reason={terminalReason}
 allowed_next={allowedNext}
 budget_policy=Action and turn budgets are ceilings. Finish when no useful valid experiment remains.`;
+const MINIMAL_RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
+state={state}
+environment_actions={environmentActions}/{maxActions}
+outer_turns={outerTurns}/{maxOuterTurns}
+terminal_reason={terminalReason}
+allowed_next={allowedNext}
+budget_policy=Action and turn budgets are ceilings, never targets to consume.`;
 export const RUNTIME_STATUS_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
   .update(RUNTIME_STATUS_TEMPLATE)
@@ -134,7 +146,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
 
   return {
     kind: 'pi-sdk',
-    async run({ systemPrompt, tools, initialPrompt, shouldStop, runtimeStatus, workspaceMode: initializedWorkspaceMode }) {
+    async run({
+      systemPrompt,
+      tools,
+      initialPrompt,
+      shouldStop,
+      runtimeStatus,
+      workspaceMode: initializedWorkspaceMode,
+      policyProfile: initializedPolicyProfile,
+    }) {
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
       }
@@ -144,6 +164,21 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }
       if (initializedWorkspaceMode && config.workspaceMode && initializedWorkspaceMode !== config.workspaceMode) {
         throw new Error('Pi production loop workspace mode differs from the initialized sandbox');
+      }
+      const policyProfile = normalizePolicyProfile(
+        initializedPolicyProfile || config.policyProfile,
+      );
+      if (initializedPolicyProfile
+          && normalizePolicyProfile(config.policyProfile) !== policyProfile) {
+        throw new Error('Pi production loop policy profile differs from runtime configuration');
+      }
+      if (initializedPolicyProfile) {
+        const permittedTools = filterToolsForPolicy(tools, workspaceMode, policyProfile);
+        if (canonicalJson(tools.map((tool) => tool.name))
+              !== canonicalJson(permittedTools.map((tool) => tool.name))
+            || systemPrompt !== policySystemPrompt(policyProfile)) {
+          throw new Error('Pi production loop prompt or tools differ from the initialized policy profile');
+        }
       }
       if (initializedWorkspaceMode && tools.some((tool) =>
         (workspaceMode === 'disabled' && tool.name.startsWith('workspace_'))
@@ -210,6 +245,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           shouldStop,
           outerTurns,
           maxOuterTurns: config.maxOuterTurns,
+          policyProfile,
           onEvent,
         }),
       });
@@ -239,6 +275,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           runtimeStatus,
           outerTurns,
           maxOuterTurns: config.maxOuterTurns,
+          policyProfile,
           onEvent,
           timestamp: Date.now() + outerTurns,
         });
@@ -455,7 +492,17 @@ function positiveEnvInt(name, fallback) {
   return parsed;
 }
 
-export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns }) {
+export function runtimeStatusTemplate(policyProfile) {
+  return normalizePolicyProfile(policyProfile) === 'minimal-v1'
+    ? MINIMAL_RUNTIME_STATUS_TEMPLATE
+    : RUNTIME_STATUS_TEMPLATE;
+}
+
+export function runtimeStatusTemplateSha256(policyProfile) {
+  return crypto.createHash('sha256').update(runtimeStatusTemplate(policyProfile)).digest('hex');
+}
+
+export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policyProfile }) {
   const value = {
     state: statusField(status?.state, 'state'),
     environmentActions: nonNegativeInteger(status?.environmentActions, 'environmentActions'),
@@ -468,7 +515,7 @@ export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns }) {
   if (value.environmentActions > value.maxActions || value.outerTurns > value.maxOuterTurns) {
     throw new Error('runtime status counters exceed their configured maxima');
   }
-  const text = RUNTIME_STATUS_TEMPLATE
+  const text = runtimeStatusTemplate(policyProfile)
     .replace('{state}', value.state)
     .replace('{environmentActions}', String(value.environmentActions))
     .replace('{maxActions}', String(value.maxActions))
@@ -492,6 +539,7 @@ export function prepareRuntimeStatusTurn({ message, context } = {}, {
   shouldStop,
   outerTurns,
   maxOuterTurns,
+  policyProfile,
   onEvent = () => {},
   timestamp = Date.now(),
 } = {}) {
@@ -505,6 +553,7 @@ export function prepareRuntimeStatusTurn({ message, context } = {}, {
         runtimeStatus,
         outerTurns,
         maxOuterTurns,
+        policyProfile,
         onEvent,
         timestamp,
       }),
@@ -516,13 +565,18 @@ function injectRuntimeStatus(messages, {
   runtimeStatus,
   outerTurns,
   maxOuterTurns,
+  policyProfile,
   onEvent,
   timestamp,
 }) {
-  const status = runtimeStatusMessage(runtimeStatus(), { outerTurns, maxOuterTurns });
+  const status = runtimeStatusMessage(runtimeStatus(), {
+    outerTurns,
+    maxOuterTurns,
+    policyProfile,
+  });
   onEvent({
     type: 'avo_runtime_status',
-    templateSha256: RUNTIME_STATUS_TEMPLATE_SHA256,
+    templateSha256: runtimeStatusTemplateSha256(policyProfile),
     status: status.value,
   });
   return replaceRuntimeStatus(messages, status.text, timestamp);
