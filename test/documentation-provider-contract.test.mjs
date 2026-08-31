@@ -101,7 +101,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#225[^\n]+\*\*closed\*\*[^\n]+PR #226[^\n]+merge commit `4fa3be0799c30ee76c21a68d54f73ee2483d409a`[^\n]+implementation\/review head `831f6a7d414aca168df5e22205a01088175a754e`/);
   assert.match(ledger, /#229[^\n]+\*\*closed\*\*[^\n]+PR #230[^\n]+merge commit `003b6ca0c135f3d32b958570dce1a43e341e9644`[^\n]+implementation\/review head `4055a96de06853e0f5933799984283102b420320`/);
   assert.match(ledger, /#233[^\n]+\*\*closed\*\*[^\n]+PR #234[^\n]+merge commit `ff90fdfeb8de02c30c230b646488114878296a1e`[^\n]+reviewed exact head `05fa4eb12a632db09e9ed88b37a12246d7dce37f`/);
-  assert.match(ledger, /#237[^\n]+\*\*closed\*\*[^\n]+PR #238[^\n]+merge commit `c1ae24f0233cdd2257f35efc88257441bbedf0b4`[^\n]+reviewed exact head `63038b593759068a48f69e16aadf6a0d44581a47`[^\n]+private runner stdout[^\n]+schema-valid `trajectory_read` values and sealed tool identities/);
+  assert.match(ledger, /#237[^\n]+\*\*closed\*\*[^\n]+PR #238[^\n]+merge commit `c1ae24f0233cdd2257f35efc88257441bbedf0b4`[^\n]+implementation commit `0c8cbaa49e39fa783a27e4877573a00e63b5b313`[^\n]+reviewed exact head `63038b593759068a48f69e16aadf6a0d44581a47`[^\n]+private runner stdout[^\n]+schema-valid `trajectory_read` values and sealed tool identities[^\n]+installed-Pi privacy adversarials[^\n]+actual 25-game `runPublic` handler[^\n]+\*\*459\/459\*\*/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
