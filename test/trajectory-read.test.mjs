@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { Type, validateToolCall } from '@earendil-works/pi-ai';
+
 import { inspectRunState } from '../src/benchmark/run-capsule.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import { EvidenceStore } from '../src/core/evidence-store.mjs';
-import { boundTranscript } from '../src/loop/pi-sdk.mjs';
+import { boundTranscript, piToolContract } from '../src/loop/pi-sdk.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
@@ -129,10 +131,35 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     assert.equal(defaultPage.startSequence, 1);
     assert.equal(defaultPage.events.length, 3);
     assert.ok(defaultPage.events.length <= 8);
-    await assert.rejects(
-      () => restartedTools.trajectory_read.execute({ ref: initialRef, startSequence: 1 }),
-      /accepts only one/,
+    const providerFilledCall = {
+      type: 'toolCall',
+      id: 'provider-filled-trajectory-read',
+      name: 'trajectory_read',
+      arguments: {
+        ref: actionRef,
+        startSequence: 1,
+        limit: 1,
+        part: 'after',
+        compareRef: initialRef,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+      },
+    };
+    const piTrajectoryTool = {
+      ...piToolContract(restartedTools.trajectory_read, Type),
+      execute: restartedTools.trajectory_read.execute,
+    };
+    const providerFilledResult = await piTrajectoryTool.execute(
+      validateToolCall([piTrajectoryTool], providerFilledCall),
     );
+    assert.deepEqual(
+      JSON.parse(providerFilledResult.text).observation.frame,
+      [[1, 0], [0, 0]],
+    );
+    assert.equal(providerFilledResult.details.evidenceRef, actionRef);
+    assert.equal(providerFilledResult.details.startSequence, null);
     const page = JSON.parse((await restartedTools.trajectory_read.execute({
       startSequence: 1,
       limit: 20,

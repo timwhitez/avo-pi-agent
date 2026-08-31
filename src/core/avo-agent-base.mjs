@@ -228,7 +228,7 @@ export class AvoArcAgent {
       {
         name: 'trajectory_read',
         label: 'Read exact durable trajectory evidence',
-        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid.',
+        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid. When ref is present it selects exact-ref mode and startSequence/limit are ignored.',
         parameters: {
           type: 'object',
           properties: {
@@ -952,10 +952,7 @@ export class AvoArcAgent {
     height,
   } = {}) {
     const hasRef = typeof ref === 'string' && ref.length > 0;
-    const hasSequence = startSequence !== undefined && startSequence !== null;
-    if (hasRef && hasSequence) {
-      throw new Error('trajectory_read accepts only one of ref or startSequence');
-    }
+    const hasSequence = !hasRef && startSequence !== undefined && startSequence !== null;
     const effectiveStartSequence = hasSequence ? startSequence : 1;
     const view = part ?? (hasRef ? 'event' : 'summary');
     if (!['summary', 'event', 'before', 'after', 'region', 'diff'].includes(view)) {
