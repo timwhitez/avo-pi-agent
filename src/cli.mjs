@@ -18,9 +18,14 @@ import {
   verifyRunCapsuleGameSet,
 } from './benchmark/run-capsule.mjs';
 import { AvoArcAgent } from './core/avo-agent.mjs';
+import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
-import { redactRuntimeObject, redactRuntimeSecrets } from './redaction.mjs';
+import {
+  privateToolFailureEvidence,
+  redactRuntimeObject,
+  redactRuntimeSecrets,
+} from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
 import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
 import {
@@ -207,7 +212,18 @@ async function runPublic(args) {
       let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
       let activeAttempt = null;
       let contextSequence = 0;
+      const pendingToolCalls = new Map();
+      const allowedToolNames = new Set(effectiveAvoToolNames(
+        gameConfig.workspaceMode,
+        gameConfig.policyProfile,
+      ));
       const onLoopEvent = (event) => {
+        const failure = privateToolFailureEvidence(pendingToolCalls, event, {
+          gameId,
+          versionedGameId,
+          attempt: activeAttempt,
+        }, process.env, allowedToolNames);
+        if (failure) process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(failure)}\n`);
         if (event.type === 'avo_runtime_status'
             || event.type === 'avo_context_compaction'
             || event.type === 'avo_provider_request') {
