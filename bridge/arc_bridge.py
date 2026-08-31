@@ -175,21 +175,24 @@ def total_levels_or_none(value: Any) -> int | None:
 
 
 def model_grid(raw_frame: Any) -> list[Any]:
-    """Convert the official one-layer frame container to the 2D grid contract."""
+    """Expose the final frame from an official action's temporal sequence."""
 
     frame = jsonable(raw_frame)
     if (
         isinstance(frame, list)
-        and len(frame) == 1
-        and isinstance(frame[0], list)
-        and frame[0]
-        and all(isinstance(row, list) for row in frame[0])
+        and frame
+        and all(
+            isinstance(candidate, list)
+            and candidate
+            and all(isinstance(row, list) for row in candidate)
+            for candidate in frame
+        )
     ):
-        frame = frame[0]
+        frame = frame[-1]
     if not isinstance(frame, list) or any(not isinstance(row, list) for row in frame):
-        raise ValueError("ARC frame must be a two-dimensional grid or one two-dimensional layer")
+        raise ValueError("ARC frame must be a two-dimensional grid or frame sequence")
     if any(any(isinstance(cell, (list, tuple, dict)) for cell in row) for row in frame):
-        raise ValueError("ARC frame must not contain nested cells or multiple layers")
+        raise ValueError("ARC frame must not contain nested cells")
     return frame
 
 
