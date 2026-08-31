@@ -99,6 +99,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#221[^\n]+\*\*closed\*\*[^\n]+PR #222[^\n]+merge commit `5387c2fc0d178e43602fe81bea716d0e2ea4a677`[^\n]+implementation\/review head `2e9b33b971a52831f56e23024164caeac555c7eb`/);
   assert.match(ledger, /#223[^\n]+maps to docs-only[^\n]+PR #224/);
   assert.match(ledger, /#225[^\n]+\*\*closed\*\*[^\n]+PR #226[^\n]+merge commit `4fa3be0799c30ee76c21a68d54f73ee2483d409a`[^\n]+implementation\/review head `831f6a7d414aca168df5e22205a01088175a754e`/);
+  assert.match(ledger, /#229[^\n]+\*\*open\*\*[^\n]+PR #230[^\n]+official `arc-agi` run schema declares `id` optional/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
@@ -112,6 +113,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /arc-tuning-baseline-r4-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+temporal multi-frame defect fixed by #216/);
   assert.match(ledger, /live query reports Issues and PRs both zero[^\n]+`gpt-5\.6-terra`[^\n]+reasoning effort `high`/);
   assert.match(ledger, /r1 reproduced the evidence-progress misclassification at 8 turns[^\n]+r2 failed closed at isolated-workspace preflight[^\n]+r3[^\n]+at 16 turns after 13 environment actions/);
-  assert.match(ledger, /arc-terra-tuning-minimal-r1-20260831` through `arc-terra-tuning-minimal-r4-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+r4 verified the #222 production repair[^\n]+model-stall outcome misclassification/);
+  assert.match(ledger, /arc-terra-tuning-minimal-r1-20260831` through `arc-terra-tuning-minimal-r5-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+r4 verified the #222 production repair[^\n]+model-stall outcome misclassification/);
+  assert.match(ledger, /r5 was a cold-start plan bound to exact main `93a8420b82cccc57743a9ea20ef730b1ae6be78e`[^\n]+parent failed closed/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
