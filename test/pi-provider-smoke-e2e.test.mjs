@@ -120,7 +120,8 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
     assert.equal(requests.length, 1, String(result.error));
     assert.equal(result.outerTurns, 1);
     assert.equal(result.exhaustedOuterTurns, false);
-    assert.match(String(result.error), /ended without a tool call/);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'assistant-no-tool');
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
@@ -178,7 +179,8 @@ test('installed Pi bounds repeated read-only tool turns without environment prog
     assert.equal(requests.length, 3);
     assert.equal(result.outerTurns, 3);
     assert.equal(result.exhaustedOuterTurns, false);
-    assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'repeated-tool-outcome');
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
@@ -266,7 +268,8 @@ test('installed Pi ignores varied params and hidden truncated tails for novelty'
   assert.equal(requests.length, 3);
   assert.equal(result.outerTurns, 3);
   assert.equal(result.exhaustedOuterTurns, false);
-  assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+  assert.equal(result.error, null);
+  assert.equal(result.terminationReason, 'repeated-tool-outcome');
 });
 
 test('installed Pi applies the outer-turn budget inside novel read-only loops', async () => {
@@ -277,7 +280,8 @@ test('installed Pi applies the outer-turn budget inside novel read-only loops', 
   assert.equal(requests.length, 3);
   assert.equal(result.outerTurns, 3);
   assert.equal(result.exhaustedOuterTurns, true);
-  assert.match(String(result.error), /outer-turn budget exhausted at 3 turns/);
+  assert.equal(result.error, null);
+  assert.equal(result.terminationReason, 'outer-turn-budget');
   assert.deepEqual(requests.slice(1).map((request) => (
     /outer_turns=(\d+)\/3/.exec(JSON.stringify(request.input))?.[1]
   )), ['1', '2']);

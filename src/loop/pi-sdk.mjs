@@ -393,13 +393,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       const messages = agent.state.messages;
       return {
         messages,
-        error: agent.state.errorMessage || (noToolTurn
-          ? 'Pi assistant turn ended without a tool call before the ARC run reached a terminal condition'
+        error: agent.state.errorMessage || null,
+        terminationReason: noToolTurn
+          ? 'assistant-no-tool'
           : innerTurnNoActionLimitReached
-          ? `Pi inner tool loop produced no environment action or novel tool outcome in ${maxNoActionInnerTurns} consecutive assistant tool turns before the ARC run reached a terminal condition`
-          : exhaustedOuterTurns
-          ? `Pi outer-turn budget exhausted at ${outerTurns} turns before the ARC run reached a terminal condition`
-          : null),
+            ? 'repeated-tool-outcome'
+            : exhaustedOuterTurns
+              ? 'outer-turn-budget'
+              : null,
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,
