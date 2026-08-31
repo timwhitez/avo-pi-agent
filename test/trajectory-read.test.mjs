@@ -121,7 +121,18 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     const restarted = new AvoArcAgent({
       gameId: 'trajectory-read-v1', environment, loop: inertLoop, config,
     });
-    const restartedTools = Object.fromEntries(restarted.tools().map((tool) => [tool.name, tool]));
+    const restartedTools = Object.fromEntries(restarted.exposedTools().map((tool) => [tool.name, tool]));
+    const defaultPageResult = await restartedTools.trajectory_read.execute({});
+    const defaultPage = JSON.parse(defaultPageResult.text);
+    assert.equal(defaultPageResult.details.startSequence, 1);
+    assert.equal(defaultPageResult.details.part, 'summary');
+    assert.equal(defaultPage.startSequence, 1);
+    assert.equal(defaultPage.events.length, 3);
+    assert.ok(defaultPage.events.length <= 8);
+    await assert.rejects(
+      () => restartedTools.trajectory_read.execute({ ref: initialRef, startSequence: 1 }),
+      /accepts only one/,
+    );
     const page = JSON.parse((await restartedTools.trajectory_read.execute({
       startSequence: 1,
       limit: 20,

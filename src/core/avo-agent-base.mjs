@@ -943,7 +943,7 @@ export class AvoArcAgent {
   readTrajectory({
     ref,
     startSequence,
-    limit = 10,
+    limit = 8,
     part,
     compareRef,
     x,
@@ -953,9 +953,10 @@ export class AvoArcAgent {
   } = {}) {
     const hasRef = typeof ref === 'string' && ref.length > 0;
     const hasSequence = startSequence !== undefined && startSequence !== null;
-    if (hasRef === hasSequence) {
-      throw new Error('trajectory_read requires exactly one of ref or startSequence');
+    if (hasRef && hasSequence) {
+      throw new Error('trajectory_read accepts only one of ref or startSequence');
     }
+    const effectiveStartSequence = hasSequence ? startSequence : 1;
     const view = part ?? (hasRef ? 'event' : 'summary');
     if (!['summary', 'event', 'before', 'after', 'region', 'diff'].includes(view)) {
       throw new Error('trajectory_read part is invalid');
@@ -982,18 +983,18 @@ export class AvoArcAgent {
           || (view === 'after' && Array.isArray(event.observation?.frame));
       }
     } else {
-      if (!Number.isSafeInteger(startSequence) || startSequence < 1) {
+      if (!Number.isSafeInteger(effectiveStartSequence) || effectiveStartSequence < 1) {
         throw new Error('trajectory_read startSequence must be a positive safe integer');
       }
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
         throw new Error('trajectory_read limit must be an integer from 1 through 20');
       }
       const events = this.evidenceLedger
-        .filter((entry) => entry.sequence >= startSequence)
+        .filter((entry) => entry.sequence >= effectiveStartSequence)
         .slice(0, limit);
       value = {
         trajectory: this.trajectoryEvidence(),
-        startSequence,
+        startSequence: effectiveStartSequence,
         events: events.map((event) => trajectoryView(event, view)),
         nextSequence: events.length === limit ? events.at(-1).sequence + 1 : null,
       };
@@ -1005,7 +1006,7 @@ export class AvoArcAgent {
     return this.toolResult(text, {
       evidenceRef: hasRef ? ref : null,
       contextExactEvidence,
-      startSequence: hasSequence ? startSequence : null,
+      startSequence: hasRef ? null : effectiveStartSequence,
       part: view,
       characters: text.length,
     });
