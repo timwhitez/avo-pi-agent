@@ -1170,6 +1170,7 @@ export class AvoArcAgent {
       won: isWin(this.frame),
       loop: this.loop.kind,
       error: this.executionError ?? this.lastResult?.error ?? null,
+      terminationReason: this.lastResult?.terminationReason ?? null,
       outerTurns: this.lastResult?.outerTurns ?? null,
       mechanismMetrics,
       hypothesisJournal: {

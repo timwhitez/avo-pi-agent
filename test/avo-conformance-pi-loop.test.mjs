@@ -16,7 +16,7 @@ test('production Pi loop uses official SDK and sequential tools', () => {
   assert.match(source, /maxRetries: streamMaxRetries/);
 });
 
-test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustion', () => {
+test('Pi wrapper continues dynamically and records outer-turn exhaustion', () => {
   assert.doesNotMatch(source, /agent\.followUp\(/);
   assert.match(source, /injectRuntimeStatus\(agent\.state\.messages/);
   assert.match(source, /prepareNextTurnWithContext:.*prepareRuntimeStatusTurn/s);
@@ -26,7 +26,7 @@ test('Pi wrapper continues dynamically and fails visibly on outer-turn exhaustio
   assert.match(source, /TRANSIENT_SESSION_ERROR/);
   assert.match(source, /AVO_TRANSIENT_TURN_RECOVERIES/);
   assert.match(source, /exhaustedOuterTurns/);
-  assert.match(source, /outer-turn budget exhausted/);
+  assert.match(source, /'outer-turn-budget'/);
   assert.doesNotMatch(source, /portable-pi/);
   assert.match(cliSource, /avo_runtime_status.*avo_context_compaction/s);
   assert.match(cliSource, /\[avo-context\]/);

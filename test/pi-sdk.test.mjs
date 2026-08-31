@@ -235,7 +235,8 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     assert.equal(statusEvents.length, 1000);
     assert.ok(statusEvents.every((event) => event.templateSha256 === module.RUNTIME_STATUS_TEMPLATE_SHA256));
     assert.equal(result.exhaustedOuterTurns, true);
-    assert.match(result.error, /outer-turn budget exhausted/);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'outer-turn-budget');
     assert.deepEqual({
       modelCalls: result.mechanismMetrics.modelCalls,
       inputTokens: result.mechanismMetrics.inputTokens,

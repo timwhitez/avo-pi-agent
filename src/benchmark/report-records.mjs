@@ -14,6 +14,11 @@ const TRAJECTORY_EVIDENCE_SCHEMA = 'avo.trajectory-evidence.v1';
 const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
 const SAFE_EVIDENCE_REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 const MAX_SEQUENCE_ACTIONS = 20;
+const MODEL_TERMINATION_REASONS = new Set([
+  'assistant-no-tool',
+  'outer-turn-budget',
+  'repeated-tool-outcome',
+]);
 const SEQUENCE_TELEMETRY_FIELDS = Object.freeze([
   'actionSequences',
   'sequenceActionsRequested',
@@ -170,6 +175,18 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   if (won && totalLevels !== null && levelsCompleted !== totalLevels) {
     invalidRecord(sourcePath, 'won requires levelsCompleted to equal known totalLevels');
   }
+  const error = optionalString(value.error, 'error', sourcePath);
+  const terminationAliases = ownValues(value, ['terminationReason', 'termination_reason']);
+  const normalizedTerminationReasons = terminationAliases.map((candidate) => (
+    normalizeTerminationReason(candidate, sourcePath)
+  ));
+  if (normalizedTerminationReasons.some((candidate) => candidate !== normalizedTerminationReasons[0])) {
+    invalidRecord(sourcePath, 'terminationReason aliases disagree');
+  }
+  const terminationReason = normalizedTerminationReasons[0] ?? null;
+  if (terminationReason !== null && (error !== null || won)) {
+    invalidRecord(sourcePath, 'terminationReason contradicts an error or winning outcome');
+  }
   const executions = normalizeExecutions(value.executions, versionedGameId, sourcePath);
   const trajectoryEvidence = normalizeTrajectoryEvidence(
     firstOwn(value, ['trajectoryEvidence', 'trajectory_evidence']),
@@ -220,7 +237,8 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     ...memoryTelemetry,
     episodeId,
     won,
-    error: optionalString(value.error, 'error', sourcePath),
+    error,
+    terminationReason,
     loop: optionalString(value.loop, 'loop', sourcePath),
     executions,
     trajectoryEvidence,
@@ -724,6 +742,14 @@ function reportedNullableCount(values, field, sourcePath) {
 function optionalString(value, field, sourcePath) {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') invalidRecord(sourcePath, `${field} must be a string when present`);
+  return value;
+}
+
+function normalizeTerminationReason(value, sourcePath) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !MODEL_TERMINATION_REASONS.has(value)) {
+    invalidRecord(sourcePath, `terminationReason is unknown: ${JSON.stringify(value)}`);
+  }
   return value;
 }
 

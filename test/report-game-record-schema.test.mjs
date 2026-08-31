@@ -43,6 +43,36 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
   });
 });
 
+test('preserves only consistent model termination reasons', () => {
+  assert.equal(normalizeGameRecord(valid({
+    termination_reason: 'repeated-tool-outcome',
+  })).terminationReason, 'repeated-tool-outcome');
+  assert.throws(
+    () => normalizeGameRecord(valid({ terminationReason: 'unknown-stop' })),
+    /terminationReason is unknown/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ terminationReason: '' })),
+    /terminationReason is unknown/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ terminationReason: '', termination_reason: null })),
+    /terminationReason is unknown/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      error: 'provider failed', terminationReason: 'assistant-no-tool',
+    })),
+    /contradicts an error or winning outcome/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({
+      state: 'WIN', won: true, levelsCompleted: 3, terminationReason: 'outer-turn-budget',
+    })),
+    /contradicts an error or winning outcome/,
+  );
+});
+
 test('preserves controller telemetry and validates total environment-action accounting', () => {
   const record = normalizeGameRecord(valid({
     actions: 3,

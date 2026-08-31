@@ -120,7 +120,57 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
     assert.equal(requests.length, 1, String(result.error));
     assert.equal(result.outerTurns, 1);
     assert.equal(result.exhaustedOuterTurns, false);
-    assert.match(String(result.error), /ended without a tool call/);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'assistant-no-tool');
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
+test('installed Pi keeps provider failures distinct from model termination', async () => {
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      error: { message: 'provider rejected request', type: 'invalid_request_error' },
+    }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Respond once.',
+      initialPrompt: 'Use the tool.',
+      tools: [{
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'unused', details: {} }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    assert.match(String(result.error), /provider rejected request/);
+    assert.equal(result.terminationReason, null);
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
@@ -178,7 +228,8 @@ test('installed Pi bounds repeated read-only tool turns without environment prog
     assert.equal(requests.length, 3);
     assert.equal(result.outerTurns, 3);
     assert.equal(result.exhaustedOuterTurns, false);
-    assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'repeated-tool-outcome');
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
@@ -266,7 +317,8 @@ test('installed Pi ignores varied params and hidden truncated tails for novelty'
   assert.equal(requests.length, 3);
   assert.equal(result.outerTurns, 3);
   assert.equal(result.exhaustedOuterTurns, false);
-  assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+  assert.equal(result.error, null);
+  assert.equal(result.terminationReason, 'repeated-tool-outcome');
 });
 
 test('installed Pi applies the outer-turn budget inside novel read-only loops', async () => {
@@ -277,7 +329,8 @@ test('installed Pi applies the outer-turn budget inside novel read-only loops', 
   assert.equal(requests.length, 3);
   assert.equal(result.outerTurns, 3);
   assert.equal(result.exhaustedOuterTurns, true);
-  assert.match(String(result.error), /outer-turn budget exhausted at 3 turns/);
+  assert.equal(result.error, null);
+  assert.equal(result.terminationReason, 'outer-turn-budget');
   assert.deepEqual(requests.slice(1).map((request) => (
     /outer_turns=(\d+)\/3/.exec(JSON.stringify(request.input))?.[1]
   )), ['1', '2']);
