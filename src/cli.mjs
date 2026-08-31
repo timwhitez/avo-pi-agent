@@ -186,7 +186,7 @@ async function runPublic(args) {
       console.log(`[resume] ${resumedRecords.size} completed game checkpoint(s) loaded from ${path.relative(process.cwd(), resumeDir)}`);
     }
 
-    const runOneGame = async (index, info, env, initiallyOpen = false) => {
+    const runOneGame = async (index, info, openEnvironment) => {
       const gameId = String(info.game_id).split('-')[0];
       const versionedGameId = String(info.game_id);
       const ordinal = index + 1;
@@ -279,7 +279,16 @@ async function runPublic(args) {
             maxActions: remainingActions,
             maxOuterTurns: remainingOuterTurns,
           };
-          if (attempt > 1 || !initiallyOpen) await env.open(versionedGameId);
+          let env;
+          try {
+            env = await openEnvironment(versionedGameId);
+          } catch (error) {
+            if (attempt >= maxAttempts) throw error;
+            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
+            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(error?.message || error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
+            await sleep(delayMs);
+            continue;
+          }
           const loop = await createPiSdkLoop(attemptConfig, { onEvent: onLoopEvent });
           const agent = new AvoArcAgent({
             gameId,
@@ -360,21 +369,25 @@ async function runPublic(args) {
     })();
     if (concurrency === 1) {
       for (let index = 0; index < selected.length; index += 1) {
-        await runOneGame(index, selected[index], environment);
+        await runOneGame(index, selected[index], async (gameId) => {
+          await environment.open(gameId);
+          return environment;
+        });
       }
     } else {
       console.log(`[concurrency] running up to ${concurrency} games in parallel on one Arcade session`);
       const settled = await runWithConcurrency(selected.map((info, index) => async () => {
         const gameId = String(info.game_id).split('-')[0];
         if (resumedRecords.has(gameId)) {
-          await runOneGame(index, info, environment);
+          await runOneGame(index, info, async () => environment);
           return;
         }
-        const env = await environment.openTracked(
-          String(info.game_id),
-          `game-${index}-${gameId}`,
-        );
-        await runOneGame(index, info, env, true);
+        let env = null;
+        await runOneGame(index, info, async (versionedGameId) => {
+          if (env) await env.open(versionedGameId);
+          else env = await environment.openTracked(versionedGameId, `game-${index}-${gameId}`);
+          return env;
+        });
       }), concurrency);
       const failure = settled.find((item) => item?.error);
       if (failure) throw failure.error;
