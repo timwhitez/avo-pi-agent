@@ -178,15 +178,12 @@ export function normalizeGameRecord(value, sourcePath = '$') {
   const error = optionalString(value.error, 'error', sourcePath);
   const terminationAliases = ownValues(value, ['terminationReason', 'termination_reason']);
   const normalizedTerminationReasons = terminationAliases.map((candidate) => (
-    optionalString(candidate, 'terminationReason', sourcePath)
+    normalizeTerminationReason(candidate, sourcePath)
   ));
   if (normalizedTerminationReasons.some((candidate) => candidate !== normalizedTerminationReasons[0])) {
     invalidRecord(sourcePath, 'terminationReason aliases disagree');
   }
   const terminationReason = normalizedTerminationReasons[0] ?? null;
-  if (terminationReason !== null && !MODEL_TERMINATION_REASONS.has(terminationReason)) {
-    invalidRecord(sourcePath, `terminationReason is unknown: ${JSON.stringify(terminationReason)}`);
-  }
   if (terminationReason !== null && (error !== null || won)) {
     invalidRecord(sourcePath, 'terminationReason contradicts an error or winning outcome');
   }
@@ -745,6 +742,14 @@ function reportedNullableCount(values, field, sourcePath) {
 function optionalString(value, field, sourcePath) {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') invalidRecord(sourcePath, `${field} must be a string when present`);
+  return value;
+}
+
+function normalizeTerminationReason(value, sourcePath) {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !MODEL_TERMINATION_REASONS.has(value)) {
+    invalidRecord(sourcePath, `terminationReason is unknown: ${JSON.stringify(value)}`);
+  }
   return value;
 }
 

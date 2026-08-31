@@ -52,6 +52,14 @@ test('preserves only consistent model termination reasons', () => {
     /terminationReason is unknown/,
   );
   assert.throws(
+    () => normalizeGameRecord(valid({ terminationReason: '' })),
+    /terminationReason is unknown/,
+  );
+  assert.throws(
+    () => normalizeGameRecord(valid({ terminationReason: '', termination_reason: null })),
+    /terminationReason is unknown/,
+  );
+  assert.throws(
     () => normalizeGameRecord(valid({
       error: 'provider failed', terminationReason: 'assistant-no-tool',
     })),
