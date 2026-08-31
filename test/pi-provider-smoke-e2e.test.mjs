@@ -176,7 +176,7 @@ test('installed Pi bounds repeated read-only tool turns without environment prog
       }),
     });
     assert.equal(requests.length, 3);
-    assert.equal(result.outerTurns, 1);
+    assert.equal(result.outerTurns, 3);
     assert.equal(result.exhaustedOuterTurns, false);
     assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
   } finally {
@@ -256,6 +256,97 @@ test('installed Pi lets novel read-only outcomes reach an environment action', a
     server.close();
   }
 });
+
+test('installed Pi ignores varied params and hidden truncated tails for novelty', async () => {
+  const { requests, result } = await runReadOnlyScenario({
+    maxOuterTurns: 20,
+    maxToolResultChars: 10,
+    textFor: (index) => `same-view:${index}`,
+  });
+  assert.equal(requests.length, 3);
+  assert.equal(result.outerTurns, 3);
+  assert.equal(result.exhaustedOuterTurns, false);
+  assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+});
+
+test('installed Pi applies the outer-turn budget inside novel read-only loops', async () => {
+  const { requests, result } = await runReadOnlyScenario({
+    maxOuterTurns: 3,
+    textFor: (index) => `unique visible state ${index}`,
+  });
+  assert.equal(requests.length, 3);
+  assert.equal(result.outerTurns, 3);
+  assert.equal(result.exhaustedOuterTurns, true);
+  assert.match(String(result.error), /outer-turn budget exhausted at 3 turns/);
+});
+
+async function runReadOnlyScenario({ textFor, maxOuterTurns, maxToolResultChars = null }) {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const index = requests.length;
+    sendToolCall(response, {
+      responseId: `resp_read_${index}`,
+      itemId: `fc_read_${index}`,
+      callId: `call_read_${index}`,
+      name: 'knowledge_read',
+      argumentsJson: JSON.stringify({ query: `query-${index}` }),
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  const previousMaxChars = process.env.AVO_TOOL_RESULT_MAX_CHARS;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  if (maxToolResultChars !== null) {
+    process.env.AVO_TOOL_RESULT_MAX_CHARS = String(maxToolResultChars);
+  }
+  try {
+    let reads = 0;
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      stallWindow: 2,
+      maxOuterTurns,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Use read-only tools until useful evidence is exhausted.',
+      initialPrompt: 'Inspect evidence.',
+      tools: [{
+        name: 'knowledge_read', label: 'Read', description: 'Read evidence.',
+        parameters: {
+          type: 'object', required: ['query'], additionalProperties: false,
+          properties: { query: { type: 'string' } },
+        },
+        execute: async () => ({
+          text: textFor(++reads), details: {}, terminate: false,
+        }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    return { requests, result };
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    if (previousMaxChars === undefined) delete process.env.AVO_TOOL_RESULT_MAX_CHARS;
+    else process.env.AVO_TOOL_RESULT_MAX_CHARS = previousMaxChars;
+    server.close();
+  }
+}
 
 function sendToolCall(response, {
   responseId,

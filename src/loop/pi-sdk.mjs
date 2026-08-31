@@ -249,15 +249,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           const result = await tool.execute(params);
           let text = String(result.text ?? '');
           let details = result.details ?? {};
-          const outcome = crypto.createHash('sha256').update(canonicalJson({
-            toolName: tool.name,
-            params,
-            text,
-          })).digest('hex');
-          if (!seenToolOutcomes.has(outcome)) {
-            seenToolOutcomes.add(outcome);
-            novelToolOutcomes += 1;
-          }
           if (text.length > maxToolResultChars) {
             const originalChars = text.length;
             const notice = TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE
@@ -274,6 +265,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
               latestEvidenceRef: String(result.details?.evidenceRef || '') || null,
             });
             details = { ...details, contextTruncated: true };
+          }
+          const outcome = crypto.createHash('sha256').update(canonicalJson({
+            toolName: tool.name,
+            text,
+          })).digest('hex');
+          if (!seenToolOutcomes.has(outcome)) {
+            seenToolOutcomes.add(outcome);
+            novelToolOutcomes += 1;
           }
           return {
             content: [{ type: 'text', text }],
@@ -293,6 +292,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       };
 
       let outerTurns = 1;
+      let assistantTurns = 0;
       const maxNoActionInnerTurns = Number.isInteger(config.stallWindow) && config.stallWindow >= 2
         ? config.stallWindow
         : 8;
@@ -314,7 +314,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
         shouldStopAfterTurn: async ({ message }) => {
+          assistantTurns += 1;
+          outerTurns = Math.max(outerTurns, assistantTurns);
           if (shouldStop()) return true;
+          if (outerTurns >= config.maxOuterTurns) return true;
           if (!assistantTurnHasToolCall(message)) return false;
           const environmentActions = runtimeEnvironmentActions(runtimeStatus());
           if (environmentActions > lastEnvironmentActions) {
@@ -375,8 +378,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           onEvent: emitEvent,
           timestamp: Date.now() + outerTurns,
         });
+        const turnsBeforeContinue = outerTurns;
         await agent.continue();
-        outerTurns += 1;
+        outerTurns = Math.max(outerTurns, turnsBeforeContinue + 1);
         noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
