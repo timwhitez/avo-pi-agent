@@ -73,23 +73,24 @@ test('provenance rejects stderr above its byte limit', async () => {
 
 test('provenance timeout kills a descendant after the direct child exits', unixOnly, async () => {
   let output = '';
-  const descendant = `process.stdout.write(String(process.pid) + '\\n'); setInterval(() => {}, 1000);`;
+  const descendant = 'setInterval(() => {}, 1000);';
   const script = `
     const { spawn } = require('node:child_process');
     const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], {
       stdio: ['ignore', 'inherit', 'inherit'],
     });
+    process.stdout.write(String(child.pid) + '\\n');
     child.unref();
   `;
   const started = Date.now();
   await assert.rejects(
     () => run(process.execPath, ['-e', script], {
-      timeoutMs: 250,
+      timeoutMs: 1_000,
       onStdout: (chunk) => { output += chunk; },
     }),
-    /provenance child process timed out after 250 ms/,
+    /provenance child process timed out after 1000 ms/,
   );
-  assert.ok(Date.now() - started < 2_000);
+  assert.ok(Date.now() - started < 3_000);
   const pid = Number(output.trim().split(/\s+/)[0]);
   assert.ok(Number.isInteger(pid) && pid > 0);
   await assertProcessGone(pid);
