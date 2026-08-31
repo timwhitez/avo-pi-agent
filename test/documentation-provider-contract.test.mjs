@@ -83,13 +83,15 @@ test('README tool inventory is generated from the sealed production profiles', (
   const ledger = read('issues.md');
   assert.match(ledger, /^# Benchmark and Harness Audit:/m);
   assert.match(ledger, /^## Live remediation ledger$/m);
-  assert.match(ledger, /Issues audited: \*\*18\/18\*\*\. \*\*0 remain open\.\*\*/);
+  assert.match(ledger, /Original audit Issues: \*\*18\/18\*\*/);
+  assert.match(ledger, /Current benchmark follow-up:.*#203.*PR #204/);
+  assert.match(ledger, /runtime commit `11a9e1302df07bea8289d7227a4c7e2b5a071261`/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
   assert.match(ledger, /\| #180 \|[^\n]+#201\]/);
   assert.doesNotMatch(ledger, /Open Draft PRs:/);
   assert.doesNotMatch(ledger, /the Draft PR remains unmerged|both Drafts unmerged|with Drafts unmerged|exact-head approval remains required/);
-  assert.match(ledger, /Public benchmark: \*\*not run\*\*/);
+  assert.match(ledger, /Public benchmark: no valid post-remediation result yet\./);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });

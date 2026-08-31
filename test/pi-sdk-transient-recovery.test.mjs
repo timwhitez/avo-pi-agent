@@ -35,7 +35,10 @@ async function loadLoopWith(script) {
         const plan = globalThis.__avoPlan;
         const step = plan.steps[Math.min(plan.continues, plan.steps.length - 1)];
         plan.continues += 1;
-        if (step) this.state.errorMessage = step;
+        if (step === '__NO_TOOL__') {
+          this.state.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'I am done.' }] });
+          this.state.errorMessage = undefined;
+        } else if (step) this.state.errorMessage = step;
         else this.state.errorMessage = undefined;
       }
     }
@@ -148,6 +151,13 @@ test('non-transient session errors still end the run with the error preserved', 
   ], 5);
   assert.match(String(result.error), /No tool call found/);
   assert.equal(result.transientRecoveries, 0);
+});
+
+test('assistant turns without a tool call fail closed instead of consuming the outer-turn budget', async () => {
+  const { result, continues } = await runLoop(['__NO_TOOL__'], 20);
+  assert.equal(continues, 1);
+  assert.match(String(result.error), /ended without a tool call/);
+  assert.equal(result.exhaustedOuterTurns, false);
 });
 
 test('recovery budget is bounded by AVO_TRANSIENT_TURN_RECOVERIES', async () => {

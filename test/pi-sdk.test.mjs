@@ -61,7 +61,10 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
           globalThis.__avoFakePi.continues += 1;
           this.state.messages.push({
             role: 'assistant',
-            content: [{ type: 'text', text: 'bounded response ' + globalThis.__avoFakePi.continues }],
+            content: [{
+              type: 'toolCall', id: 'continue-' + globalThis.__avoFakePi.continues,
+              name: 'act', arguments: { action: 'ACTION1' },
+            }],
             timestamp: globalThis.__avoFakePi.continues + 1,
           });
         }
@@ -112,7 +115,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
               await options.fetch('data:text/plain,ok');
               return {
                 role: 'assistant',
-                content: [{ type: 'text', text: 'initial response' }],
+                content: [{ type: 'toolCall', id: 'call-1', name: 'act', arguments: { action: 'ACTION1' } }],
                 usage: {
                   input: 10, output: 4, cacheRead: 0, cacheWrite: 0,
                   reasoning: 2, totalTokens: 14,

@@ -7,7 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { once } from 'node:events';
 
-import { providerEnvironment } from './support/provider.mjs';
+import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
+import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 
 test('installed Pi adapter proves the full production schema and 16K tail over local Responses SSE', async () => {
   const requests = [];
@@ -76,6 +77,57 @@ test('installed Pi adapter proves the full production schema and 16K tail over l
   }
 });
 
+test('installed Pi stops after a nonterminal text-only Responses turn', async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    sendTextResponse(response, { responseId: 'resp_text_only', itemId: 'msg_text_only', text: 'No tool call.' });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Respond once.',
+      initialPrompt: 'Do not call a tool.',
+      tools: [{
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'unused', details: {} }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    assert.equal(requests.length, 1, String(result.error));
+    assert.equal(result.outerTurns, 1);
+    assert.equal(result.exhaustedOuterTurns, false);
+    assert.match(String(result.error), /ended without a tool call/);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
 function sendToolCall(response, {
   responseId,
   itemId,
@@ -95,6 +147,33 @@ function sendToolCall(response, {
     { type: 'response.created', response: { id: responseId } },
     { type: 'response.output_item.added', output_index: 0, item },
     { type: 'response.function_call_arguments.done', output_index: 0, item_id: itemId, arguments: argumentsJson },
+    { type: 'response.output_item.done', output_index: 0, item },
+    {
+      type: 'response.completed',
+      response: {
+        id: responseId,
+        status: 'completed',
+        output: [item],
+        usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+      },
+    },
+  ];
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
+}
+
+function sendTextResponse(response, { responseId, itemId, text }) {
+  const item = {
+    type: 'message',
+    id: itemId,
+    role: 'assistant',
+    status: 'completed',
+    content: [{ type: 'output_text', text }],
+  };
+  const events = [
+    { type: 'response.created', response: { id: responseId } },
+    { type: 'response.output_item.added', output_index: 0, item },
+    { type: 'response.output_text.delta', output_index: 0, delta: text },
     { type: 'response.output_item.done', output_index: 0, item },
     {
       type: 'response.completed',

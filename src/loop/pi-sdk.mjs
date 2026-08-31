@@ -307,6 +307,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       });
       agent.subscribe(emitEvent);
       await agent.prompt(initialPrompt);
+      let noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
       // Provider-side stream drops surface as session errors. Recovering the
       // turn in place keeps every prior action; a whole-game retry would
       // replay them all. Only an explicit transient allowlist recovers, and
@@ -326,7 +327,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           if (cooldownMs > 0) await sleep(cooldownMs);
           agent.state.errorMessage = undefined;
         }
-        if (shouldStop() || outerTurns >= config.maxOuterTurns) break;
+        if (shouldStop() || noToolTurn || outerTurns >= config.maxOuterTurns) break;
         agent.state.messages = injectRuntimeStatus(agent.state.messages, {
           runtimeStatus,
           outerTurns,
@@ -337,12 +338,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         });
         await agent.continue();
         outerTurns += 1;
+        noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       const messages = agent.state.messages;
       return {
         messages,
-        error: agent.state.errorMessage || (exhaustedOuterTurns
+        error: agent.state.errorMessage || (noToolTurn
+          ? 'Pi assistant turn ended without a tool call before the ARC run reached a terminal condition'
+          : exhaustedOuterTurns
           ? `Pi outer-turn budget exhausted at ${outerTurns} turns before the ARC run reached a terminal condition`
           : null),
         outerTurns,
@@ -358,6 +362,17 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }
     },
   };
+}
+
+function latestAssistantTurnHasNoToolCall(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'assistant') continue;
+    const content = Array.isArray(message.content) ? message.content : [];
+    return !content.some((block) => block?.type === 'toolCall');
+  }
+  return false;
 }
 
 export function createRunTelemetry() {
