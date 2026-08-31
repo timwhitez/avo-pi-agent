@@ -155,6 +155,17 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
+        if (frame.gameId === 'g25-v1') {
+          completedGamePrompts += 1;
+          this.state.messages.push({
+            role: 'assistant',
+            content: [{ type: 'text', text: 'No further useful action.' }],
+          });
+          if (process.env.AVO_DEBUG === 'contract-mutate-after-child') {
+            fs.appendFileSync('src/config.mjs', '\n// post-child contract mutation\n');
+          }
+          return;
+        }
         if (frame.gameId === 'g01-v1') {
           if (frame.state !== 'GAME_OVER' || frame.availableActions.includes('RESET')) {
             throw new Error('reset contract fixture must begin GAME_OVER without RESET gameplay affordance');
@@ -726,8 +737,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
-  assert.match(result.stdout, /"wins": 25/);
-  assert.match(result.stdout, /"officialScore": 100/);
+  assert.match(result.stdout, /"wins": 24/);
+  assert.match(result.stdout, /"officialScore": 0/);
   const contextRecords = result.stdout.split('\n')
     .filter((line) => line.startsWith('[avo-context] '))
     .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
@@ -767,11 +778,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.scorecardEvidence.length, 1);
   assert.equal(report.scorecardEvidence[0].gameCount, 25);
   assert.equal(report.scorecardEvidence[0].executionCount, 28);
-  assert.equal(report.scorecardEvidence[0].totalLevelsCompleted, 50);
+  assert.equal(report.scorecardEvidence[0].totalLevelsCompleted, 48);
   assert.equal(report.scorecardEvidence[0].totalLevels, 50);
   assert.equal(report.schemaVersion, 2);
   assert.equal(report.config.policyProfile, 'minimal-v1');
-  assert.equal(report.summary.totalLevelsCompleted, 50);
+  assert.equal(report.summary.totalLevelsCompleted, 48);
   assert.equal(report.summary.totalLevels, 50);
   assert.equal(report.results[0].totalLevels, 2);
   assert.equal(report.results[0].resets, 1);
@@ -793,8 +804,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.scorecardEvidence[0].startedAt, '2026-08-30T00:00:00.000Z');
   assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) >= scorecardObservationNotBefore);
   assert.ok(Date.parse(report.scorecardEvidence[0].observedAt) <= Date.parse(report.createdAt));
-  assert.equal(report.aggregateScorecard.score, 100);
-  assert.equal(report.summary.allWon, true);
+  assert.equal(report.aggregateScorecard.score, 0);
+  assert.equal(report.summary.allWon, false);
+  assert.equal(report.results[24].terminationReason, 'assistant-no-tool');
   assert.equal(report.results[0].versionedGameId, 'g01-v1');
   assert.deepEqual(report.results[0].executions.map((item) => item.executionOccurrence), [0, 1]);
   assert.match(report.results[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
@@ -827,6 +839,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(retryCheckpoint.record.executions.length, 3);
   assert.ok(retryCheckpoint.record.actions <= retryCheckpoint.record.actionBudget.total);
   assert.ok(retryCheckpoint.record.outerTurns <= retryCheckpoint.record.outerTurnBudget);
+  const livenessCheckpoint = JSON.parse(fs.readFileSync(path.join(
+    root, 'runs', 'private', 'contract-run', 'resume', 'g25.json',
+  ), 'utf8'));
+  assert.equal(livenessCheckpoint.record.error, null);
+  assert.equal(livenessCheckpoint.record.terminationReason, 'assistant-no-tool');
   const stateAuthority = JSON.parse(fs.readFileSync(path.join(
     root, 'runs', 'private', 'contract-run', 'resume', 'resume-state.json',
   ), 'utf8'));
@@ -923,7 +940,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     },
   });
   assert.equal(outer.status, 0, outer.stderr || outer.stdout);
-  assert.match(outer.stdout, /COMPLETE score=100/);
+  assert.match(outer.stdout, /COMPLETE score=0/);
 
   const publishedReport = JSON.parse(fs.readFileSync(
     path.join(root, 'runs', 'public', `${outerRunId}.json`),
@@ -952,6 +969,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     publishedReport.games[0].gameplayActions + publishedReport.games[0].resets,
   );
   assert.equal(publishedReport.games[0].versionedGameId, 'g01-v1');
+  assert.equal(publishedReport.games[24].terminationReason, 'assistant-no-tool');
   assert.deepEqual(
     publishedReport.games.map(({ versionedGameId, actionBudget, outerTurnBudget }) => ({
       versionedGameId, actionBudget, outerTurnBudget,

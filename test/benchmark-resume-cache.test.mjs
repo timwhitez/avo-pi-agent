@@ -112,13 +112,16 @@ test('resume directory must live inside runs/private and be a regular directory'
 test('checkpoints round-trip and only pi-sdk records are accepted', () => {
   const root = sandbox();
   const dir = resolveResumeDirectory('runs/private/run-a/resume', { root });
-  saveResumedRecord(dir, 'ls20', record('ls20'), options);
+  saveResumedRecord(dir, 'ls20', record('ls20', {
+    terminationReason: 'repeated-tool-outcome',
+  }), options);
   saveResumedRecord(dir, 'vc33', record('vc33', {
     state: 'WIN', won: true, levelsCompleted: 6,
   }), options);
   const loaded = loadResumedRecords(dir, options);
   assert.equal(loaded.size, 2);
   assert.equal(loaded.get('ls20').state, 'NOT_FINISHED');
+  assert.equal(loaded.get('ls20').terminationReason, 'repeated-tool-outcome');
   assert.equal(loaded.get('vc33').state, 'WIN');
 
   fs.writeFileSync(path.join(dir, 'bad.json'), JSON.stringify({

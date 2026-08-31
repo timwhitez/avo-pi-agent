@@ -151,6 +151,7 @@ test('non-transient session errors still end the run with the error preserved', 
   ], 5);
   assert.match(String(result.error), /No tool call found/);
   assert.equal(result.transientRecoveries, 0);
+  assert.equal(result.terminationReason, null);
 });
 
 test('assistant turns without a tool call fail closed instead of consuming the outer-turn budget', async () => {

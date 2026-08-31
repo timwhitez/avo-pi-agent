@@ -317,6 +317,7 @@ function recordBinding(record) {
     episodeId: record.episodeId,
     won: record.won,
     error: record.error,
+    terminationReason: record.terminationReason,
     loop: record.loop,
     executions: record.executions,
     trajectoryEvidence: record.trajectoryEvidence,

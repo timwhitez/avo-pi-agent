@@ -129,6 +129,55 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
   }
 });
 
+test('installed Pi keeps provider failures distinct from model termination', async () => {
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      error: { message: 'provider rejected request', type: 'invalid_request_error' },
+    }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Respond once.',
+      initialPrompt: 'Use the tool.',
+      tools: [{
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'unused', details: {} }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    assert.match(String(result.error), /provider rejected request/);
+    assert.equal(result.terminationReason, null);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
 test('installed Pi bounds repeated read-only tool turns without environment progress', async () => {
   const requests = [];
   const server = http.createServer(async (request, response) => {

@@ -391,10 +391,13 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       const messages = agent.state.messages;
+      const error = agent.state.errorMessage || null;
       return {
         messages,
-        error: agent.state.errorMessage || null,
-        terminationReason: noToolTurn
+        error,
+        terminationReason: error
+          ? null
+          : noToolTurn
           ? 'assistant-no-tool'
           : innerTurnNoActionLimitReached
             ? 'repeated-tool-outcome'
