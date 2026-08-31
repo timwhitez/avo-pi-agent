@@ -100,13 +100,14 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#223[^\n]+maps to docs-only[^\n]+PR #224/);
   assert.match(ledger, /#225[^\n]+\*\*closed\*\*[^\n]+PR #226[^\n]+merge commit `4fa3be0799c30ee76c21a68d54f73ee2483d409a`[^\n]+implementation\/review head `831f6a7d414aca168df5e22205a01088175a754e`/);
   assert.match(ledger, /#229[^\n]+\*\*closed\*\*[^\n]+PR #230[^\n]+merge commit `003b6ca0c135f3d32b958570dce1a43e341e9644`[^\n]+implementation\/review head `4055a96de06853e0f5933799984283102b420320`/);
+  assert.match(ledger, /#233[^\n]+\*\*closed\*\*[^\n]+PR #234[^\n]+merge commit `ff90fdfeb8de02c30c230b646488114878296a1e`[^\n]+reviewed exact head `05fa4eb12a632db09e9ed88b37a12246d7dce37f`/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
   assert.match(ledger, /\| #180 \|[^\n]+#201\]/);
   assert.doesNotMatch(ledger, /Open Draft PRs:/);
   assert.doesNotMatch(ledger, /the Draft PR remains unmerged|both Drafts unmerged|with Drafts unmerged|exact-head approval remains required/);
-  assert.match(ledger, /Public benchmark: no valid post-remediation result yet\./);
+  assert.match(ledger, /Public benchmark: r6 is a valid tuning-only report; there is no held-out result or model-capability verdict yet\./);
   assert.match(ledger, /new live zero-open query at its exact `main` tip/);
   assert.match(ledger, /arc-tuning-baseline-r2-20260831.*34 provider requests and two environment actions/);
   assert.match(ledger, /arc-tuning-baseline-r3-20260831.*1×64×64 single-layer wrapper/);
@@ -115,5 +116,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /r1 reproduced the evidence-progress misclassification at 8 turns[^\n]+r2 failed closed at isolated-workspace preflight[^\n]+r3[^\n]+at 16 turns after 13 environment actions/);
   assert.match(ledger, /arc-terra-tuning-minimal-r1-20260831` through `arc-terra-tuning-minimal-r5-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+r4 verified the #222 production repair[^\n]+model-stall outcome misclassification/);
   assert.match(ledger, /r5 was a cold-start plan bound to exact main `93a8420b82cccc57743a9ea20ef730b1ae6be78e`[^\n]+parent failed closed/);
+  assert.match(ledger, /arc-terra-tuning-minimal-r6-20260901[^\n]+first complete accepted[^\n]+exact commit `3b7a3ca0bac95f3b728aaa254c6a1b4f83ef08df`[^\n]+tuning evidence, not held-out evaluation and not a capability conclusion/);
+  assert.match(ledger, /r6 identified a harness defect[^\n]+not eligible as held-out or capability evidence[^\n]+fresh exact-main plan[^\n]+live zero-Issue\/zero-PR query/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
