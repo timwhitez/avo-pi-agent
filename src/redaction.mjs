@@ -84,7 +84,7 @@ function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {
     const safe = {};
     const invalidFields = [];
     for (const [key, item] of Object.entries(value)) {
-      if (validators[key]?.(item)) safe[key] = redacted[key];
+      if (Object.hasOwn(validators, key) && validators[key](item)) safe[key] = redacted[key];
       else if (Object.hasOwn(validators, key)) invalidFields.push(key);
     }
     const unexpectedKeys = Object.keys(value).filter((key) => !Object.hasOwn(validators, key));

@@ -99,7 +99,7 @@ test('installed Pi validation cannot echo model-authored fields into private fai
     role: 'assistant',
     content: [{
       type: 'toolCall', id: 'invalid-trajectory', name: 'trajectory_read',
-      arguments: { ref: raw, [raw]: raw },
+      arguments: { ref: raw, [raw]: raw, ['__proto__']: raw },
     }, {
       type: 'toolCall', id: 'unknown-tool', name: raw, arguments: { value: raw },
     }],
@@ -139,7 +139,7 @@ test('installed Pi validation cannot echo model-authored fields into private fai
     if (failure) failures.push(failure);
   }
   assert.equal(failures.length, 2);
-  assert.deepEqual(failures[0].arguments, { invalidFields: ['ref'], unexpectedKeyCount: 1 });
+  assert.deepEqual(failures[0].arguments, { invalidFields: ['ref'], unexpectedKeyCount: 2 });
   assert.match(failures[0].error, /must not have additional properties/);
   assert.equal(failures[1].toolName, 'unknown-tool');
   assert.equal(failures[1].error, 'tool not found');
