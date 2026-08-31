@@ -128,6 +128,64 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
   }
 });
 
+test('installed Pi bounds repeated read-only tool turns without environment progress', async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    sendToolCall(response, {
+      responseId: `resp_observe_${requests.length}`,
+      itemId: `fc_observe_${requests.length}`,
+      callId: `call_observe_${requests.length}`,
+      name: 'observe',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      stallWindow: 2,
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Use a tool only when useful.',
+      initialPrompt: 'Read the current state.',
+      tools: [{
+        name: 'observe', label: 'Observe', description: 'Read current state.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'same state', details: {}, terminate: false }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    assert.equal(requests.length, 2);
+    assert.equal(result.outerTurns, 1);
+    assert.equal(result.exhaustedOuterTurns, false);
+    assert.match(String(result.error), /inner tool loop made no environment action in 2 consecutive assistant tool turns/);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
 function sendToolCall(response, {
   responseId,
   itemId,
