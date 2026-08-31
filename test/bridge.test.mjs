@@ -12,6 +12,35 @@ test('python ARC bridge is syntactically valid', () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test('bridge unwraps one official frame layer and rejects multiple layers', () => {
+  const source = String.raw`
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("avo_arc_bridge", "bridge/arc_bridge.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Frame:
+    game_id = "official-style"
+    frame = [[[1, 2], [3, 4]]]
+    state = "PLAYING"
+    levels_completed = 0
+    available_actions = []
+
+serialized = module.serialize_frame(Frame())
+assert serialized["frame"] == [[1, 2], [3, 4]]
+try:
+    module.model_grid([[[1]], [[2]]])
+except ValueError:
+    pass
+else:
+    raise AssertionError("multiple frame layers were accepted")
+print(json.dumps(serialized["frame"]))
+`;
+  const result = spawnSync('python', ['-c', source], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [[1, 2], [3, 4]]);
+});
+
 test('bridge diagnostics redact raw scorecard and execution identities', () => {
   const source = String.raw`
 import importlib.util, logging
