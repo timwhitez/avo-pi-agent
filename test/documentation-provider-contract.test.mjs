@@ -96,6 +96,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#217[^\n]+maps to docs-only[^\n]+PR #218/);
   assert.match(ledger, /#219[^\n]+\*\*closed\*\*[^\n]+PR #220[^\n]+merge commit `0720e03e2da877946d63f9552b99e2ec76c4b8e2`[^\n]+test commit `42670a3fe8badd5dc672b3a734f4b28599505634`/);
   assert.match(ledger, /#219[^\n]+Independent exact-head review approved `42670a3fe8badd5dc672b3a734f4b28599505634`/);
+  assert.match(ledger, /#221[^\n]+\*\*open\*\*[^\n]+PR #222[^\n]+novel (?:final )?model-visible tool outcome/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
@@ -108,5 +109,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /arc-tuning-baseline-r3-20260831.*1×64×64 single-layer wrapper/);
   assert.match(ledger, /arc-tuning-baseline-r4-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+temporal multi-frame defect fixed by #216/);
   assert.match(ledger, /live query reports Issues and PRs both zero[^\n]+`gpt-5\.6-terra`[^\n]+reasoning effort `high`/);
+  assert.match(ledger, /arc-terra-tuning-minimal-r1-20260831[^\n]+arc-terra-tuning-minimal-r2-20260831[^\n]+arc-terra-tuning-minimal-r3-20260831[^\n]+\*\*invalid\/incomplete\*\*/);
+  assert.match(ledger, /r1 reproduced the evidence-progress misclassification at 8 turns[^\n]+r2 failed closed at isolated-workspace preflight[^\n]+r3[^\n]+at 16 turns after 13 environment actions/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });

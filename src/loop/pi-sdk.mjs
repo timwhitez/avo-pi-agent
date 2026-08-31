@@ -241,6 +241,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       activeTelemetry = runTelemetry;
       try {
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
+      const seenToolOutcomes = new Set();
+      let novelToolOutcomes = 0;
       const piTools = tools.map((tool) => ({
         ...piToolContract(tool, Type),
         execute: async (_callId, params) => {
@@ -264,6 +266,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
             });
             details = { ...details, contextTruncated: true };
           }
+          const outcome = crypto.createHash('sha256').update(canonicalJson({
+            toolName: tool.name,
+            text,
+          })).digest('hex');
+          if (!seenToolOutcomes.has(outcome)) {
+            seenToolOutcomes.add(outcome);
+            novelToolOutcomes += 1;
+          }
           return {
             content: [{ type: 'text', text }],
             details,
@@ -282,10 +292,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       };
 
       let outerTurns = 1;
+      let assistantTurns = 0;
       const maxNoActionInnerTurns = Number.isInteger(config.stallWindow) && config.stallWindow >= 2
         ? config.stallWindow
         : 8;
       let lastEnvironmentActions = 0;
+      let lastNovelToolOutcomes = 0;
       let noActionInnerTurns = 0;
       let innerTurnNoActionLimitReached = false;
       const agent = new Agent({
@@ -302,11 +314,20 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
         shouldStopAfterTurn: async ({ message }) => {
+          assistantTurns += 1;
+          outerTurns = Math.max(outerTurns, assistantTurns);
           if (shouldStop()) return true;
+          if (outerTurns >= config.maxOuterTurns) return true;
           if (!assistantTurnHasToolCall(message)) return false;
           const environmentActions = runtimeEnvironmentActions(runtimeStatus());
           if (environmentActions > lastEnvironmentActions) {
             lastEnvironmentActions = environmentActions;
+            lastNovelToolOutcomes = novelToolOutcomes;
+            noActionInnerTurns = 0;
+            return false;
+          }
+          if (novelToolOutcomes > lastNovelToolOutcomes) {
+            lastNovelToolOutcomes = novelToolOutcomes;
             noActionInnerTurns = 0;
             return false;
           }
@@ -315,16 +336,23 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           innerTurnNoActionLimitReached = true;
           return true;
         },
-        prepareNextTurnWithContext: (turn) => prepareRuntimeStatusTurn(turn, {
-          runtimeStatus,
-          shouldStop,
-          outerTurns,
-          maxOuterTurns: config.maxOuterTurns,
-          policyProfile,
-          onEvent: emitEvent,
-        }),
+        prepareNextTurnWithContext: (turn) => {
+          outerTurns = Math.min(
+            config.maxOuterTurns,
+            Math.max(outerTurns, assistantTurns + 1),
+          );
+          return prepareRuntimeStatusTurn(turn, {
+            runtimeStatus,
+            shouldStop,
+            outerTurns,
+            maxOuterTurns: config.maxOuterTurns,
+            policyProfile,
+            onEvent: emitEvent,
+          });
+        },
       });
       lastEnvironmentActions = runtimeEnvironmentActions(runtimeStatus());
+      lastNovelToolOutcomes = novelToolOutcomes;
       agent.subscribe(emitEvent);
       await agent.prompt(initialPrompt);
       let noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
@@ -356,8 +384,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           onEvent: emitEvent,
           timestamp: Date.now() + outerTurns,
         });
+        const turnsBeforeContinue = outerTurns;
         await agent.continue();
-        outerTurns += 1;
+        outerTurns = Math.max(outerTurns, turnsBeforeContinue + 1);
         noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
@@ -367,7 +396,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         error: agent.state.errorMessage || (noToolTurn
           ? 'Pi assistant turn ended without a tool call before the ARC run reached a terminal condition'
           : innerTurnNoActionLimitReached
-          ? `Pi inner tool loop made no environment action in ${maxNoActionInnerTurns} consecutive assistant tool turns before the ARC run reached a terminal condition`
+          ? `Pi inner tool loop produced no environment action or novel tool outcome in ${maxNoActionInnerTurns} consecutive assistant tool turns before the ARC run reached a terminal condition`
           : exhaustedOuterTurns
           ? `Pi outer-turn budget exhausted at ${outerTurns} turns before the ARC run reached a terminal condition`
           : null),
