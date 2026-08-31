@@ -96,7 +96,8 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#217[^\n]+maps to docs-only[^\n]+PR #218/);
   assert.match(ledger, /#219[^\n]+\*\*closed\*\*[^\n]+PR #220[^\n]+merge commit `0720e03e2da877946d63f9552b99e2ec76c4b8e2`[^\n]+test commit `42670a3fe8badd5dc672b3a734f4b28599505634`/);
   assert.match(ledger, /#219[^\n]+Independent exact-head review approved `42670a3fe8badd5dc672b3a734f4b28599505634`/);
-  assert.match(ledger, /#221[^\n]+\*\*open\*\*[^\n]+PR #222[^\n]+novel (?:final )?model-visible tool outcome/);
+  assert.match(ledger, /#221[^\n]+\*\*closed\*\*[^\n]+PR #222[^\n]+merge commit `5387c2fc0d178e43602fe81bea716d0e2ea4a677`[^\n]+implementation\/review head `2e9b33b971a52831f56e23024164caeac555c7eb`/);
+  assert.match(ledger, /#223[^\n]+maps to docs-only[^\n]+PR #224/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
