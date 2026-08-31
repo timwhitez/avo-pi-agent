@@ -99,7 +99,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#221[^\n]+\*\*closed\*\*[^\n]+PR #222[^\n]+merge commit `5387c2fc0d178e43602fe81bea716d0e2ea4a677`[^\n]+implementation\/review head `2e9b33b971a52831f56e23024164caeac555c7eb`/);
   assert.match(ledger, /#223[^\n]+maps to docs-only[^\n]+PR #224/);
   assert.match(ledger, /#225[^\n]+\*\*closed\*\*[^\n]+PR #226[^\n]+merge commit `4fa3be0799c30ee76c21a68d54f73ee2483d409a`[^\n]+implementation\/review head `831f6a7d414aca168df5e22205a01088175a754e`/);
-  assert.match(ledger, /#229[^\n]+\*\*open\*\*[^\n]+PR #230[^\n]+official `arc-agi` run schema declares `id` optional/);
+  assert.match(ledger, /#229[^\n]+\*\*closed\*\*[^\n]+PR #230[^\n]+merge commit `003b6ca0c135f3d32b958570dce1a43e341e9644`[^\n]+implementation\/review head `4055a96de06853e0f5933799984283102b420320`/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
