@@ -85,6 +85,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /^## Live remediation ledger$/m);
   assert.match(ledger, /Original audit Issues: \*\*18\/18\*\*/);
   assert.match(ledger, /Current benchmark follow-up:.*#203.*PR #204/);
+  assert.match(ledger, /#203[^\n]+\*\*closed\*\*[^\n]+PR #204[^\n]+merge commit `330b4fd8fb0419c7f8dfb74d611be14946812e02`/);
   assert.match(ledger, /runtime commit `11a9e1302df07bea8289d7227a4c7e2b5a071261`/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
@@ -93,5 +94,6 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.doesNotMatch(ledger, /Open Draft PRs:/);
   assert.doesNotMatch(ledger, /the Draft PR remains unmerged|both Drafts unmerged|with Drafts unmerged|exact-head approval remains required/);
   assert.match(ledger, /Public benchmark: no valid post-remediation result yet\./);
+  assert.match(ledger, /new live zero-open query at its exact `main` tip/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
