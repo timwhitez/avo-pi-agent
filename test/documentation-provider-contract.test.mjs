@@ -101,7 +101,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#225[^\n]+\*\*closed\*\*[^\n]+PR #226[^\n]+merge commit `4fa3be0799c30ee76c21a68d54f73ee2483d409a`[^\n]+implementation\/review head `831f6a7d414aca168df5e22205a01088175a754e`/);
   assert.match(ledger, /#229[^\n]+\*\*closed\*\*[^\n]+PR #230[^\n]+merge commit `003b6ca0c135f3d32b958570dce1a43e341e9644`[^\n]+implementation\/review head `4055a96de06853e0f5933799984283102b420320`/);
   assert.match(ledger, /#233[^\n]+\*\*closed\*\*[^\n]+PR #234[^\n]+merge commit `ff90fdfeb8de02c30c230b646488114878296a1e`[^\n]+reviewed exact head `05fa4eb12a632db09e9ed88b37a12246d7dce37f`/);
-  assert.match(ledger, /#237[^\n]+maps to open[^\n]+PR #238[^\n]+implementation commit `f23e8f24761e2276240efb81fad5c9fe2e6cf85b`[^\n]+private runner stdout[^\n]+no provider run may resume before live Issues\/PRs return to zero/);
+  assert.match(ledger, /#237[^\n]+maps to open[^\n]+PR #238[^\n]+implementation commit `e68dddec26d743b0dc09679901a4616bd96e1714`[^\n]+private runner stdout[^\n]+schema-valid `trajectory_read` values[^\n]+no provider run may resume before live Issues\/PRs return to zero/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
