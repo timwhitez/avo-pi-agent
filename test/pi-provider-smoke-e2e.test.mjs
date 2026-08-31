@@ -175,10 +175,81 @@ test('installed Pi bounds repeated read-only tool turns without environment prog
         terminalReason: 'none', allowedNext: 'take a legal action',
       }),
     });
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
     assert.equal(result.outerTurns, 1);
     assert.equal(result.exhaustedOuterTurns, false);
-    assert.match(String(result.error), /inner tool loop made no environment action in 2 consecutive assistant tool turns/);
+    assert.match(String(result.error), /no environment action or novel tool outcome in 2 consecutive assistant tool turns/);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
+test('installed Pi lets novel read-only outcomes reach an environment action', async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const index = requests.length;
+    sendToolCall(response, {
+      responseId: `resp_novel_${index}`,
+      itemId: `fc_novel_${index}`,
+      callId: `call_novel_${index}`,
+      name: index < 4 ? 'observe' : 'act',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  let reads = 0;
+  let actions = 0;
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      stallWindow: 2,
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Inspect useful evidence, then act.',
+      initialPrompt: 'Solve the task.',
+      tools: [
+        {
+          name: 'observe', label: 'Observe', description: 'Read new evidence.',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          execute: async () => ({ text: `new state ${++reads}`, details: {}, terminate: false }),
+        },
+        {
+          name: 'act', label: 'Act', description: 'Take one action.',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          execute: async () => {
+            actions += 1;
+            return { text: 'action complete', details: {}, terminate: true };
+          },
+        },
+      ],
+      shouldStop: () => actions > 0,
+      runtimeStatus: () => ({
+        state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions, maxActions: 1,
+        terminalReason: actions ? 'win' : 'none', allowedNext: actions ? 'finish' : 'take a legal action',
+      }),
+    });
+    assert.equal(requests.length, 4, String(result.error));
+    assert.equal(reads, 3);
+    assert.equal(actions, 1);
+    assert.equal(result.error, null);
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
