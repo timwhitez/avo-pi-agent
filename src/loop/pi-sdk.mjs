@@ -336,14 +336,20 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           innerTurnNoActionLimitReached = true;
           return true;
         },
-        prepareNextTurnWithContext: (turn) => prepareRuntimeStatusTurn(turn, {
-          runtimeStatus,
-          shouldStop,
-          outerTurns,
-          maxOuterTurns: config.maxOuterTurns,
-          policyProfile,
-          onEvent: emitEvent,
-        }),
+        prepareNextTurnWithContext: (turn) => {
+          outerTurns = Math.min(
+            config.maxOuterTurns,
+            Math.max(outerTurns, assistantTurns + 1),
+          );
+          return prepareRuntimeStatusTurn(turn, {
+            runtimeStatus,
+            shouldStop,
+            outerTurns,
+            maxOuterTurns: config.maxOuterTurns,
+            policyProfile,
+            onEvent: emitEvent,
+          });
+        },
       });
       lastEnvironmentActions = runtimeEnvironmentActions(runtimeStatus());
       lastNovelToolOutcomes = novelToolOutcomes;

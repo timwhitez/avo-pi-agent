@@ -278,6 +278,9 @@ test('installed Pi applies the outer-turn budget inside novel read-only loops', 
   assert.equal(result.outerTurns, 3);
   assert.equal(result.exhaustedOuterTurns, true);
   assert.match(String(result.error), /outer-turn budget exhausted at 3 turns/);
+  assert.deepEqual(requests.slice(1).map((request) => (
+    /outer_turns=(\d+)\/3/.exec(JSON.stringify(request.input))?.[1]
+  )), ['1', '2']);
 });
 
 async function runReadOnlyScenario({ textFor, maxOuterTurns, maxToolResultChars = null }) {
