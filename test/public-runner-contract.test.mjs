@@ -324,6 +324,7 @@ class GameAction(Enum):
   fs.writeFileSync(path.join(fakePy, 'arc_agi.py'), String.raw`
 from datetime import datetime, timezone
 from enum import Enum
+import os
 from arcengine import GameAction
 
 class OperationMode(Enum):
@@ -433,7 +434,12 @@ class Arcade:
     def make(self, game_id):
         self.make_calls += 1
         self.make_attempts[game_id] = self.make_attempts.get(game_id, 0) + 1
-        if game_id == "g02-v1" and self.make_attempts[game_id] == 2:
+        repair_round = os.environ.get("AVO_REPAIR_ROUND")
+        if repair_round == "exhaust-open" and game_id == "g01-v1":
+            raise RuntimeError("synthetic persistent environment open failure")
+        if repair_round == "recover-open" and game_id == "g03-v1" and self.make_attempts[game_id] == 1:
+            raise RuntimeError("synthetic transient tracked-open failure")
+        if repair_round == "recover-open" and game_id == "g02-v1" and self.make_attempts[game_id] == 2:
             raise RuntimeError("synthetic transient environment reopen failure")
         short = game_id.split("-")[0]
         index = 1 if short == "error" else int(short[1:])
@@ -541,12 +547,15 @@ process.exit(result.status ?? 1);
     workspaceContainerRuntime: 'docker',
     workspaceContainerImage: 'python:3.12-slim',
   };
-  const providerSalt = crypto.createHash('sha256').update('contract-run').digest('hex');
-  const providerIdentity = {
-    providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, providerSalt),
-    providerEndpointFingerprint: fingerprint(config.provider.baseUrl, providerSalt),
-    providerModelFingerprint: fingerprint(config.provider.model, providerSalt),
+  const providerIdentityFor = (runId) => {
+    const salt = crypto.createHash('sha256').update(runId).digest('hex');
+    return {
+      providerFingerprint: fingerprint(`${config.provider.baseUrl}\0${config.provider.model}`, salt),
+      providerEndpointFingerprint: fingerprint(config.provider.baseUrl, salt),
+      providerModelFingerprint: fingerprint(config.provider.model, salt),
+    };
   };
+  const providerIdentity = providerIdentityFor('contract-run');
   const capabilityManifestSha256 = providerCapabilityDigest(config.provider.capabilities);
   const providerToolSchemaSha256 = productionProviderToolSchemaDigest(
     config.workspaceMode,
@@ -741,12 +750,68 @@ try {
 const nativeSetTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(
   callback,
-  String(new Error().stack).includes('at sleep (') ? 1 : delay,
+  delay >= 30_000 && String(callback).includes('[native code]') ? 1 : delay,
   ...args,
 );
 process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
 await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   `;
+  const exhaustedRunId = 'exhaust-open';
+  const exhaustedPrivateDir = path.join(root, 'runs', 'private', exhaustedRunId);
+  const exhaustedState = prepareRunState({
+    root, privateDir: exhaustedPrivateDir, runId: exhaustedRunId, env: {},
+  });
+  const exhaustedCapsule = buildRunCapsule({
+    root,
+    runId: exhaustedRunId,
+    python: fakePython,
+    provenance: {
+      wireApi: 'responses',
+      ...providerIdentityFor(exhaustedRunId),
+      ...capabilityProvenance,
+      reasoningEffort: 'max',
+      gitSha,
+      arcAuth: { mode: 'registered' },
+    },
+    arcRuntime: { officialPackageAttested: true },
+    games: Array.from({ length: 25 }, (_, index) => ({
+      versionedGameId: `g${String(index + 1).padStart(2, '0')}-v1`,
+    })),
+    config,
+    workspaceAttestation: workspaceAttestationFixture(config),
+    initialState: exhaustedState.initialState,
+    memoryDir: exhaustedState.memoryDir,
+    env: { AVO_GAME_CONCURRENCY: '1' },
+  });
+  const exhaustedCapsuleFile = path.join(exhaustedPrivateDir, 'run-capsule.json');
+  writeRunCapsule(exhaustedCapsuleFile, exhaustedCapsule, { root: exhaustedPrivateDir });
+  const exhausted = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: {
+      ...childEnv,
+      AVO_REPAIR_ROUND: 'exhaust-open',
+      AVO_GAME_CONCURRENCY: '1',
+      AVO_REAL_RUN_ID: exhaustedRunId,
+      AVO_MEMORY_DIR: exhaustedState.memoryDir,
+      AVO_WORKSPACE_DIR: exhaustedState.workspaceDir,
+      AVO_RESUME_DIR: path.join(exhaustedPrivateDir, 'resume'),
+      AVO_RUN_CAPSULE_HASH: exhaustedCapsule.capsuleHash,
+      AVO_RUN_CAPSULE_FILE: exhaustedCapsuleFile,
+    },
+  });
+  assert.equal(exhausted.status, 1, exhausted.stderr || exhausted.stdout);
+  assert.match(exhausted.stdout, /g01: attempt 1\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/, exhausted.stderr);
+  assert.match(exhausted.stdout, /g01: attempt 2\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/);
+  const exhaustedReportFile = path.join(root, 'runs', `${exhaustedRunId}-official-public-environments.json`);
+  const exhaustedReport = JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8'));
+  assert.equal(exhaustedReport.summary.games, 0);
+  assert.notEqual(exhaustedReport.scoreStatus, 'official');
+  assert.equal(exhaustedReport.scorecardCoverage.exact, false);
+  assert.equal(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g01.json')), false);
+  fs.rmSync(exhaustedReportFile);
+
   const scorecardObservationNotBefore = Date.now();
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
@@ -754,12 +819,14 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     timeout: 60_000,
     env: {
       ...childEnv,
+      AVO_REPAIR_ROUND: 'recover-open',
       AVO_TEST_MULTI_ATTEMPT: '1',
       AVO_TEST_TOOL_FAILURE_DIAGNOSTIC: '1',
     },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /g02: attempt 2\/3 failed \(RuntimeError: synthetic transient environment reopen failure\); retrying/);
+  assert.match(result.stdout, /g03: attempt 1\/3 failed \(RuntimeError: synthetic transient tracked-open failure\); retrying/);
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
@@ -782,7 +849,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   for (const record of contextRecords) {
     assert.match(record.gameId, /^g\d{2}$/);
     assert.equal(record.versionedGameId, `${record.gameId}-v1`);
-    assert.ok([1, 3].includes(record.attempt));
+    assert.ok([1, 2, 3].includes(record.attempt));
     assert.ok(Number.isInteger(record.contextSequence) && record.contextSequence > 0);
   }
   const g02Context = contextRecords.filter((record) => record.gameId === 'g02');
@@ -795,6 +862,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
   assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
   assert.equal(g02Statuses[1].status.maxOuterTurns, g02Statuses[0].status.maxOuterTurns - 1);
+  assert.deepEqual(contextRecords.filter((record) => record.gameId === 'g03')
+    .map((record) => [record.type, record.attempt]), [
+    ['avo_runtime_status', 2],
+    ['avo_provider_request', 2],
+  ]);
   const failureRecords = result.stdout.split('\n')
     .filter((line) => line.startsWith('[avo-tool-failure] '))
     .map((line) => JSON.parse(line.slice('[avo-tool-failure] '.length)));
