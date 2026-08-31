@@ -77,6 +77,14 @@ test('normalizes native scorecard identity without retaining raw card or run IDs
   assert.equal(result.coverage.exact, true);
 });
 
+test('accepts the official nullable run id without weakening execution identity', () => {
+  const nullable = snapshot();
+  nullable.scorecard.environments[0].runs[0].id = null;
+  const evidence = normalizeScorecardSnapshot(nullable);
+  assert.equal(evidence.games[0].versionedGameId, 'g1-v1');
+  assert.match(evidence.games[0].executions[0].executionIdSha256, /^[a-f0-9]{64}$/);
+});
+
 test('exact scorecard fills unknown totals and rejects progress, total, or outcome contradictions', () => {
   const evidence = normalizeScorecardSnapshot(snapshot());
   const published = records().map((record, index) => ({

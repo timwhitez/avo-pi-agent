@@ -318,7 +318,8 @@ function normalizeRawExecution(run, versionedGameId, name, {
   executionIdSha256,
   executionOccurrence,
 }) {
-  if (run.id !== undefined && normalizeVersionedGameId(run.id, `${name} id`) !== versionedGameId) {
+  if (run.id !== undefined && run.id !== null
+      && normalizeVersionedGameId(run.id, `${name} id`) !== versionedGameId) {
     throw new Error(`${name} id differs from its environment`);
   }
   return validateExecutionOutcome({
