@@ -54,7 +54,7 @@ export function privateToolFailureEvidence(pending, event, context = {}, env = p
     type: 'avo_tool_failure',
     toolName: boundedDiagnosticString(event.toolName, env),
     arguments: boundedDiagnosticArguments(args, event.toolName, env),
-    error: boundedDiagnosticString(error, env, 2048),
+    error: diagnosticToolError(error, event.toolName, env),
   };
 }
 
@@ -67,19 +67,29 @@ function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {
     ]);
     const safe = Object.fromEntries(Object.entries(redacted).filter(([key]) => allowed.has(key)));
     const unexpectedKeys = Object.keys(value).filter((key) => !allowed.has(key));
-    if (unexpectedKeys.length) {
-      safe.unexpectedKeys = unexpectedKeys.slice(0, 32)
-        .map((key) => boundedDiagnosticString(key, env, 128));
-    }
+    if (unexpectedKeys.length) safe.unexpectedKeyCount = unexpectedKeys.length;
     if (Buffer.byteLength(JSON.stringify(safe), 'utf8') <= maxBytes) return safe;
   }
   return {
     omitted: true,
     bytes,
-    keys: value && typeof value === 'object' && !Array.isArray(value)
-      ? Object.keys(value).slice(0, 32).map((key) => boundedDiagnosticString(key, env, 128))
-      : [],
+    keyCount: value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.keys(value).length
+      : 0,
   };
+}
+
+function diagnosticToolError(value, toolName, env) {
+  const redacted = redactRuntimeSecrets(String(value ?? ''), env);
+  if (/^Validation failed for tool /i.test(redacted)) {
+    return boundedDiagnosticString(redacted.split(/\n\s*Received arguments:\s*\n/i)[0], env, 2048);
+  }
+  if (/^Tool .* not found$/i.test(redacted)) return 'tool not found';
+  if (/response hit the output token limit/i.test(redacted)) return 'tool call arguments were truncated';
+  if (/^Operation aborted$/i.test(redacted)) return 'operation aborted';
+  return toolName === 'trajectory_read'
+    ? boundedDiagnosticString(redacted, env, 2048)
+    : 'tool execution failed; raw error omitted';
 }
 
 function boundedDiagnosticString(value, env, maxBytes = 128) {

@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { agentLoop } from '@earendil-works/pi-agent-core';
+import { createAssistantMessageEventStream, Type } from '@earendil-works/pi-ai';
+import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
+import { piToolContract } from '../src/loop/pi-sdk.mjs';
 import {
   privateToolFailureEvidence,
   redactRuntimeObject,
@@ -66,7 +70,7 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
     arguments: {
       ref: 'evidence-000001-123456abcdef',
       compareRef: '[REDACTED_KEY]',
-      unexpectedKeys: ['note', '[REDACTED_KEY]'],
+      unexpectedKeyCount: 2,
     },
     error: 'invalid [REDACTED_MODEL]',
   });
@@ -79,6 +83,51 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
     type: 'tool_execution_end', toolCallId: 'call-2', toolName: 'workspace_python',
     isError: true, result: { content: [{ type: 'text', text: 'y'.repeat(3000) }] },
   }, {}, env);
-  assert.deepEqual(bounded.arguments, { omitted: true, bytes: 3011, keys: ['code'] });
-  assert.match(bounded.error, /^\[omitted 3000 bytes\]$/);
+  assert.deepEqual(bounded.arguments, { omitted: true, bytes: 3011, keyCount: 1 });
+  assert.equal(bounded.error, 'tool execution failed; raw error omitted');
+});
+
+test('installed Pi validation cannot echo model-authored fields into private failure evidence', async () => {
+  const raw = 'PRIVATE_MODEL_REASONING_do_not_emit';
+  const contract = piToolContract(
+    effectiveAvoTools('isolated-python', 'minimal-v1')
+      .find((tool) => tool.name === 'trajectory_read'),
+    Type,
+  );
+  const message = {
+    role: 'assistant',
+    content: [{ type: 'toolCall', id: 'invalid-trajectory', name: 'trajectory_read', arguments: { [raw]: raw } }],
+    api: 'test',
+    provider: 'test',
+    model: 'test',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    stopReason: 'toolUse',
+    timestamp: 2,
+  };
+  const stream = agentLoop(
+    [{ role: 'user', content: 'test', timestamp: 1 }],
+    { systemPrompt: 'test', messages: [], tools: [contract] },
+    {
+      model: { id: 'test', name: 'test', provider: 'test', api: 'test' },
+      convertToLlm: (messages) => messages,
+      toolExecution: 'sequential',
+      shouldStopAfterTurn: () => true,
+    },
+    undefined,
+    () => {
+      const events = createAssistantMessageEventStream();
+      queueMicrotask(() => events.push({ type: 'done', reason: message.stopReason, message }));
+      return events;
+    },
+  );
+  const pending = new Map();
+  const failures = [];
+  for await (const event of stream) {
+    const failure = privateToolFailureEvidence(pending, event);
+    if (failure) failures.push(failure);
+  }
+  assert.equal(failures.length, 1);
+  assert.deepEqual(failures[0].arguments, { unexpectedKeyCount: 1 });
+  assert.match(failures[0].error, /must not have additional properties/);
+  assert.doesNotMatch(JSON.stringify(failures[0]), /PRIVATE_MODEL_REASONING|Received arguments/);
 });

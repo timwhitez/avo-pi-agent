@@ -155,6 +155,19 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
+        if (process.env.AVO_TEST_TOOL_FAILURE_DIAGNOSTIC === '1'
+            && frame.gameId === 'g01-v1' && attempt === 1) {
+          const raw = 'PRIVATE_MODEL_REASONING_do_not_emit';
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'invalid-trajectory',
+            toolName: 'trajectory_read', args: { ref: 'bad', [raw]: raw },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'invalid-trajectory',
+            toolName: 'trajectory_read', isError: true,
+            result: { content: [{ type: 'text', text: 'Validation failed for tool "trajectory_read":\n  - root: must not have additional properties\n\nReceived arguments:\n{"' + raw + '":"' + raw + '"}' }], details: {} },
+          });
+        }
         if (frame.gameId === 'g25-v1') {
           completedGamePrompts += 1;
           this.state.messages.push({
@@ -731,7 +744,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...childEnv, AVO_TEST_MULTI_ATTEMPT: '1' },
+    env: {
+      ...childEnv,
+      AVO_TEST_MULTI_ATTEMPT: '1',
+      AVO_TEST_TOOL_FAILURE_DIAGNOSTIC: '1',
+    },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
@@ -769,6 +786,19 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
   assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
   assert.equal(g02Statuses[1].status.maxOuterTurns, g02Statuses[0].status.maxOuterTurns - 1);
+  const failureRecords = result.stdout.split('\n')
+    .filter((line) => line.startsWith('[avo-tool-failure] '))
+    .map((line) => JSON.parse(line.slice('[avo-tool-failure] '.length)));
+  assert.deepEqual(failureRecords, [{
+    gameId: 'g01',
+    versionedGameId: 'g01-v1',
+    attempt: 1,
+    type: 'avo_tool_failure',
+    toolName: 'trajectory_read',
+    arguments: { ref: 'bad', unexpectedKeyCount: 1 },
+    error: 'Validation failed for tool "trajectory_read":\n  - root: must not have additional properties',
+  }]);
+  assert.doesNotMatch(result.stdout, /PRIVATE_MODEL_REASONING|Received arguments/);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
@@ -792,7 +822,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.results[0].rejectedCommands, 1);
   assert.equal(report.results[0].terminalRejectedCommands, 1);
   assert.equal(report.results[0].postTerminalGameplayActions, 0);
-  assert.equal(report.results[0].mechanismMetrics.toolFailures, 0);
+  assert.equal(report.results[0].mechanismMetrics.toolFailures, 1);
+  assert.doesNotMatch(JSON.stringify(report), /avo_tool_failure|PRIVATE_MODEL_REASONING|Received arguments/);
   assert.equal(report.results[1].resets, 1);
   assert.equal(report.results[1].fullResets, 1);
   assert.equal(report.results[1].episodeId, 'episode-000002');
