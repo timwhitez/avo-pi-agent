@@ -67,7 +67,10 @@ function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {
     ]);
     const safe = Object.fromEntries(Object.entries(redacted).filter(([key]) => allowed.has(key)));
     const unexpectedKeys = Object.keys(value).filter((key) => !allowed.has(key));
-    if (unexpectedKeys.length) safe.unexpectedKeys = unexpectedKeys.slice(0, 32);
+    if (unexpectedKeys.length) {
+      safe.unexpectedKeys = unexpectedKeys.slice(0, 32)
+        .map((key) => boundedDiagnosticString(key, env, 128));
+    }
     if (Buffer.byteLength(JSON.stringify(safe), 'utf8') <= maxBytes) return safe;
   }
   return {

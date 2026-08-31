@@ -48,6 +48,7 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
       ref: 'evidence-000001-123456abcdef',
       compareRef: env.OPENAI_API_KEY,
       note: 'model-authored text stays private',
+      [env.OPENAI_API_KEY]: 'secret-shaped key stays private',
     },
   }, {}, env), null);
   const failure = privateToolFailureEvidence(pending, {
@@ -65,7 +66,7 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
     arguments: {
       ref: 'evidence-000001-123456abcdef',
       compareRef: '[REDACTED_KEY]',
-      unexpectedKeys: ['note'],
+      unexpectedKeys: ['note', '[REDACTED_KEY]'],
     },
     error: 'invalid [REDACTED_MODEL]',
   });
