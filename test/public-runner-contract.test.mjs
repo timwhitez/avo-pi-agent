@@ -419,6 +419,7 @@ class Arcade:
     def __init__(self, operation_mode=None, logger=None):
         self.environments = []
         self.make_calls = 0
+        self.make_attempts = {}
         self.arc_api_key = "mock-test-key"
         if logger:
             logger.info("Created new scorecard: raw-card-private-123")
@@ -431,6 +432,9 @@ class Arcade:
 
     def make(self, game_id):
         self.make_calls += 1
+        self.make_attempts[game_id] = self.make_attempts.get(game_id, 0) + 1
+        if game_id == "g02-v1" and self.make_attempts[game_id] == 2:
+            raise RuntimeError("synthetic transient environment reopen failure")
         short = game_id.split("-")[0]
         index = 1 if short == "error" else int(short[1:])
         env = Env(game_id, 3 + index % 3, f"{game_id}-run-{self.make_calls}")
@@ -735,7 +739,11 @@ try {
   const cliFile = path.join(root, 'src', 'cli.mjs');
   const fastRetryBootstrap = `
 const nativeSetTimeout = globalThis.setTimeout;
-globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 30000 ? 1 : delay, ...args);
+globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(
+  callback,
+  String(new Error().stack).includes('at sleep (') ? 1 : delay,
+  ...args,
+);
 process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
 await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   `;
@@ -751,6 +759,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /g02: attempt 2\/3 failed \(RuntimeError: synthetic transient environment reopen failure\); retrying/);
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
   assert.match(result.stdout, /\[25\/25\] g25/);
   assert.match(result.stdout, /"games": 25/);
@@ -773,15 +782,15 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   for (const record of contextRecords) {
     assert.match(record.gameId, /^g\d{2}$/);
     assert.equal(record.versionedGameId, `${record.gameId}-v1`);
-    assert.ok([1, 2].includes(record.attempt));
+    assert.ok([1, 3].includes(record.attempt));
     assert.ok(Number.isInteger(record.contextSequence) && record.contextSequence > 0);
   }
   const g02Context = contextRecords.filter((record) => record.gameId === 'g02');
   assert.deepEqual(g02Context.map((record) => [record.type, record.attempt, record.contextSequence]), [
     ['avo_runtime_status', 1, 1],
     ['avo_provider_request', 1, 2],
-    ['avo_runtime_status', 2, 3],
-    ['avo_provider_request', 2, 4],
+    ['avo_runtime_status', 3, 3],
+    ['avo_provider_request', 3, 4],
   ]);
   const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
   assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
