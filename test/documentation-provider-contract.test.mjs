@@ -91,6 +91,9 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /#207[^\n]+\*\*closed\*\*[^\n]+PR #208[^\n]+merge commit `fe11c9805652a0909ca78920a51156d2bc4e7bd9`/);
   assert.match(ledger, /Current benchmark observation repair:.*#211.*PR #212.*runtime commit `88af356b5fe8fe2ccdd7533fbdd6f65d0c056386`/);
   assert.match(ledger, /#211[^\n]+\*\*closed\*\*[^\n]+PR #212[^\n]+merge commit `2133a8f7188b12af16b70306a1905da56b46c0ee`/);
+  assert.match(ledger, /#215[^\n]+\*\*closed\*\*[^\n]+PR #216[^\n]+merge commit `ff862af61864bc30230a06e3210ee42c4d30efd0`[^\n]+runtime commit `f561d06a9bc4f8c0a0cb4d7c632952c6f8a9cc9e`/);
+  assert.match(ledger, /Independent exact-head review approved `5a45c956b2effe71bc51c44ac1543c44ce2312e4`/);
+  assert.match(ledger, /#217[^\n]+maps to docs-only[^\n]+PR #218/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
@@ -101,5 +104,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /new live zero-open query at its exact `main` tip/);
   assert.match(ledger, /arc-tuning-baseline-r2-20260831.*34 provider requests and two environment actions/);
   assert.match(ledger, /arc-tuning-baseline-r3-20260831.*1×64×64 single-layer wrapper/);
+  assert.match(ledger, /arc-tuning-baseline-r4-20260831[^\n]+\*\*invalid\/incomplete\*\*[^\n]+temporal multi-frame defect fixed by #216/);
+  assert.match(ledger, /live query reports Issues and PRs both zero[^\n]+`gpt-5\.6-terra`[^\n]+reasoning effort `high`/);
   assert.doesNotMatch(readme, /\bcandidate_commit\b/);
 });
