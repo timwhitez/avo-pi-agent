@@ -36,3 +36,51 @@ export function redactRuntimeObject(value, env = process.env, depth = 0) {
   }
   return redactRuntimeSecrets(String(value), env);
 }
+
+export function privateToolFailureEvidence(pending, event, context = {}, env = process.env) {
+  if (!(pending instanceof Map)) throw new Error('tool failure evidence requires a pending-call map');
+  const id = String(event?.toolCallId || '');
+  if (event?.type === 'tool_execution_start') {
+    if (id) pending.set(id, event.args ?? null);
+    return null;
+  }
+  if (event?.type !== 'tool_execution_end') return null;
+  const args = id && pending.has(id) ? pending.get(id) : null;
+  if (id) pending.delete(id);
+  if (event.isError !== true) return null;
+  const error = event.result?.content?.find((item) => item?.type === 'text')?.text ?? 'tool execution failed';
+  return {
+    ...redactRuntimeObject(context, env),
+    type: 'avo_tool_failure',
+    toolName: boundedDiagnosticString(event.toolName, env),
+    arguments: boundedDiagnosticArguments(args, event.toolName, env),
+    error: boundedDiagnosticString(error, env, 2048),
+  };
+}
+
+function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {
+  const redacted = redactRuntimeObject(value, env);
+  const bytes = Buffer.byteLength(JSON.stringify(redacted), 'utf8');
+  if (toolName === 'trajectory_read' && value && typeof value === 'object' && !Array.isArray(value)) {
+    const allowed = new Set([
+      'ref', 'startSequence', 'limit', 'part', 'compareRef', 'x', 'y', 'width', 'height',
+    ]);
+    const safe = Object.fromEntries(Object.entries(redacted).filter(([key]) => allowed.has(key)));
+    const unexpectedKeys = Object.keys(value).filter((key) => !allowed.has(key));
+    if (unexpectedKeys.length) safe.unexpectedKeys = unexpectedKeys.slice(0, 32);
+    if (Buffer.byteLength(JSON.stringify(safe), 'utf8') <= maxBytes) return safe;
+  }
+  return {
+    omitted: true,
+    bytes,
+    keys: value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.keys(value).slice(0, 32).map((key) => boundedDiagnosticString(key, env, 128))
+      : [],
+  };
+}
+
+function boundedDiagnosticString(value, env, maxBytes = 128) {
+  const redacted = redactRuntimeSecrets(String(value ?? ''), env);
+  const bytes = Buffer.byteLength(redacted, 'utf8');
+  return bytes <= maxBytes ? redacted : `[omitted ${bytes} bytes]`;
+}

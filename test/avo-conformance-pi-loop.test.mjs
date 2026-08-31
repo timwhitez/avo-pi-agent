@@ -30,6 +30,8 @@ test('Pi wrapper continues dynamically and records outer-turn exhaustion', () =>
   assert.doesNotMatch(source, /portable-pi/);
   assert.match(cliSource, /avo_runtime_status.*avo_context_compaction/s);
   assert.match(cliSource, /\[avo-context\]/);
+  assert.match(cliSource, /privateToolFailureEvidence/);
+  assert.match(cliSource, /\[avo-tool-failure\]/);
 });
 
 test('runtime model is configured from the explicit effective capability manifest', () => {
