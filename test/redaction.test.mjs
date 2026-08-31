@@ -45,6 +45,7 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
     OPENAI_MODEL: 'private-model-name',
   };
   const pending = new Map();
+  const allowedToolNames = new Set(['trajectory_read', 'workspace_python']);
   assert.equal(privateToolFailureEvidence(pending, {
     type: 'tool_execution_start',
     toolCallId: 'call-1',
@@ -54,14 +55,14 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
       note: 'model-authored text stays private',
       [env.OPENAI_API_KEY]: 'secret-shaped key stays private',
     },
-  }, {}, env), null);
+  }, {}, env, allowedToolNames), null);
   const failure = privateToolFailureEvidence(pending, {
     type: 'tool_execution_end',
     toolCallId: 'call-1',
     toolName: 'trajectory_read',
     isError: true,
     result: { content: [{ type: 'text', text: `invalid ${env.OPENAI_MODEL}` }] },
-  }, { gameId: 'g01', attempt: 1 }, env);
+  }, { gameId: 'g01', attempt: 1 }, env, allowedToolNames);
   assert.deepEqual(failure, {
     gameId: 'g01',
     attempt: 1,
@@ -78,11 +79,11 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
 
   privateToolFailureEvidence(pending, {
     type: 'tool_execution_start', toolCallId: 'call-2', args: { code: 'x'.repeat(3000) },
-  }, {}, env);
+  }, {}, env, allowedToolNames);
   const bounded = privateToolFailureEvidence(pending, {
     type: 'tool_execution_end', toolCallId: 'call-2', toolName: 'workspace_python',
     isError: true, result: { content: [{ type: 'text', text: 'y'.repeat(3000) }] },
-  }, {}, env);
+  }, {}, env, allowedToolNames);
   assert.deepEqual(bounded.arguments, { omitted: true, bytes: 3011, keyCount: 1 });
   assert.equal(bounded.error, 'tool execution failed; raw error omitted');
 });
@@ -99,6 +100,8 @@ test('installed Pi validation cannot echo model-authored fields into private fai
     content: [{
       type: 'toolCall', id: 'invalid-trajectory', name: 'trajectory_read',
       arguments: { ref: raw, [raw]: raw },
+    }, {
+      type: 'toolCall', id: 'unknown-tool', name: raw, arguments: { value: raw },
     }],
     api: 'test',
     provider: 'test',
@@ -126,11 +129,19 @@ test('installed Pi validation cannot echo model-authored fields into private fai
   const pending = new Map();
   const failures = [];
   for await (const event of stream) {
-    const failure = privateToolFailureEvidence(pending, event);
+    const failure = privateToolFailureEvidence(
+      pending,
+      event,
+      {},
+      process.env,
+      new Set(['trajectory_read']),
+    );
     if (failure) failures.push(failure);
   }
-  assert.equal(failures.length, 1);
+  assert.equal(failures.length, 2);
   assert.deepEqual(failures[0].arguments, { invalidFields: ['ref'], unexpectedKeyCount: 1 });
   assert.match(failures[0].error, /must not have additional properties/);
-  assert.doesNotMatch(JSON.stringify(failures[0]), /PRIVATE_MODEL_REASONING|Received arguments/);
+  assert.equal(failures[1].toolName, 'unknown-tool');
+  assert.equal(failures[1].error, 'tool not found');
+  assert.doesNotMatch(JSON.stringify(failures), /PRIVATE_MODEL_REASONING|Received arguments/);
 });

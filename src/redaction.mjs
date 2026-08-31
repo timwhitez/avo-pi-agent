@@ -37,7 +37,13 @@ export function redactRuntimeObject(value, env = process.env, depth = 0) {
   return redactRuntimeSecrets(String(value), env);
 }
 
-export function privateToolFailureEvidence(pending, event, context = {}, env = process.env) {
+export function privateToolFailureEvidence(
+  pending,
+  event,
+  context = {},
+  env = process.env,
+  allowedToolNames = new Set(),
+) {
   if (!(pending instanceof Map)) throw new Error('tool failure evidence requires a pending-call map');
   const id = String(event?.toolCallId || '');
   if (event?.type === 'tool_execution_start') {
@@ -49,12 +55,14 @@ export function privateToolFailureEvidence(pending, event, context = {}, env = p
   if (id) pending.delete(id);
   if (event.isError !== true) return null;
   const error = event.result?.content?.find((item) => item?.type === 'text')?.text ?? 'tool execution failed';
+  const rawToolName = String(event.toolName || '');
+  const toolName = allowedToolNames.has(rawToolName) ? rawToolName : 'unknown-tool';
   return {
     ...redactRuntimeObject(context, env),
     type: 'avo_tool_failure',
-    toolName: boundedDiagnosticString(event.toolName, env),
-    arguments: boundedDiagnosticArguments(args, event.toolName, env),
-    error: diagnosticToolError(error, event.toolName, env),
+    toolName,
+    arguments: boundedDiagnosticArguments(args, toolName, env),
+    error: diagnosticToolError(error, toolName, env),
   };
 }
 
