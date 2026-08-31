@@ -90,6 +90,7 @@ test('README tool inventory is generated from the sealed production profiles', (
   assert.match(ledger, /Current benchmark liveness repair:.*#207.*PR #208.*runtime commit `f918f9279ba07248bc982bb5aa9f799e4d034679`/);
   assert.match(ledger, /#207[^\n]+\*\*closed\*\*[^\n]+PR #208[^\n]+merge commit `fe11c9805652a0909ca78920a51156d2bc4e7bd9`/);
   assert.match(ledger, /Current benchmark observation repair:.*#211.*PR #212.*runtime commit `88af356b5fe8fe2ccdd7533fbdd6f65d0c056386`/);
+  assert.match(ledger, /#211[^\n]+\*\*closed\*\*[^\n]+PR #212[^\n]+merge commit `2133a8f7188b12af16b70306a1905da56b46c0ee`/);
   assert.match(ledger, /final integration boundary/);
   assert.match(ledger, /#184 and #185 merge directly to `main`; #186–#201 form one reviewed dependency stack/);
   assert.match(ledger, /\| #182 \|[^\n]+#190\].*#200\]/);
