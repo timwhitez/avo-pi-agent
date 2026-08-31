@@ -174,10 +174,29 @@ def total_levels_or_none(value: Any) -> int | None:
     return None
 
 
+def model_grid(raw_frame: Any) -> list[Any]:
+    """Convert the official one-layer frame container to the 2D grid contract."""
+
+    frame = jsonable(raw_frame)
+    if (
+        isinstance(frame, list)
+        and len(frame) == 1
+        and isinstance(frame[0], list)
+        and frame[0]
+        and all(isinstance(row, list) for row in frame[0])
+    ):
+        frame = frame[0]
+    if not isinstance(frame, list) or any(not isinstance(row, list) for row in frame):
+        raise ValueError("ARC frame must be a two-dimensional grid or one two-dimensional layer")
+    if any(any(isinstance(cell, (list, tuple, dict)) for cell in row) for row in frame):
+        raise ValueError("ARC frame must not contain nested cells or multiple layers")
+    return frame
+
+
 def serialize_frame(raw: Any) -> dict[str, Any]:
     return {
         "game_id": getattr(raw, "game_id", None),
-        "frame": jsonable(getattr(raw, "frame", [])),
+        "frame": model_grid(getattr(raw, "frame", [])),
         "state": jsonable(getattr(raw, "state", "UNKNOWN")),
         "levels_completed": int(getattr(raw, "levels_completed", 0) or 0),
         "total_levels": total_levels_or_none(raw),
