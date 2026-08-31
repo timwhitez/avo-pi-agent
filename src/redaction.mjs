@@ -62,11 +62,25 @@ function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {
   const redacted = redactRuntimeObject(value, env);
   const bytes = Buffer.byteLength(JSON.stringify(redacted), 'utf8');
   if (toolName === 'trajectory_read' && value && typeof value === 'object' && !Array.isArray(value)) {
-    const allowed = new Set([
-      'ref', 'startSequence', 'limit', 'part', 'compareRef', 'x', 'y', 'width', 'height',
-    ]);
-    const safe = Object.fromEntries(Object.entries(redacted).filter(([key]) => allowed.has(key)));
-    const unexpectedKeys = Object.keys(value).filter((key) => !allowed.has(key));
+    const validators = {
+      ref: (item) => typeof item === 'string' && /^evidence-[0-9]{6,}-[a-f0-9]{12}$/.test(item),
+      startSequence: (item) => Number.isSafeInteger(item) && item >= 1,
+      limit: (item) => Number.isSafeInteger(item) && item >= 1 && item <= 8,
+      part: (item) => ['summary', 'event', 'before', 'after', 'region', 'diff'].includes(item),
+      compareRef: (item) => typeof item === 'string' && /^evidence-[0-9]{6,}-[a-f0-9]{12}$/.test(item),
+      x: (item) => Number.isSafeInteger(item) && item >= 0 && item <= 63,
+      y: (item) => Number.isSafeInteger(item) && item >= 0 && item <= 63,
+      width: (item) => Number.isSafeInteger(item) && item >= 1 && item <= 64,
+      height: (item) => Number.isSafeInteger(item) && item >= 1 && item <= 64,
+    };
+    const safe = {};
+    const invalidFields = [];
+    for (const [key, item] of Object.entries(value)) {
+      if (validators[key]?.(item)) safe[key] = redacted[key];
+      else if (Object.hasOwn(validators, key)) invalidFields.push(key);
+    }
+    const unexpectedKeys = Object.keys(value).filter((key) => !Object.hasOwn(validators, key));
+    if (invalidFields.length) safe.invalidFields = invalidFields;
     if (unexpectedKeys.length) safe.unexpectedKeyCount = unexpectedKeys.length;
     if (Buffer.byteLength(JSON.stringify(safe), 'utf8') <= maxBytes) return safe;
   }

@@ -795,7 +795,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     attempt: 1,
     type: 'avo_tool_failure',
     toolName: 'trajectory_read',
-    arguments: { ref: 'bad', unexpectedKeyCount: 1 },
+    arguments: { invalidFields: ['ref'], unexpectedKeyCount: 1 },
     error: 'Validation failed for tool "trajectory_read":\n  - root: must not have additional properties',
   }]);
   assert.doesNotMatch(result.stdout, /PRIVATE_MODEL_REASONING|Received arguments/);

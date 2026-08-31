@@ -69,7 +69,7 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
     toolName: 'trajectory_read',
     arguments: {
       ref: 'evidence-000001-123456abcdef',
-      compareRef: '[REDACTED_KEY]',
+      invalidFields: ['compareRef'],
       unexpectedKeyCount: 2,
     },
     error: 'invalid [REDACTED_MODEL]',
@@ -96,7 +96,10 @@ test('installed Pi validation cannot echo model-authored fields into private fai
   );
   const message = {
     role: 'assistant',
-    content: [{ type: 'toolCall', id: 'invalid-trajectory', name: 'trajectory_read', arguments: { [raw]: raw } }],
+    content: [{
+      type: 'toolCall', id: 'invalid-trajectory', name: 'trajectory_read',
+      arguments: { ref: raw, [raw]: raw },
+    }],
     api: 'test',
     provider: 'test',
     model: 'test',
@@ -127,7 +130,7 @@ test('installed Pi validation cannot echo model-authored fields into private fai
     if (failure) failures.push(failure);
   }
   assert.equal(failures.length, 1);
-  assert.deepEqual(failures[0].arguments, { unexpectedKeyCount: 1 });
+  assert.deepEqual(failures[0].arguments, { invalidFields: ['ref'], unexpectedKeyCount: 1 });
   assert.match(failures[0].error, /must not have additional properties/);
   assert.doesNotMatch(JSON.stringify(failures[0]), /PRIVATE_MODEL_REASONING|Received arguments/);
 });
