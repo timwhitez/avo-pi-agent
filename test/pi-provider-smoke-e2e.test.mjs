@@ -178,6 +178,78 @@ test('installed Pi keeps provider failures distinct from model termination', asy
   }
 });
 
+test('installed Pi recovers server_is_overloaded in the same game loop', async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (requests.length === 1) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        error: {
+          message: 'Our servers are currently overloaded. Please try again later.',
+          type: 'server_error',
+          code: 'server_is_overloaded',
+        },
+      }));
+      return;
+    }
+    sendToolCall(response, {
+      responseId: 'resp_recovered',
+      itemId: 'fc_recovered',
+      callId: 'call_recovered',
+      name: 'act',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  let actions = 0;
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Use the tool.',
+      initialPrompt: 'Take one action.',
+      tools: [{
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
+          actions += 1;
+          return { text: 'action complete', details: {}, terminate: true };
+        },
+      }],
+      shouldStop: () => actions === 1,
+      runtimeStatus: () => ({
+        state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions, maxActions: 1,
+        terminalReason: actions ? 'win' : 'none', allowedNext: actions ? 'finish' : 'take a legal action',
+      }),
+    });
+    assert.equal(requests.length, 2, String(result.error));
+    assert.equal(actions, 1);
+    assert.equal(result.error, null);
+    assert.equal(result.transientRecoveries, 1);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
 test('installed Pi bounds repeated read-only tool turns without environment progress', async () => {
   const requests = [];
   const server = http.createServer(async (request, response) => {
