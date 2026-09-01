@@ -355,13 +355,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       lastNovelToolOutcomes = novelToolOutcomes;
       agent.subscribe(emitEvent);
       await agent.prompt(initialPrompt);
-      let noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
+      let noToolTurn = !shouldStop()
+        && !agent.state.errorMessage
+        && latestAssistantTurnHasNoToolCall(agent.state.messages);
       // Provider-side stream drops surface as session errors. Recovering the
       // turn in place keeps every prior action; a whole-game retry would
       // replay them all. Only an explicit transient allowlist recovers, and
       // only up to a bounded number of times per game.
       const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
-      const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
+      const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|server_is_overloaded|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
       for (;;) {
         const sessionError = agent.state.errorMessage;
@@ -387,7 +389,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         const turnsBeforeContinue = outerTurns;
         await agent.continue();
         outerTurns = Math.max(outerTurns, turnsBeforeContinue + 1);
-        noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
+        noToolTurn = !shouldStop()
+          && !agent.state.errorMessage
+          && latestAssistantTurnHasNoToolCall(agent.state.messages);
       }
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       const messages = agent.state.messages;
