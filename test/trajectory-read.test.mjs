@@ -277,6 +277,65 @@ test('trajectory region and diff views enforce their output bounds', async () =>
   }
 });
 
+test('exact 64x64 trajectory events use the configured tool-result bound', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-trajectory-bound-'));
+  const memoryDir = path.join(root, 'memory');
+  const before = Array.from({ length: 64 }, (_, y) => (
+    Array.from({ length: 64 }, (_, x) => (x + y) % 16)
+  ));
+  const after = before.map((row) => [...row]);
+  after[0][0] = 15;
+  const frame = (grid) => ({
+    game_id: 'trajectory-bound-v1',
+    frame: grid,
+    state: 'PLAYING',
+    levels_completed: 0,
+    win_levels: 1,
+    guid: 'private-guid',
+    available_actions: ['ACTION1'],
+  });
+  const config = {
+    maxActions: 10,
+    stallWindow: 8,
+    memoryDir,
+    workspaceDir: path.join(root, 'workspace'),
+    toolResultMaxChars: 24_000,
+  };
+  try {
+    const agent = new AvoArcAgent({
+      gameId: 'trajectory-bound-v1',
+      environment: {
+        async start() { return frame(before); },
+        async step() { return frame(after); },
+      },
+      loop: inertLoop,
+      config,
+    });
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const evidenceRef = (await tools.act.execute({ action: 'ACTION1' })).details.evidenceRef;
+    const exact = await tools.trajectory_read.execute({ ref: evidenceRef, part: 'event' });
+    assert.ok(exact.text.length > 20_000);
+    assert.ok(exact.text.length < 24_000);
+    assert.deepEqual(JSON.parse(exact.text).beforeObservation.frame, before);
+    assert.deepEqual(JSON.parse(exact.text).observation.frame, after);
+
+    const restricted = new AvoArcAgent({
+      gameId: 'trajectory-bound-v1',
+      environment: {},
+      loop: inertLoop,
+      config: { ...config, toolResultMaxChars: 20_000 },
+    });
+    const restrictedTools = Object.fromEntries(restricted.exposedTools().map((tool) => [tool.name, tool]));
+    await assert.rejects(
+      restrictedTools.trajectory_read.execute({ ref: evidenceRef, part: 'event' }),
+      /trajectory_read result exceeds 20000 characters/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('production agent refuses legacy lossy evidence before opening the environment', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-legacy-trajectory-'));
   const memoryDir = path.join(root, 'memory');

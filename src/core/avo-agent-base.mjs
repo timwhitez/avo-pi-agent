@@ -997,8 +997,12 @@ export class AvoArcAgent {
       };
     }
     const text = JSON.stringify(value);
-    if (text.length > 20_000) {
-      throw new Error('trajectory_read result exceeds 20000 characters; request one ref with part=before or part=after');
+    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
+      throw new Error('tool result character limit must be a positive safe integer');
+    }
+    if (text.length > maxChars) {
+      throw new Error(`trajectory_read result exceeds ${maxChars} characters; request one ref with part=before or part=after`);
     }
     return this.toolResult(text, {
       evidenceRef: hasRef ? ref : null,
