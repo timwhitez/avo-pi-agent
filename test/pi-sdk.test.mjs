@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
 import { policySystemPrompt, policyToolContract } from '../src/core/policy-profile.mjs';
+import { privateProviderIncidentEvidence } from '../src/redaction.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 
 test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools', async () => {
@@ -354,11 +355,22 @@ test('Pi lifecycle telemetry counts pre-execution validation, unknown-tool, and 
   }], { transientRecoveries: 0, exhaustedOuterTurns: false }).providerErrors, 1);
   const retryThenStreamError = telemetryModule.createRunTelemetry();
   retryThenStreamError.providerHttpErrors = 1;
-  retryThenStreamError.pendingModelRequests.push({ lastHttpFailed: false });
+  retryThenStreamError.pendingModelRequests.push({ lastHttpFailed: false, requestSequence: 2 });
+  const providerIncidents = [];
   assert.equal(telemetryModule.finishRunTelemetry(retryThenStreamError, [], {
     transientRecoveries: 0,
     exhaustedOuterTurns: false,
+    onProviderIncident: (event) => providerIncidents.push(event),
   }).providerErrors, 2);
+  assert.deepEqual(providerIncidents, [{
+    type: 'avo_provider_incident',
+    category: 'stream-error',
+    requestSequence: 2,
+  }]);
+  assert.equal(providerIncidents.map((event) => privateProviderIncidentEvidence(
+    event,
+    { gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 1 },
+  )).length, retryThenStreamError.providerStreamErrors);
 });
 
 test('real Responses adapter does not count one terminal HTTP failure twice', async () => {
@@ -376,6 +388,7 @@ test('real Responses adapter does not count one terminal HTTP failure twice', as
     globalThis.fetch = async () => new Response(JSON.stringify({
       error: { message: 'contract failure', type: 'invalid_request_error' },
     }), { status: 400, headers: { 'content-type': 'application/json' } });
+    const incidents = [];
     const loop = await createPiSdkLoop({
       provider: {
         baseUrl: 'https://provider.invalid/v1',
@@ -386,7 +399,9 @@ test('real Responses adapter does not count one terminal HTTP failure twice', as
       maxOuterTurns: 2,
       policyProfile: 'minimal-v1',
       workspaceMode: 'disabled',
-    });
+    }, { onEvent: (event) => {
+      if (event.type === 'avo_provider_incident') incidents.push(event);
+    } });
     const tools = effectiveAvoTools('disabled', 'minimal-v1');
     const result = await loop.run({
       systemPrompt: policySystemPrompt('minimal-v1'),
@@ -406,6 +421,9 @@ test('real Responses adapter does not count one terminal HTTP failure twice', as
       result.mechanismMetrics.providerErrors,
       result.mechanismMetrics.providerHttpRequests,
     );
+    assert.equal(incidents.length, result.mechanismMetrics.providerErrors);
+    assert.ok(incidents.every((event) => event.category === 'http-error'));
+    assert.ok(incidents.every((event) => Number.isSafeInteger(event.requestSequence)));
   } finally {
     globalThis.fetch = previous.fetch;
     restoreEnv('OPENAI_API_KEY', previous.apiKey);

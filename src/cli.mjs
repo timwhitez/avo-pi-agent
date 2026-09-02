@@ -22,7 +22,9 @@ import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import {
+  privateProviderIncidentEvidence,
   privateToolFailureEvidence,
+  privateWorkspaceFailureEvidence,
   redactRuntimeObject,
   redactRuntimeSecrets,
 } from './redaction.mjs';
@@ -213,17 +215,51 @@ async function runPublic(args) {
       let activeAttempt = null;
       let contextSequence = 0;
       const pendingToolCalls = new Map();
+      const completedPrivateToolCalls = new Set();
       const allowedToolNames = new Set(effectiveAvoToolNames(
         gameConfig.workspaceMode,
         gameConfig.policyProfile,
       ));
       const onLoopEvent = (event) => {
-        const failure = privateToolFailureEvidence(pendingToolCalls, event, {
+        const toolCallId = String(event.toolCallId || '');
+        const duplicateToolEnd = event.type === 'tool_execution_end'
+          && (!toolCallId || completedPrivateToolCalls.has(toolCallId));
+        if (event.type === 'tool_execution_end' && toolCallId && !duplicateToolEnd) {
+          completedPrivateToolCalls.add(toolCallId);
+        }
+        const incidentContext = {
+          gameId,
+          versionedGameId,
+          attempt: activeAttempt,
+          contextSequence: contextSequence + 1,
+        };
+        const failure = duplicateToolEnd ? null : privateToolFailureEvidence(pendingToolCalls, event, {
           gameId,
           versionedGameId,
           attempt: activeAttempt,
         }, process.env, allowedToolNames);
-        if (failure) process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(failure)}\n`);
+        if (failure) {
+          const sequencedFailure = String(event.toolName || '').startsWith('workspace_')
+            ? { ...failure, contextSequence: ++contextSequence }
+            : failure;
+          process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(sequencedFailure)}\n`);
+        }
+        const workspaceFailure = duplicateToolEnd ? null : privateWorkspaceFailureEvidence(
+          event,
+          incidentContext,
+          process.env,
+          allowedToolNames,
+        );
+        if (workspaceFailure) {
+          contextSequence += 1;
+          process.stdout.write(`\n[avo-workspace-failure] ${JSON.stringify(workspaceFailure)}\n`);
+        }
+        if (event.type === 'avo_provider_incident') {
+          const providerIncident = privateProviderIncidentEvidence(event, incidentContext);
+          contextSequence += 1;
+          process.stdout.write(`\n[avo-provider-incident] ${JSON.stringify(providerIncident)}\n`);
+          return;
+        }
         if (event.type === 'avo_runtime_status'
             || event.type === 'avo_context_compaction'
             || event.type === 'avo_provider_request') {
@@ -268,6 +304,8 @@ async function runPublic(args) {
         const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           activeAttempt = attempt;
+          pendingToolCalls.clear();
+          completedPrivateToolCalls.clear();
           const consumed = attemptResults.length
             ? aggregateAttemptTelemetry(attemptResults)
             : { actions: 0, outerTurns: 0 };

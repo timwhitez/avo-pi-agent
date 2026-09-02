@@ -116,6 +116,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   let providerRequestSequence = 0;
   let activeTelemetry = null;
   const emitEvent = (event) => {
+    let providerIncident = null;
     if (activeTelemetry) {
       recordPiLifecycleTelemetry(activeTelemetry, event);
       if (event?.type === 'avo_context_compaction') {
@@ -130,10 +131,16 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
             && (event.message.stopReason === 'error' || event.message.errorMessage)
             && request.lastHttpFailed !== true) {
           activeTelemetry.providerStreamErrors += 1;
+          providerIncident = {
+            type: 'avo_provider_incident',
+            category: 'stream-error',
+            requestSequence: request.requestSequence,
+          };
         }
       }
     }
     onEvent(event);
+    if (providerIncident) onEvent(providerIncident);
   };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
@@ -143,7 +150,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       telemetry.modelCalls += 1;
       telemetry.requestStarts.push(Date.now());
     }
-    const request = telemetry ? { lastHttpFailed: false } : null;
+    const request = telemetry ? { lastHttpFailed: false, requestSequence } : null;
     if (request) telemetry.pendingModelRequests.push(request);
     const baseFetch = options?.fetch || globalThis.fetch;
     const measuredFetch = async (...args) => {
@@ -153,12 +160,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         if (request) request.lastHttpFailed = response?.ok === false;
         if (telemetry && response?.ok === false) {
           telemetry.providerHttpErrors += 1;
+          emitEvent({ type: 'avo_provider_incident', category: 'http-error', requestSequence });
         }
         return response;
       } catch (error) {
         if (telemetry) {
           telemetry.providerHttpErrors += 1;
           request.lastHttpFailed = true;
+          emitEvent({ type: 'avo_provider_incident', category: 'transport-error', requestSequence });
         }
         throw error;
       }
@@ -414,6 +423,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         mechanismMetrics: finishRunTelemetry(runTelemetry, messages, {
           transientRecoveries,
           exhaustedOuterTurns,
+          onProviderIncident: emitEvent,
         }),
       };
       } finally {
@@ -520,13 +530,25 @@ function countSuccessfulInterfaceCall(telemetry, name) {
   if (field) telemetry[field] += 1;
 }
 
-export function finishRunTelemetry(telemetry, messages, { transientRecoveries, exhaustedOuterTurns }) {
+export function finishRunTelemetry(telemetry, messages, {
+  transientRecoveries,
+  exhaustedOuterTurns,
+  onProviderIncident = () => {},
+}) {
   const now = Date.now();
   while (telemetry.requestStarts.length) {
     telemetry.modelLatencyMs += Math.max(0, now - telemetry.requestStarts.shift());
   }
   while (telemetry.pendingModelRequests.length) {
-    if (telemetry.pendingModelRequests.shift().lastHttpFailed !== true) telemetry.providerStreamErrors += 1;
+    const request = telemetry.pendingModelRequests.shift();
+    if (request.lastHttpFailed !== true) {
+      telemetry.providerStreamErrors += 1;
+      onProviderIncident({
+        type: 'avo_provider_incident',
+        category: 'stream-error',
+        requestSequence: request.requestSequence,
+      });
+    }
   }
   const usage = {
     inputTokens: 0,

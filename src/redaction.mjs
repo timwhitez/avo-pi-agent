@@ -47,7 +47,7 @@ export function privateToolFailureEvidence(
   if (!(pending instanceof Map)) throw new Error('tool failure evidence requires a pending-call map');
   const id = String(event?.toolCallId || '');
   if (event?.type === 'tool_execution_start') {
-    if (id) pending.set(id, event.args ?? null);
+    if (id && !pending.has(id)) pending.set(id, event.args ?? null);
     return null;
   }
   if (event?.type !== 'tool_execution_end') return null;
@@ -64,6 +64,48 @@ export function privateToolFailureEvidence(
     arguments: boundedDiagnosticArguments(args, toolName, env),
     error: diagnosticToolError(error, toolName, env),
   };
+}
+
+export function privateWorkspaceFailureEvidence(event, context = {}, env = process.env, allowedToolNames = new Set()) {
+  if (event?.type !== 'tool_execution_end'
+      || event.isError === true
+      || event.result?.details?.ok !== false) return null;
+  const rawToolName = String(event.toolName || '');
+  if (!rawToolName.startsWith('workspace_')) return null;
+  const toolName = allowedToolNames.has(rawToolName) ? rawToolName : 'unknown-tool';
+  return {
+    ...privateIncidentContext(context, env),
+    type: 'avo_workspace_failure',
+    toolName,
+    category: rawToolName === 'workspace_python'
+      ? 'python-execution-error'
+      : 'tool-reported-unsuccessful',
+  };
+}
+
+export function privateProviderIncidentEvidence(event, context = {}, env = process.env) {
+  if (event?.type !== 'avo_provider_incident') return null;
+  const category = String(event.category || '');
+  if (!['http-error', 'transport-error', 'stream-error'].includes(category)) {
+    throw new Error('provider incident category is invalid');
+  }
+  if (!Number.isSafeInteger(event.requestSequence) || event.requestSequence < 1) {
+    throw new Error('provider incident request sequence is invalid');
+  }
+  return {
+    ...privateIncidentContext(context, env),
+    type: 'avo_provider_incident',
+    category,
+    requestSequence: event.requestSequence,
+  };
+}
+
+function privateIncidentContext(context, env) {
+  return redactRuntimeObject(Object.fromEntries(
+    ['gameId', 'versionedGameId', 'attempt', 'contextSequence']
+      .filter((key) => context[key] !== undefined)
+      .map((key) => [key, context[key]]),
+  ), env);
 }
 
 function boundedDiagnosticArguments(value, toolName, env, maxBytes = 2048) {

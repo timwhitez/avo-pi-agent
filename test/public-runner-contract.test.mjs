@@ -112,17 +112,24 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
         const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
-        const handoff = async (toolResult = '') => this.options.streamFn(
-          this.options.initialState.model,
-          {
-            systemPrompt: this.options.initialState.systemPrompt,
-            messages: toolResult
-              ? [{ role: 'user', content: [{ type: 'text', text: toolResult }] }]
-              : [],
-            tools: this.options.initialState.tools,
-          },
-          { reasoning: this.options.initialState.thinkingLevel },
-        );
+        const handoff = async (toolResult = '') => {
+          const result = await this.options.streamFn(
+            this.options.initialState.model,
+            {
+              systemPrompt: this.options.initialState.systemPrompt,
+              messages: toolResult
+                ? [{ role: 'user', content: [{ type: 'text', text: toolResult }] }]
+                : [],
+              tools: this.options.initialState.tools,
+            },
+            { reasoning: this.options.initialState.thinkingLevel },
+          );
+          this.listener?.({
+            type: 'message_end',
+            message: { role: 'assistant', content: [], stopReason: 'stop', usage: {} },
+          });
+          return result;
+        };
         await handoff();
         if (this.options.initialState.systemPrompt.includes('protocol diagnostic')) {
           const observed = await call('observe');
@@ -167,6 +174,38 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
             toolName: 'trajectory_read', isError: true,
             result: { content: [{ type: 'text', text: 'Validation failed for tool "trajectory_read":\n  - root: must not have additional properties\n\nReceived arguments:\n{"' + raw + '":"' + raw + '"}' }], details: {} },
           });
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'python-error',
+            toolName: 'workspace_write', args: { path: 'notes.txt', content: raw },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'python-error',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: '',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'python-error',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
+          });
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'workspace-runtime-error',
+            toolName: 'workspace_write', args: { path: raw, content: raw },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'workspace-runtime-error',
+            toolName: 'workspace_write', isError: true,
+            result: { content: [{ type: 'text', text: raw }], details: {} },
+          });
+          this.listener?.({
+            type: 'avo_provider_incident', category: 'http-error', requestSequence: 1,
+            responseBody: raw,
+          });
         }
         if (frame.gameId === 'g25-v1') {
           completedGamePrompts += 1;
@@ -196,10 +235,30 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
         }
         if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 1) {
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', args: { path: 'attempt.txt', content: 'first' },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: 'failed' }], details: { ok: false } },
+          });
           const reset = await call('reset', { rationale: 'first attempt reset before injected failure' });
           if (!reset.details.fullReset) throw new Error('first retry fixture reset was not full');
           this.state.errorMessage = 'contract injected first-attempt failure';
           return;
+        }
+        if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 2) {
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', args: { path: 'attempt.txt', content: 'third' },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: 'failed' }], details: { ok: false } },
+          });
         }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
@@ -856,8 +915,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.deepEqual(g02Context.map((record) => [record.type, record.attempt, record.contextSequence]), [
     ['avo_runtime_status', 1, 1],
     ['avo_provider_request', 1, 2],
-    ['avo_runtime_status', 3, 3],
-    ['avo_provider_request', 3, 4],
+    ['avo_runtime_status', 3, 4],
+    ['avo_provider_request', 3, 5],
   ]);
   const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
   assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
@@ -878,6 +937,31 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     toolName: 'trajectory_read',
     arguments: { invalidFields: ['ref'], unexpectedKeyCount: 1 },
     error: 'Validation failed for tool "trajectory_read":\n  - root: must not have additional properties',
+  }, {
+    gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1,
+    type: 'avo_tool_failure', toolName: 'workspace_write',
+    arguments: { omitted: true, bytes: 94, keyCount: 2 },
+    error: 'tool execution failed; raw error omitted', contextSequence: 4,
+  }]);
+  const workspaceFailureRecords = result.stdout.split('\n')
+    .filter((line) => line.startsWith('[avo-workspace-failure] '))
+    .map((line) => JSON.parse(line.slice('[avo-workspace-failure] '.length)));
+  assert.deepEqual(workspaceFailureRecords, [{
+    gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 3,
+    type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
+  }, {
+    gameId: 'g02', versionedGameId: 'g02-v1', attempt: 1, contextSequence: 3,
+    type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
+  }, {
+    gameId: 'g02', versionedGameId: 'g02-v1', attempt: 3, contextSequence: 6,
+    type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
+  }]);
+  const providerIncidentRecords = result.stdout.split('\n')
+    .filter((line) => line.startsWith('[avo-provider-incident] '))
+    .map((line) => JSON.parse(line.slice('[avo-provider-incident] '.length)));
+  assert.deepEqual(providerIncidentRecords, [{
+    gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 5,
+    type: 'avo_provider_incident', category: 'http-error', requestSequence: 1,
   }]);
   assert.doesNotMatch(result.stdout, /PRIVATE_MODEL_REASONING|Received arguments/);
 
@@ -903,13 +987,15 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.results[0].rejectedCommands, 1);
   assert.equal(report.results[0].terminalRejectedCommands, 1);
   assert.equal(report.results[0].postTerminalGameplayActions, 0);
-  assert.equal(report.results[0].mechanismMetrics.toolFailures, 1);
-  assert.doesNotMatch(JSON.stringify(report), /avo_tool_failure|PRIVATE_MODEL_REASONING|Received arguments/);
+  assert.equal(report.results[0].mechanismMetrics.toolFailures, 2);
+  assert.equal(report.results[0].mechanismMetrics.workspaceFailures, 2);
+  assert.doesNotMatch(JSON.stringify(report), /avo_(?:tool|workspace)_failure|avo_provider_incident|PRIVATE_MODEL_REASONING|Received arguments/);
   assert.equal(report.results[1].resets, 1);
   assert.equal(report.results[1].fullResets, 1);
   assert.equal(report.results[1].episodeId, 'episode-000002');
   assert.equal(report.results[1].actions, report.results[1].gameplayActions + 1);
   assert.equal(report.results[1].executions.length, 3);
+  assert.equal(report.results[1].mechanismMetrics.workspaceFailures, 2);
   assert.equal(report.summary.totalResets, 2);
   assert.equal(report.summary.totalTerminalRejectedCommands, 1);
   assert.equal(report.summary.totalPostTerminalGameplayActions, 0);
