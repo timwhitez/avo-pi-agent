@@ -235,10 +235,30 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
         }
         if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 1) {
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', args: { path: 'attempt.txt', content: 'first' },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: 'failed' }], details: { ok: false } },
+          });
           const reset = await call('reset', { rationale: 'first attempt reset before injected failure' });
           if (!reset.details.fullReset) throw new Error('first retry fixture reset was not full');
           this.state.errorMessage = 'contract injected first-attempt failure';
           return;
+        }
+        if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 2) {
+          this.listener?.({
+            type: 'tool_execution_start', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', args: { path: 'attempt.txt', content: 'third' },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'reused-across-attempts',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: 'failed' }], details: { ok: false } },
+          });
         }
         let guard = 0;
         while (!String(frame.state).includes('WIN') && guard < 200) {
@@ -895,8 +915,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.deepEqual(g02Context.map((record) => [record.type, record.attempt, record.contextSequence]), [
     ['avo_runtime_status', 1, 1],
     ['avo_provider_request', 1, 2],
-    ['avo_runtime_status', 3, 3],
-    ['avo_provider_request', 3, 4],
+    ['avo_runtime_status', 3, 4],
+    ['avo_provider_request', 3, 5],
   ]);
   const g02Statuses = g02Context.filter((record) => record.type === 'avo_runtime_status');
   assert.equal(g02Statuses[1].status.maxActions, g02Statuses[0].status.maxActions - 1);
@@ -928,6 +948,12 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     .map((line) => JSON.parse(line.slice('[avo-workspace-failure] '.length)));
   assert.deepEqual(workspaceFailureRecords, [{
     gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 3,
+    type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
+  }, {
+    gameId: 'g02', versionedGameId: 'g02-v1', attempt: 1, contextSequence: 3,
+    type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
+  }, {
+    gameId: 'g02', versionedGameId: 'g02-v1', attempt: 3, contextSequence: 6,
     type: 'avo_workspace_failure', toolName: 'workspace_write', category: 'tool-reported-unsuccessful',
   }]);
   const providerIncidentRecords = result.stdout.split('\n')
@@ -969,6 +995,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(report.results[1].episodeId, 'episode-000002');
   assert.equal(report.results[1].actions, report.results[1].gameplayActions + 1);
   assert.equal(report.results[1].executions.length, 3);
+  assert.equal(report.results[1].mechanismMetrics.workspaceFailures, 2);
   assert.equal(report.summary.totalResets, 2);
   assert.equal(report.summary.totalTerminalRejectedCommands, 1);
   assert.equal(report.summary.totalPostTerminalGameplayActions, 0);

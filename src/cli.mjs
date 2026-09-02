@@ -304,6 +304,8 @@ async function runPublic(args) {
         const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           activeAttempt = attempt;
+          pendingToolCalls.clear();
+          completedPrivateToolCalls.clear();
           const consumed = attemptResults.length
             ? aggregateAttemptTelemetry(attemptResults)
             : { actions: 0, outerTurns: 0 };
