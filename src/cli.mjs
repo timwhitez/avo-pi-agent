@@ -22,7 +22,9 @@ import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
 import {
+  privateProviderIncidentEvidence,
   privateToolFailureEvidence,
+  privateWorkspaceFailureEvidence,
   redactRuntimeObject,
   redactRuntimeSecrets,
 } from './redaction.mjs';
@@ -218,12 +220,39 @@ async function runPublic(args) {
         gameConfig.policyProfile,
       ));
       const onLoopEvent = (event) => {
+        const incidentContext = {
+          gameId,
+          versionedGameId,
+          attempt: activeAttempt,
+          contextSequence: contextSequence + 1,
+        };
         const failure = privateToolFailureEvidence(pendingToolCalls, event, {
           gameId,
           versionedGameId,
           attempt: activeAttempt,
         }, process.env, allowedToolNames);
-        if (failure) process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(failure)}\n`);
+        if (failure) {
+          const sequencedFailure = String(event.toolName || '').startsWith('workspace_')
+            ? { ...failure, contextSequence: ++contextSequence }
+            : failure;
+          process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(sequencedFailure)}\n`);
+        }
+        const workspaceFailure = privateWorkspaceFailureEvidence(
+          event,
+          incidentContext,
+          process.env,
+          allowedToolNames,
+        );
+        if (workspaceFailure) {
+          contextSequence += 1;
+          process.stdout.write(`\n[avo-workspace-failure] ${JSON.stringify(workspaceFailure)}\n`);
+        }
+        if (event.type === 'avo_provider_incident') {
+          const providerIncident = privateProviderIncidentEvidence(event, incidentContext);
+          contextSequence += 1;
+          process.stdout.write(`\n[avo-provider-incident] ${JSON.stringify(providerIncident)}\n`);
+          return;
+        }
         if (event.type === 'avo_runtime_status'
             || event.type === 'avo_context_compaction'
             || event.type === 'avo_provider_request') {

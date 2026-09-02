@@ -8,6 +8,7 @@ import test from 'node:test';
 import { once } from 'node:events';
 
 import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
+import { privateWorkspaceFailureEvidence } from '../src/redaction.mjs';
 import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 
 test('installed Pi adapter proves the full production schema and 16K tail over local Responses SSE', async () => {
@@ -171,6 +172,95 @@ test('installed Pi keeps provider failures distinct from model termination', asy
     });
     assert.match(String(result.error), /provider rejected request/);
     assert.equal(result.terminationReason, null);
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    server.close();
+  }
+});
+
+test('installed Pi records unsuccessful workspace Python without private payloads', async () => {
+  const requests = [];
+  const events = [];
+  const raw = 'PRIVATE_PYTHON_TRACE_do_not_emit';
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    sendToolCall(response, requests.length === 1 ? {
+      responseId: 'resp_python_error',
+      itemId: 'fc_python_error',
+      callId: 'call_python_error',
+      name: 'workspace_python',
+      argumentsJson: JSON.stringify({ code: `raise RuntimeError('${raw}')` }),
+    } : {
+      responseId: 'resp_act_after_python_error',
+      itemId: 'fc_act_after_python_error',
+      callId: 'call_act_after_python_error',
+      name: 'act',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  let actions = 0;
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'isolated-python',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    }, { onEvent: (event) => events.push(event) });
+    const result = await loop.run({
+      systemPrompt: 'Use Python once, then act.',
+      initialPrompt: 'Use the tools.',
+      tools: [{
+        name: 'workspace_python', label: 'Python', description: 'Run Python.',
+        parameters: {
+          type: 'object', required: ['code'], additionalProperties: false,
+          properties: { code: { type: 'string' } },
+        },
+        execute: async () => ({
+          text: `PYTHON_ERROR: ${raw}`,
+          details: { ok: false, error: raw, stdout: raw, stderr: raw },
+          terminate: false,
+        }),
+      }, {
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
+          actions += 1;
+          return { text: 'action complete', details: {}, terminate: true };
+        },
+      }],
+      shouldStop: () => actions === 1,
+      runtimeStatus: () => ({
+        state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions, maxActions: 1,
+        terminalReason: actions ? 'win' : 'none', allowedNext: actions ? 'finish' : 'take a legal action',
+      }),
+    });
+    const failures = events.map((event) => privateWorkspaceFailureEvidence(
+      event,
+      { gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 1 },
+      process.env,
+      new Set(['workspace_python', 'act']),
+    )).filter(Boolean);
+    assert.equal(requests.length, 2, String(result.error));
+    assert.equal(result.mechanismMetrics.workspaceFailures, 1);
+    assert.deepEqual(failures, [{
+      gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 1,
+      type: 'avo_workspace_failure', toolName: 'workspace_python', category: 'python-execution-error',
+    }]);
+    assert.doesNotMatch(JSON.stringify(failures), /PRIVATE_PYTHON_TRACE/);
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;

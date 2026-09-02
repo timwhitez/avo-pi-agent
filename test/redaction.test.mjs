@@ -5,7 +5,9 @@ import { createAssistantMessageEventStream, Type } from '@earendil-works/pi-ai';
 import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
 import { piToolContract } from '../src/loop/pi-sdk.mjs';
 import {
+  privateProviderIncidentEvidence,
   privateToolFailureEvidence,
+  privateWorkspaceFailureEvidence,
   redactRuntimeObject,
   redactRuntimeSecrets,
 } from '../src/redaction.mjs';
@@ -86,6 +88,49 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
   }, {}, env, allowedToolNames);
   assert.deepEqual(bounded.arguments, { omitted: true, bytes: 3011, keyCount: 1 });
   assert.equal(bounded.error, 'tool execution failed; raw error omitted');
+
+  const raw = 'PRIVATE_WORKSPACE_TRACE_do_not_emit';
+  const workspaceFailure = privateWorkspaceFailureEvidence({
+    type: 'tool_execution_end',
+    toolName: 'workspace_python',
+    isError: false,
+    result: {
+      content: [{ type: 'text', text: raw }],
+      details: { ok: false, error: raw, stdout: raw, stderr: raw },
+    },
+  }, { gameId: 'g01', versionedGameId: 'g01-v1', attempt: 2, contextSequence: 9 }, env, allowedToolNames);
+  assert.deepEqual(workspaceFailure, {
+    gameId: 'g01',
+    versionedGameId: 'g01-v1',
+    attempt: 2,
+    contextSequence: 9,
+    type: 'avo_workspace_failure',
+    toolName: 'workspace_python',
+    category: 'python-execution-error',
+  });
+  assert.doesNotMatch(JSON.stringify(workspaceFailure), /PRIVATE_WORKSPACE_TRACE/);
+
+  const providerIncident = privateProviderIncidentEvidence({
+    type: 'avo_provider_incident',
+    category: 'http-error',
+    requestSequence: 7,
+    error: raw,
+    responseBody: raw,
+  }, { gameId: 'g01', attempt: 2, contextSequence: 10, private: raw }, env);
+  assert.deepEqual(providerIncident, {
+    gameId: 'g01',
+    attempt: 2,
+    contextSequence: 10,
+    type: 'avo_provider_incident',
+    category: 'http-error',
+    requestSequence: 7,
+  });
+  assert.throws(
+    () => privateProviderIncidentEvidence({
+      type: 'avo_provider_incident', category: raw, requestSequence: 8,
+    }),
+    /provider incident category is invalid/,
+  );
 });
 
 test('installed Pi validation cannot echo model-authored fields into private failure evidence', async () => {
