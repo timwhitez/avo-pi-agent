@@ -47,7 +47,7 @@ export function privateToolFailureEvidence(
   if (!(pending instanceof Map)) throw new Error('tool failure evidence requires a pending-call map');
   const id = String(event?.toolCallId || '');
   if (event?.type === 'tool_execution_start') {
-    if (id) pending.set(id, event.args ?? null);
+    if (id && !pending.has(id)) pending.set(id, event.args ?? null);
     return null;
   }
   if (event?.type !== 'tool_execution_end') return null;

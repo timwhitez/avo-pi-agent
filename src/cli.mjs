@@ -215,18 +215,25 @@ async function runPublic(args) {
       let activeAttempt = null;
       let contextSequence = 0;
       const pendingToolCalls = new Map();
+      const completedPrivateToolCalls = new Set();
       const allowedToolNames = new Set(effectiveAvoToolNames(
         gameConfig.workspaceMode,
         gameConfig.policyProfile,
       ));
       const onLoopEvent = (event) => {
+        const toolCallId = String(event.toolCallId || '');
+        const duplicateToolEnd = event.type === 'tool_execution_end'
+          && (!toolCallId || completedPrivateToolCalls.has(toolCallId));
+        if (event.type === 'tool_execution_end' && toolCallId && !duplicateToolEnd) {
+          completedPrivateToolCalls.add(toolCallId);
+        }
         const incidentContext = {
           gameId,
           versionedGameId,
           attempt: activeAttempt,
           contextSequence: contextSequence + 1,
         };
-        const failure = privateToolFailureEvidence(pendingToolCalls, event, {
+        const failure = duplicateToolEnd ? null : privateToolFailureEvidence(pendingToolCalls, event, {
           gameId,
           versionedGameId,
           attempt: activeAttempt,
@@ -237,7 +244,7 @@ async function runPublic(args) {
             : failure;
           process.stdout.write(`\n[avo-tool-failure] ${JSON.stringify(sequencedFailure)}\n`);
         }
-        const workspaceFailure = privateWorkspaceFailureEvidence(
+        const workspaceFailure = duplicateToolEnd ? null : privateWorkspaceFailureEvidence(
           event,
           incidentContext,
           process.env,

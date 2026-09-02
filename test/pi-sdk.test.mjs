@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { effectiveAvoTools } from '../src/core/avo-agent-base.mjs';
 import { policySystemPrompt, policyToolContract } from '../src/core/policy-profile.mjs';
+import { privateProviderIncidentEvidence } from '../src/redaction.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 
 test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools', async () => {
@@ -366,6 +367,10 @@ test('Pi lifecycle telemetry counts pre-execution validation, unknown-tool, and 
     category: 'stream-error',
     requestSequence: 2,
   }]);
+  assert.equal(providerIncidents.map((event) => privateProviderIncidentEvidence(
+    event,
+    { gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 1 },
+  )).length, retryThenStreamError.providerStreamErrors);
 });
 
 test('real Responses adapter does not count one terminal HTTP failure twice', async () => {

@@ -58,6 +58,9 @@ test('private tool failure evidence is correlated, bounded, and redacted', () =>
       [env.OPENAI_API_KEY]: 'secret-shaped key stays private',
     },
   }, {}, env, allowedToolNames), null);
+  privateToolFailureEvidence(pending, {
+    type: 'tool_execution_start', toolCallId: 'call-1', args: { ref: env.OPENAI_API_KEY },
+  }, {}, env, allowedToolNames);
   const failure = privateToolFailureEvidence(pending, {
     type: 'tool_execution_end',
     toolCallId: 'call-1',

@@ -184,6 +184,16 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
             result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
           });
           this.listener?.({
+            type: 'tool_execution_end', toolCallId: '',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
+          });
+          this.listener?.({
+            type: 'tool_execution_end', toolCallId: 'python-error',
+            toolName: 'workspace_write', isError: false,
+            result: { content: [{ type: 'text', text: raw }], details: { ok: false, error: raw } },
+          });
+          this.listener?.({
             type: 'tool_execution_start', toolCallId: 'workspace-runtime-error',
             toolName: 'workspace_write', args: { path: raw, content: raw },
           });
