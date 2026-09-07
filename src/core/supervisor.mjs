@@ -19,6 +19,8 @@ export class StallSupervisor {
 
   observe(event) {
     const value = { ...event };
+    const previous = this.events.at(-1);
+    if (previous && scopeOf(previous) !== scopeOf(value)) this.resolveActiveEpisode(value, 'scope-changed');
     this.events.push(value);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
     if (isObjectiveProgress(value) || value.action === 'RESET') {
@@ -27,10 +29,8 @@ export class StallSupervisor {
   }
 
   status({ legalActions = [], memory = null, knowledgeHints = [] } = {}) {
-    const latestEpisodeId = this.events.at(-1)?.episodeId ?? null;
-    const episodeEvents = latestEpisodeId === null
-      ? this.events
-      : this.events.filter((event) => event.episodeId === latestEpisodeId);
+    const scope = scopeOf(this.events.at(-1));
+    const episodeEvents = this.events.filter((event) => scopeOf(event) === scope);
     const tail = episodeEvents.slice(-this.windowSize);
     if (tail.length < this.windowSize) return idleStatus();
 
@@ -52,8 +52,8 @@ export class StallSupervisor {
     const reason = repeatedState ? 'repeated-state plateau' : `repeating transition cycle (period ${cycle})`;
     const pattern = repeatedState
       ? `states=${hashes.join('|')};level=${levels[0]}`
-      : `cycle=${transitions.slice(0, cycle).join('|')};period=${cycle};level=${levels.at(-1)}`;
-    const key = `${repeatedState ? 'state' : 'cycle'}:${pattern}`;
+      : `cycle=${canonicalCycle(transitions.slice(0, cycle))};period=${cycle};level=${levels.at(-1)}`;
+    const key = `${scope}:${repeatedState ? 'state' : 'cycle'}:${pattern}`;
     const evidenceRefs = tail.map((event) => event.id).filter(Boolean);
 
     if (!this.activeEpisode || this.activeEpisode.key !== key) {
@@ -199,6 +199,19 @@ export class StallSupervisor {
 
 function idleStatus() {
   return { stalled: false, activeStall: false, reason: null, directions: [], repeated: false, suppressed: false };
+}
+
+function scopeOf(event) {
+  return JSON.stringify([event?.gameId ?? null, event?.attemptId ?? null, event?.episodeId ?? null]);
+}
+
+function canonicalCycle(transitions) {
+  let first = JSON.stringify(transitions);
+  for (let index = 1; index < transitions.length; index++) {
+    const rotation = JSON.stringify([...transitions.slice(index), ...transitions.slice(0, index)]);
+    if (rotation < first) first = rotation;
+  }
+  return first;
 }
 
 function isObjectiveProgress(event) {

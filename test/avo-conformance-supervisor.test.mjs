@@ -16,6 +16,61 @@ function event(index, overrides = {}) {
   };
 }
 
+function cycleEvent(index, order, overrides = {}) {
+  const transition = order[index % order.length];
+  return event(index, { gameId: 'game-a', attemptId: 'attempt-1', episodeId: 'episode-1',
+    afterHash: `state-${transition}`, transitionId: `transition-${transition}`, ...overrides });
+}
+
+for (const period of [3, 4]) test(`period-${period} rotations stay one bounded stall episode through retention`, () => {
+  const supervisor = new StallSupervisor(8, { maxEvents: 12 });
+  const emitted = [];
+  const order = Array.from({ length: period }, (_, index) => String(index));
+  for (let index = 0; index < 64; index++) {
+    supervisor.observe(cycleEvent(index, order));
+    const status = supervisor.status();
+    if (status.stalled) emitted.push(status);
+  }
+  assert.deepEqual(emitted.map((entry) => entry.escalationLevel), [0, 1, 2]);
+  assert.equal(new Set(emitted.map((entry) => entry.episodeId)).size, 1);
+  assert.equal(supervisor.episodeSequence, 1);
+  assert.equal(supervisor.history().length, 3);
+  assert.equal(supervisor.events.length, 12);
+});
+
+test('ordered cycles remain distinct and scope/progress/reset boundaries reopen evidence windows', () => {
+  const supervisor = new StallSupervisor(8, { maxEscalations: 0 });
+  const feed = (order, extra = {}, count = 8) => {
+    let result;
+    for (let index = 0; index < count; index++) {
+      supervisor.observe(cycleEvent(index, order, extra));
+      result = supervisor.status();
+    }
+    return result;
+  };
+  const first = feed(['a', 'b', 'c', 'd']);
+  const changed = feed(['a', 'c', 'b', 'd']);
+  assert.ok(changed.stalled || changed.activeStall);
+  assert.notEqual(changed.episodeId, first.episodeId, 'sorting transitions would collapse distinct order');
+  let scope = {};
+  for (const patch of [{ gameId: 'game-b' }, { attemptId: 'attempt-2' }, { episodeId: 'episode-2' }]) {
+    scope = { ...scope, ...patch };
+    assert.equal(feed(['a', 'b', 'c'], scope, 7).stalled, false);
+    assert.equal(supervisor.activeEpisode, null);
+    supervisor.observe(cycleEvent(7, ['a', 'b', 'c'], scope));
+    assert.equal(supervisor.status().stalled, true);
+  }
+  const beforeProgress = supervisor.episodeSequence;
+  supervisor.observe(cycleEvent(8, ['a', 'b', 'c'], { ...scope, levelDelta: 1, levelsCompleted: 1 }));
+  assert.equal(supervisor.activeEpisode, null);
+  assert.equal(feed(['a', 'b', 'c'], { ...scope, levelsCompleted: 1 }).stalled, true);
+  assert.equal(supervisor.episodeSequence, beforeProgress + 1);
+  supervisor.observe(cycleEvent(9, ['a', 'b', 'c'], { ...scope, action: 'RESET', episodeId: 'episode-3' }));
+  assert.equal(supervisor.activeEpisode, null);
+  assert.equal(feed(['a', 'b', 'c'], { ...scope, episodeId: 'episode-3' }).stalled, true);
+  assert.equal(supervisor.episodeSequence, beforeProgress + 2);
+});
+
 test('supervisor stays silent before explicit stagnation criteria are met', () => {
   const supervisor = new StallSupervisor(4);
   supervisor.observe(event(1, { afterHash: 'a' }));
