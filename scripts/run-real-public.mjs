@@ -262,6 +262,7 @@ try {
     }),
     timeoutMs,
     appendLogs: resuming,
+    logRoot: privateDir,
     stdoutFile,
     stderrFile,
     maxTailChars: 64 * 1024,

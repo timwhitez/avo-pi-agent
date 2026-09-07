@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { managedProcessGroup } from '../local/process-group.mjs';
+import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 
 const DEFAULT_TAIL_CHARS = 64 * 1024;
 
@@ -12,6 +13,7 @@ export async function runProcess(command, args, {
   timeoutMs = 0,
   stdoutFile = null,
   stderrFile = null,
+  logRoot = null,
   appendLogs = false,
   maxTailChars = DEFAULT_TAIL_CHARS,
   maxStdoutBytes = null,
@@ -22,15 +24,26 @@ export async function runProcess(command, args, {
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
   const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
   const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
-  const stdoutSink = stdoutFile ? createSink(stdoutFile, { append: appendLogs }) : null;
-  const stderrSink = stderrFile ? createSink(stderrFile, { append: appendLogs }) : null;
-  const ownedGroup = managedProcessGroup();
-  const child = spawn(command, args, {
-    cwd,
-    env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32' && !ownedGroup,
-  });
+  if ((stdoutFile || stderrFile) && (typeof logRoot !== 'string' || !logRoot.trim())) {
+    throw new Error('benchmark log sinks require an explicit logRoot');
+  }
+  let stdoutSink = null;
+  let stderrSink = null;
+  let child;
+  try {
+    stdoutSink = stdoutFile ? createSink(stdoutFile, { root: logRoot, append: appendLogs }) : null;
+    stderrSink = stderrFile ? createSink(stderrFile, { root: logRoot, append: appendLogs }) : null;
+    const ownedGroup = managedProcessGroup();
+    child = spawn(command, args, {
+      cwd,
+      env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32' && !ownedGroup,
+    });
+  } catch (error) {
+    await Promise.all([closeSink(stdoutSink), closeSink(stderrSink)]);
+    throw error;
+  }
 
   let stdoutTail = '';
   let stderrTail = '';
@@ -112,9 +125,69 @@ export async function runProcess(command, args, {
   };
 }
 
-function createSink(file, { append = false } = {}) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  return fs.createWriteStream(file, { mode: 0o600, flags: append ? 'a' : 'w' });
+function createSink(file, { root, append = false }) {
+  if (process.platform !== 'linux' || !fs.constants.O_NOFOLLOW || !fs.constants.O_DIRECTORY) {
+    throw new Error('confined benchmark log sinks require Linux no-follow directory descriptors');
+  }
+  const target = path.resolve(file);
+  const parent = path.dirname(target);
+  root = path.resolve(root);
+  const rootIdentity = fs.lstatSync(root, { bigint: true });
+  ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
+  const parentIdentity = fs.lstatSync(parent, { bigint: true });
+  const directoryFd = fs.openSync(parent, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  let fd;
+  try {
+    const directory = fs.fstatSync(directoryFd, { bigint: true });
+    const assertDirectoryIdentity = () => {
+      ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
+      if (!sameInode(rootIdentity, fs.lstatSync(root, { bigint: true }))
+          || !sameInode(parentIdentity, directory)
+          || !sameInode(directory, fs.lstatSync(parent, { bigint: true }))) {
+        throw new Error('benchmark log directory changed during acquisition');
+      }
+    };
+    // Establish descriptor authority before any writable basename acquisition.
+    assertDirectoryIdentity();
+    // Resolve the basename through the held directory, not replaceable parents.
+    const anchored = `/proc/self/fd/${directoryFd}/${path.basename(target)}`;
+    let before = null;
+    try { before = fs.lstatSync(anchored, { bigint: true }); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (before) {
+      assertLogFile(before);
+      if (!append) throw new Error('fresh benchmark log already exists');
+    }
+    const flags = fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      | (append ? fs.constants.O_APPEND : 0)
+      | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL);
+    fd = fs.openSync(anchored, flags, 0o600);
+    const opened = fs.fstatSync(fd, { bigint: true });
+    const named = fs.lstatSync(anchored, { bigint: true });
+    assertLogFile(opened);
+    assertLogFile(named);
+    if (!sameInode(opened, named) || (before && !sameInode(before, opened))) {
+      throw new Error('benchmark log identity changed during acquisition');
+    }
+    assertDirectoryIdentity();
+    fs.fchmodSync(fd, 0o600);
+    const stream = fs.createWriteStream(target, { fd, autoClose: true });
+    fd = undefined;
+    return stream;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.closeSync(directoryFd);
+  }
+}
+
+function assertLogFile(stat) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) {
+    throw new Error('benchmark log must be a singly linked regular non-symlink file');
+  }
+}
+
+function sameInode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function writeWithBackpressure(source, sink, chunk) {
@@ -128,11 +201,10 @@ function writeWithBackpressure(source, sink, chunk) {
 
 function closeSink(sink) {
   if (!sink) return Promise.resolve();
-  if (sink.closed || sink.destroyed) return Promise.resolve();
+  if (sink.closed) return Promise.resolve();
   return new Promise((resolve) => {
-    sink.once('finish', resolve);
     sink.once('close', resolve);
-    sink.end();
+    if (!sink.destroyed) sink.end();
   });
 }
 
