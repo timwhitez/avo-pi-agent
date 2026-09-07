@@ -223,6 +223,12 @@ inconclusive. Missing or inconsistent baseline evidence is also inconclusive.
 Durable reload rechecks conclusive records against this boundary and rejects
 unreproducible historical verdicts; it does not silently upgrade or rewrite them.
 
+Stall cycles are compared up to cyclic rotation, preserving transition order
+and period. Windows and active stall keys are scoped to game/attempt/episode;
+objective progress or reset releases the prior stall. An uninterrupted cycle
+therefore receives one initial intervention and only the configured escalations,
+not new guidance on every sliding-window phase.
+
 ### Hypothesis journal
 
 `hypothesis_propose` can record structured predictions before an experiment;
