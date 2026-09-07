@@ -34,7 +34,8 @@ test('authenticated run and event routes apply canonical privacy policy to store
     note: `${runtimeSecrets.join(' ')} authorization=opaque-authorization-fixture`,
   };
   let deep = { end: 'bounded' };
-  for (let index = 0; index < 80; index += 1) deep = { next: deep };
+  // Below JSONL's parsing limit, but beyond the browser projection depth.
+  for (let index = 0; index < 32; index += 1) deep = { next: deep };
   payload.deep = deep;
   const memoryDir = path.join(root, 'memory');
   const trajectoryDir = path.join(root, 'runs', 'private', 'trajectories', id);
