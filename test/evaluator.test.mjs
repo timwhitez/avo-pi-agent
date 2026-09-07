@@ -9,6 +9,62 @@ import { frameHash } from '../src/core/observation.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
+test('durable production hypotheses preserve causal ordering across restart and full reset', async () => {
+  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-hypothesis-order-'));
+  const raw = { game_id: 'ordering', frame: [[1, 0]], state: 'PLAYING',
+    levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'] };
+  const environment = { async start() { return raw; }, async step() { return raw; },
+    async reset() { return { ...raw, full_reset: true }; } };
+  const create = () => new AvoArcAgent({ gameId: 'ordering', environment, loop: inertLoop,
+    config: { maxActions: 100, stallWindow: 8, memoryDir } });
+  const propose = (agent, name) => agent.proposeHypothesis({ hypothesis: name,
+    plan: 'Execute ACTION1 once after recording this baseline.',
+    predictions: [{ action: 'ACTION1', expected: { changed: false } }] }).details.proposal;
+  const evaluate = (agent, proposal, evidenceRef) => agent.evaluateHypothesis({
+    proposalId: proposal.id, evidenceRefs: [evidenceRef],
+  }).details.record;
+  try {
+    const original = create();
+    await original.initialize();
+    for (let index = 0; index < 8; index++) await original.act({ action: 'ACTION1' });
+    const delayed = propose(original, 'Original-scope delayed evaluation');
+    const oldAction = await original.act({ action: 'ACTION1' });
+    const pending = propose(original, 'Pending at restart');
+    const restarted = create();
+    await restarted.initialize();
+    assert.equal(restarted.actions, 0);
+    assert.notEqual(restarted.attemptId, original.attemptId);
+    const fresh = propose(restarted, 'New attempt prediction');
+    const oldEvent = restarted.evidenceLedger.find((event) => event.id === oldAction.details.evidenceRef);
+    const newBaseline = restarted.evidenceLedger.find((event) => event.id === fresh.baseline.evidenceRef);
+    assert.equal(oldEvent.actionIndex, 9);
+    assert.ok(oldEvent.sequence < newBaseline.sequence);
+    const invalid = evaluate(restarted, fresh, oldEvent.id);
+    assert.equal(invalid.outcome, 'inconclusive');
+    const newAction = await restarted.act({ action: 'ACTION1' });
+    assert.equal(evaluate(restarted, pending, newAction.details.evidenceRef).outcome, 'inconclusive');
+    assert.equal(evaluate(restarted, delayed, oldEvent.id).outcome, 'confirmed');
+    const beforeReset = propose(restarted, 'Pending at episode change');
+    await restarted.reset({ rationale: 'new episode for ordering contract' });
+    const afterReset = await restarted.act({ action: 'ACTION1' });
+    assert.equal(evaluate(restarted, beforeReset, afterReset.details.evidenceRef).outcome, 'inconclusive');
+    const current = propose(restarted, 'Current episode prediction');
+    const currentAction = await restarted.act({ action: 'ACTION1' });
+    assert.equal(evaluate(restarted, current, currentAction.details.evidenceRef).outcome, 'confirmed');
+    assert.equal(create().memory.journal.byOutcome('confirmed').length, 2);
+
+    // Revalidation must reject historical false confirmation, not merely new
+    // tool invocations. Preserve all exact evidence while changing the verdict.
+    const stored = JSON.parse(fs.readFileSync(restarted.memory.file, 'utf8'));
+    const falseConfirmation = stored.hypothesisEvaluations.find((entry) => entry.id === invalid.id);
+    falseConfirmation.outcome = 'confirmed';
+    falseConfirmation.evaluation.outcome = 'confirmed';
+    falseConfirmation.evaluation.evidenceBoundaryValid = true;
+    fs.writeFileSync(restarted.memory.file, JSON.stringify(stored));
+    assert.throws(create, /cannot be reproduced from durable evidence/);
+  } finally { fs.rmSync(memoryDir, { recursive: true, force: true }); }
+});
+
 test('production tools confirm repeated predictions without claiming behavior evolution', async () => {
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-evaluator-'));
   try {

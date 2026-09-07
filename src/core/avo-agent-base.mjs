@@ -479,7 +479,7 @@ export class AvoArcAgent {
         name: 'hypothesis_evaluate',
         strategic: true,
         label: 'Check one hypothesis against later evidence',
-        description: 'Compare a durable proposal with exact post-proposal action evidence. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
+        description: 'Compare a durable proposal with exact later ledger evidence from its baseline attempt and episode. New actions after restart or full reset require a new proposal. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
         parameters: {
           type: 'object',
           required: ['proposalId', 'evidenceRefs'],
