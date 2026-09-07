@@ -164,7 +164,7 @@ function telemetrySummary(value) {
     sampleCount: value.sampleCount,
     parseErrors: value.parseErrors,
     truncated: value.truncated,
-    totals: value.totals,
-    maxima: value.maxima,
+    totals: { ...value.totals },
+    maxima: { ...value.maxima },
   };
 }

@@ -61,6 +61,10 @@ test('authenticated run and event routes apply canonical privacy policy to store
     const response = await getRun(new Request(`http://localhost/api/runs/${id}`, { headers }), context);
     assert.equal(response.status, 200);
     const snapshot = await response.json();
+    assert.equal(snapshot.run.summary.telemetry.totals.inputTokens, 17);
+    assert.equal(snapshot.run.telemetry.totals.inputTokens, 17);
+    assert.equal(snapshot.run.telemetry.totals.outputTokens, 9);
+    assert.equal(snapshot.run.telemetry.totals.reasoningTokens, 3);
     const stream = await getEvents(new Request(`http://localhost/api/runs/${id}/events`, { headers }), context);
     assert.equal(stream.status, 200);
     reader = stream.body.getReader();
