@@ -10,12 +10,16 @@ import { controlOwnedRun } from '../src/local/owned-run-control.mjs';
 import { acquireLocalExecutionLock, readLocalExecutionLock } from '../src/local/run-lock.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
-async function waitFor(predicate, message) {
-  for (let i = 0; i < 500; i += 1) {
+async function waitFor(predicate, message, timeoutMs = null) {
+  // Preserve the existing startup/resume polling contract; only cleanup has
+  // an explicit wall-clock observation deadline.
+  const deadline = timeoutMs === null ? Infinity : performance.now() + timeoutMs;
+  const maxPolls = timeoutMs === null ? 500 : Infinity;
+  for (let i = 0; i < maxPolls && performance.now() < deadline; i += 1) {
     if (predicate()) return;
     await delay(10);
   }
-  assert.fail(message);
+  assert.fail(typeof message === 'function' ? message() : message);
 }
 
 test('managed production workspace owns real daemon containers across process death', { skip: !process.env.AVO_TEST_WORKSPACE_IMAGE }, async (t) => {
@@ -54,7 +58,7 @@ finally { await scope.close(); lock.release(); }
       let guardian;
       let ids = [];
       try {
-        await waitFor(() => fs.existsSync(heartbeat), `heartbeat missing: ${errors}`);
+        await waitFor(() => fs.existsSync(heartbeat), () => `heartbeat missing: ${errors}`);
         guardian = readLocalExecutionLock(root).workspaceGuardian;
         ids = fs.readdirSync(guardian.directory).filter((name) => name.endsWith('-created.json')).map((name) => JSON.parse(fs.readFileSync(path.join(guardian.directory, name))).containerId);
         assert.equal(ids.length, 1);
@@ -70,7 +74,26 @@ finally { await scope.close(); lock.release(); }
           else if (mode === 'client-death') process.kill(JSON.parse(output.trim().split('\n')[0]).worker, 'SIGKILL');
           else process.kill(guardian.pid, 'SIGKILL');
         } else {
-          await delay(4200);
+          // Expiry requests native removal; scheduling and daemon teardown do
+          // not share the timer's deadline. Observe confirmed cleanup without
+          // resuming the Agent, rather than granting Docker only 200ms.
+          await waitFor(() => {
+            assert.equal(fs.readFileSync(heartbeat, 'utf8'), paused, 'compute must remain paused during timeout cleanup');
+            return fs.readdirSync(guardian.directory)
+              .filter((name) => name.endsWith('-removed.json'))
+              .some((name) => {
+                const bytes = fs.readFileSync(path.join(guardian.directory, name), 'utf8');
+                try { return JSON.parse(bytes).containerId === ids[0]; }
+                catch (error) {
+                  // The guardian may have opened but not finished the receipt.
+                  if (error instanceof SyntaxError) return false;
+                  throw error;
+                }
+              });
+          }, () => {
+            const state = spawnSync('docker', ['inspect', '--format', '{{json .State}}', ids[0]], { encoding: 'utf8', timeout: 2000 });
+            return `timeout cleanup receipt missing while Agent paused; native state=${state.stdout?.trim()}; runtime error=${state.stderr?.trim()}; worker error=${errors}`;
+          }, 10000);
           const remaining = spawnSync('docker', ['ps', '--all', '--quiet', '--filter', `id=${ids[0]}`], { encoding: 'utf8' });
           assert.equal(remaining.status, 0, remaining.stderr);
           assert.equal(remaining.stdout.trim(), '', 'wall-clock timeout removes compute while Agent remains paused');
