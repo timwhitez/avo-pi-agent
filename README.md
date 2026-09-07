@@ -42,6 +42,16 @@ runner. It accepts `--all` or `--game=id[,id]` and writes to `runs/diagnostic`.
 Its sealed diagnostic intent and reports remain non-official even for the full
 public set or a resumed run; failures retain the actual failed stage.
 
+Mission Control reads `runs/private/<runId>/observation.json`, which binds the
+executing memory, workspace, trajectory and numeric activity to that run's
+capsule. Subject memory is only a warm-start input; it is never a fallback for
+missing run evidence. Replay excludes the sealed warm-history prefix and uses
+bounded recent windows with explicit partial/unavailable metadata. Reported SDK
+usage and game progress travel on a separate structured IPC channel and are
+recorded for playback without provider calls. Raw provider output is not that
+channel; missing usage, latency or cost is not invented. The observation contract
+does not grant official score authority, which still requires validated reports.
+
 Streaming benchmark logs require an explicit `logRoot` and Linux directory
 descriptors. Fresh logs use exclusive creation; intentional recovery appends to
 validated singly linked regular files. Acquisition checks directory and file

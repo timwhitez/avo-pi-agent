@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { scanRunJsonl } from '../lib/run-jsonl.mjs';
+import { observationFixture, writeActivityFixture } from '../../../test/support/observation.mjs';
 
 test('bounded JSONL scan charges traversal, line, byte and failed-read budgets', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-jsonl-budgets-'));
@@ -80,11 +81,11 @@ test('authenticated run detail confines replay and usage and retains only a boun
     };
     await t.test('bounded valid corpus and aggregate event retention', async () => {
       const id = 'retained';
-      const dir = path.join(root, 'runs', 'private', 'trajectories', id);
-      fs.mkdirSync(dir, { recursive: true });
-      for (let file = 0; file < 3; file += 1) fs.writeFileSync(path.join(dir, `${file}.jsonl`),
-        Array.from({ length: 1500 }, (_, index) => JSON.stringify({ runId: id, index: file * 1500 + index,
+      const observation = observationFixture(root, id, { gameIds: ['g01', 'g02', 'g03'] });
+      for (let file = 0; file < 3; file += 1) fs.writeFileSync(observation.sources[file].file,
+        Array.from({ length: 1500 }, (_, index) => JSON.stringify({ runId: id, gameId: observation.gameIds[file], sequence: index + 1, index: file * 1500 + index,
           sourceFixture: 'retention-case', inputTokens: 1 })).join('\n'));
+      writeActivityFixture(observation, Array.from({ length: 4500 }, () => ({ metrics: { inputTokens: 1 } })));
       const push = Array.prototype.push;
       let peakRetained = 0;
       let run;
@@ -111,36 +112,41 @@ test('authenticated run detail confines replay and usage and retains only a boun
       const unrelated = path.join(root, 'unrelated');
       fs.mkdirSync(unrelated);
       fs.writeFileSync(path.join(unrelated, 'data.jsonl'), '{"marker":"outside-scope-fixture","inputTokens":123}\n');
-      const base = path.join(root, 'runs', 'private', 'trajectories');
+      observationFixture(root, 'root-link');
+      const base = path.join(root, 'runs', 'private');
+      fs.renameSync(path.join(base, 'root-link'), path.join(base, 'saved-root'));
       fs.symlinkSync(unrelated, path.join(base, 'root-link'), 'dir');
       const linked = await read('root-link');
       assert.equal(linked.trajectory.status, 'unavailable');
       assert.equal(linked.telemetry.status, 'unavailable');
       assert.equal(JSON.stringify(linked).includes('outside-scope-fixture'), false);
-      const parent = path.join(base, 'parent-link');
-      fs.mkdirSync(parent);
-      fs.symlinkSync(unrelated, path.join(parent, 'nested'), 'dir');
+      observationFixture(root, 'parent-link');
+      const parent = path.join(base, 'parent-link', 'state');
+      fs.renameSync(parent, `${parent}-saved`);
+      fs.symlinkSync(unrelated, parent, 'dir');
       const nested = await read('parent-link');
-      assert.equal(nested.trajectory.status, 'partial');
+      assert.equal(nested.trajectory.status, 'unavailable');
       assert.equal(nested.telemetry.sampleCount, 0);
       assert.equal(JSON.stringify(nested).includes('outside-scope-fixture'), false);
     });
     await t.test('corruption, run mismatch, depth and line overflow are disclosed', async () => {
       const id = 'invalid';
-      const dir = path.join(root, 'runs', 'private', 'trajectories', id);
-      fs.mkdirSync(dir);
+      const observation = observationFixture(root, id, { gameIds: ['g01', 'g02'] });
+      const dir = path.dirname(observation.sources[0].file);
       let deep = {};
       for (let index = 0; index < 80; index += 1) deep = { nested: deep };
-      fs.writeFileSync(path.join(dir, 'data.jsonl'), [
-        JSON.stringify({ runId: id, inputTokens: 2 }), '{broken', JSON.stringify({ run_id: 'different', inputTokens: 99 }),
+      fs.writeFileSync(observation.sources[0].file, [
+        JSON.stringify({ runId: id, gameId: 'g01', sequence: 1, inputTokens: 2 }), '{broken', JSON.stringify({ run_id: 'different', inputTokens: 99 }),
         JSON.stringify({ deep }), JSON.stringify({ text: 'x'.repeat(300000) }),
       ].join('\n'));
+      writeActivityFixture(observation, [{ metrics: { inputTokens: 2 } }, { runId: 'different', metrics: { inputTokens: 99 } }]);
+      fs.appendFileSync(observation.activityFile, '{broken\n');
       let nested = path.join(dir, 'deep');
       for (let index = 0; index < 10; index += 1) { fs.mkdirSync(nested); nested = path.join(nested, 'deep'); }
       const socket = net.createServer();
       await new Promise((resolve, reject) => {
         socket.once('error', reject);
-        socket.listen(path.join(dir, 'socket.jsonl'), resolve);
+        socket.listen(observation.sources[1].file, resolve);
       });
       let run;
       try { run = await read(id); }
@@ -151,7 +157,8 @@ test('authenticated run detail confines replay and usage and retains only a boun
       assert.ok(run.trajectory.errors.some((error) => error.code === 'invalid-record'));
       assert.ok(run.trajectory.errors.some((error) => error.code === 'run-identity-mismatch'));
       assert.ok(run.trajectory.errors.some((error) => error.code === 'line-too-large'));
-      assert.ok(run.trajectory.errors.some((error) => error.code === 'non-regular-file'));
+      assert.ok(run.trajectory.errors.some((error) => error.code === 'file-unavailable'));
+      assert.equal(run.trajectory.entriesVisited, 0, 'unrelated directory trees are not part of the sealed source catalog');
       assert.equal(run.telemetry.totals.inputTokens, 2);
       assert.equal(run.telemetry.status, 'partial');
     });

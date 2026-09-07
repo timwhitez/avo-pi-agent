@@ -41,8 +41,7 @@ export function listRuns({ subject } = {}) {
 export function getRun(id, { subject } = {}) {
   requireOwnership(id, subject);
   const run = base.getRun(id);
-  const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
-  run.telemetry = telemetry;
+  const telemetry = run.telemetry;
   run.summary = { ...(run.summary || {}), telemetry: telemetrySummary(telemetry) };
   return sanitizeForClient(run);
 }
@@ -159,6 +158,8 @@ function normalizeSubject(value) {
 function telemetrySummary(value) {
   return {
     status: value.status,
+    activityStatus: value.activityStatus,
+    usageTruncated: value.usageTruncated,
     totalsScope: value.totalsScope,
     errorCount: value.errorCount,
     source: value.source,

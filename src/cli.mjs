@@ -193,7 +193,7 @@ async function runPublic(args) {
       if (resumedRecords.has(gameId)) {
         results[index] = resumedRecords.get(gameId);
         console.log(`\n[${ordinal}/${selected.length}] ${gameId} resumed from checkpoint`);
-        progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: 0, resumed: true });
+        progress.gameStarted({ index: ordinal, total: selected.length, gameId, budget: 0, resumed: true, result: results[index] });
         return;
       }
       replayedGames += 1;
@@ -225,11 +225,17 @@ async function runPublic(args) {
       let contextSequence = 0;
       const pendingToolCalls = new Map();
       const completedPrivateToolCalls = new Set();
+      const observedUsageMessages = new WeakSet();
       const allowedToolNames = new Set(effectiveAvoToolNames(
         gameConfig.workspaceMode,
         gameConfig.policyProfile,
       ));
       const onLoopEvent = (event) => {
+        if (event.type === 'message_end' && event.message?.role === 'assistant'
+            && !observedUsageMessages.has(event.message)) {
+          observedUsageMessages.add(event.message);
+          progress.usage({ index: ordinal, total: selected.length, gameId, attempt: activeAttempt, usage: event.message.usage });
+        }
         const toolCallId = String(event.toolCallId || '');
         const duplicateToolEnd = event.type === 'tool_execution_end'
           && (!toolCallId || completedPrivateToolCalls.has(toolCallId));

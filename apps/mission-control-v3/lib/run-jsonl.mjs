@@ -11,10 +11,11 @@ const LIMITS = {
   maxLines: [50000, 200000], maxJsonNodes: [100000, 2000000], maxJsonDepth: [64, 256],
 };
 
-export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord, hooks = null }) {
+export function scanRunJsonl({ repoRoot, runId, files = null, limits: requested = {}, onRecord, hooks = null }) {
   runId = String(runId || '');
   if (!/^[A-Za-z0-9_.-]{1,120}$/.test(runId) || runId === '.' || runId === '..') throw new Error('runId is invalid');
   if (typeof onRecord !== 'function') throw new Error('run JSONL scan requires onRecord');
+  if (files !== null && (!Array.isArray(files) || files.some((file) => typeof file !== 'string'))) throw new Error('invalid exact JSONL sources');
   const root = path.resolve(repoRoot);
   const limits = Object.fromEntries(Object.entries(LIMITS).map(([key, [fallback, maximum]]) => {
     const value = Number(requested[key] ?? fallback);
@@ -32,8 +33,9 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
     else metadata.truncated = true;
   };
   const roots = ['private/trajectories', 'trajectories'].map((part) => path.join(root, 'runs', part, runId));
-  const candidates = [];
-  const pending = roots.map((directory) => ({ directory, depth: 0 }));
+  const candidates = files === null ? [] : files.slice(0, limits.maxFiles).map((file) => path.resolve(root, file));
+  if (files && files.length > limits.maxFiles) metadata.truncated = true;
+  const pending = files === null ? roots.map((directory) => ({ directory, depth: 0 })) : [];
   while (pending.length) {
     if (metadata.entriesVisited >= limits.maxEntries || candidates.length >= limits.maxFiles) {
       metadata.truncated = true;
@@ -71,13 +73,16 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
   }
 
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  scan: for (const file of candidates.sort()) {
+  if (files === null) candidates.sort();
+  scan: for (const [fileIndex, file] of candidates.entries()) {
     if (metadata.bytesCharged >= limits.maxTotalBytes || metadata.linesScanned >= limits.maxLines) {
       metadata.truncated = true;
       break;
     }
     let evidence;
-    const allowance = Math.min(limits.maxFileBytes, limits.maxTotalBytes - metadata.bytesCharged);
+    const remainingFiles = files === null ? 1 : candidates.length - fileIndex;
+    const allowance = Math.min(limits.maxFileBytes,
+      Math.max(1, Math.floor((limits.maxTotalBytes - metadata.bytesCharged) / remainingFiles)));
     // Failed identity checks may follow actual reads. Charge their full window
     // conservatively so corrupt/changing files cannot bypass the input budget.
     metadata.bytesCharged += allowance;
@@ -90,6 +95,7 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
     } catch { issue('file-unavailable', file); continue; }
     metadata.bytesCharged -= allowance - evidence.bytes;
     metadata.filesScanned += 1;
+    if (files !== null) metadata.rootsFound = 1;
     metadata.bytesScanned += evidence.bytes;
     metadata.files.push({ file: evidence.relativeFile, bytes: evidence.bytes,
       rangeSha256: evidence.sha256, ...evidence.window });
@@ -101,6 +107,22 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
       if (newline < 0) continue;
       offset = newline + 1; // Never parse an unknown leading record fragment.
     }
+    if (files !== null) {
+      // Give every sealed source a bounded recent window, rather than exhausting
+      // the complete budget on the first large file and hiding the active game.
+      const lineAllowance = Math.max(1, Math.floor((limits.maxLines - metadata.linesScanned) / remainingFiles));
+      let end = buffer.length;
+      let trim = offset;
+      if (end > offset && buffer[end - 1] === 10) end -= 1;
+      for (let count = 0; count < lineAllowance; count += 1) {
+        if (end <= offset) { trim = offset; break; }
+        const previous = buffer.lastIndexOf(10, end - 1);
+        if (previous < offset) { trim = offset; break; }
+        trim = previous + 1;
+        end = previous;
+      }
+      if (trim > offset) { offset = trim; metadata.truncated = true; }
+    }
     while (offset < buffer.length) {
       if (metadata.linesScanned >= limits.maxLines) { metadata.truncated = true; break scan; }
       metadata.linesScanned += 1;
@@ -109,6 +131,7 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
       const start = offset;
       offset = newline < 0 ? buffer.length : newline + 1;
       if (end - start > limits.maxLineBytes) {
+        metadata.truncated = true;
         issue('line-too-large', file, evidence.window.offset + start);
         continue;
       }
@@ -130,7 +153,7 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
       }
       metadata.recordsScanned += 1;
       try {
-        if (onRecord(event) === false) { metadata.truncated = true; break scan; }
+        if (onRecord(event, { file, byteOffset: evidence.window.offset + start }) === false) { metadata.truncated = true; break scan; }
       } catch { issue('projection-failed', file, evidence.window.offset + start); }
     }
   }

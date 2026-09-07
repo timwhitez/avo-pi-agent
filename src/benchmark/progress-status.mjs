@@ -1,3 +1,5 @@
+import { ACTIVITY_SCHEMA, projectRunActivity } from './run-observation.mjs';
+
 const API_VERSION = '2022-11-28';
 const DEFAULT_HEARTBEAT_MS = 60_000;
 const DEFAULT_ACTION_INTERVAL = 5;
@@ -11,6 +13,24 @@ export function createProgressStatusReporter(env = process.env) {
   const heartbeatMs = positiveInteger(env.AVO_PROGRESS_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
   const actionInterval = positiveInteger(env.AVO_PROGRESS_ACTION_INTERVAL, DEFAULT_ACTION_INTERVAL);
   const enabled = Boolean(token && repository && sha);
+  const local = env.AVO_PROGRESS_CHANNEL === 'ipc' && typeof process.send === 'function';
+  let sequence = 0;
+  let activityError = null;
+  const pending = new Set();
+  const emit = (type, fields) => {
+    if (!local) return;
+    if (activityError) throw activityError;
+    if (!process.connected || pending.size >= 1024) throw new Error('run activity channel is unavailable or backpressured');
+    const event = projectRunActivity({ schema: ACTIVITY_SCHEMA, runId: env.AVO_REAL_RUN_ID,
+      capsuleHash: env.AVO_RUN_CAPSULE_HASH, type, sequence: ++sequence, ...fields },
+    { runId: env.AVO_REAL_RUN_ID, capsuleHash: env.AVO_RUN_CAPSULE_HASH });
+    if (!event) throw new Error('invalid structured run activity');
+    let resolve;
+    const sent = new Promise((done) => { resolve = done; });
+    pending.add(sent);
+    try { process.send(event, (error) => { if (error) activityError = error; pending.delete(sent); resolve(); }); }
+    catch (error) { pending.delete(sent); resolve(); throw error; }
+  };
   const last = new Map();
   let queue = Promise.resolve();
 
@@ -44,9 +64,12 @@ export function createProgressStatusReporter(env = process.env) {
 
   return {
     enabled,
-    gameStarted({ index, total, gameId, budget = null }) {
+    gameStarted({ index, total, gameId, budget = null, resumed = false, result = null }) {
       const key = progressKey(index, total, gameId);
-      last.set(key, { at: Date.now(), actions: 0, levels: 0 });
+      last.set(key, { at: Date.now(), actions: 0, levels: 0, state: null });
+      emit('game.started', { index, total, gameId, budget, resumed,
+        actions: result?.actions ?? 0, levelsCompleted: result?.levelsCompleted ?? 0,
+        totalLevels: result?.totalLevels ?? null, state: result?.state ?? null });
       enqueue({
         index,
         total,
@@ -57,7 +80,7 @@ export function createProgressStatusReporter(env = process.env) {
       });
     },
     gameProgress({ index, total, gameId, actions, levelsCompleted, totalLevels, state }) {
-      if (!enabled) return;
+      if (!enabled && !local) return;
       const key = progressKey(index, total, gameId);
       const now = Date.now();
       const previous = last.get(key) || { at: 0, actions: -actionInterval, levels: -1 };
@@ -65,9 +88,10 @@ export function createProgressStatusReporter(env = process.env) {
       const levels = Number(levelsCompleted || 0);
       const due = now - previous.at >= heartbeatMs
         || actionCount - previous.actions >= actionInterval
-        || levels !== previous.levels;
+        || levels !== previous.levels || state !== previous.state;
       if (!due) return;
-      last.set(key, { at: now, actions: actionCount, levels });
+      last.set(key, { at: now, actions: actionCount, levels, state });
+      emit('game.progress', { index, total, gameId, actions: actionCount, levelsCompleted: levels, totalLevels, state });
       enqueue({
         index,
         total,
@@ -78,6 +102,9 @@ export function createProgressStatusReporter(env = process.env) {
       });
     },
     gameFinished({ index, total, gameId, result }) {
+      emit('game.finished', { index, total, gameId, actions: result?.actions ?? 0,
+        levelsCompleted: result?.levelsCompleted ?? 0, totalLevels: result?.totalLevels ?? null,
+        state: result?.state ?? 'UNKNOWN', error: Boolean(result?.error) });
       const key = progressKey(index, total, gameId);
       last.delete(key);
       const state = result?.error ? 'error' : String(result?.state || 'done').toLowerCase();
@@ -92,8 +119,28 @@ export function createProgressStatusReporter(env = process.env) {
         details: `state=${safe(state, 20)} levels=${levels} actions=${actions}`,
       });
     },
+    usage({ index, total, gameId, attempt, usage }) {
+      const metrics = {};
+      for (const [source, target] of Object.entries({ input: 'inputTokens', output: 'outputTokens',
+        cacheRead: 'cacheReadTokens', cacheWrite: 'cacheWriteTokens', reasoning: 'reasoningTokens', totalTokens: 'totalTokens' })) {
+        if (Number.isSafeInteger(usage?.[source]) && usage[source] >= 0) metrics[target] = usage[source];
+      }
+      for (const [source, target] of Object.entries({ input: 'inputCostUsd', output: 'outputCostUsd',
+        cacheRead: 'cacheReadCostUsd', cacheWrite: 'cacheWriteCostUsd', total: 'costUsd' })) {
+        const value = usage?.cost?.[source];
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) metrics[target] = value;
+      }
+      for (const key of ['tokenLatencyMs', 'tokensPerSecond']) {
+        if (typeof usage?.[key] === 'number' && Number.isFinite(usage[key]) && usage[key] >= 0) metrics[key] = usage[key];
+      }
+      if (Number.isSafeInteger(usage?.tokenBudget) && usage.tokenBudget >= 0) metrics.tokenBudget = usage.tokenBudget;
+      if (Object.keys(metrics).length) emit('usage', { index, total, gameId, attempt, metrics });
+    },
     async flush() {
       await queue;
+      await Promise.all(pending);
+      if (local && process.connected) process.disconnect();
+      if (activityError) throw activityError;
     },
   };
 }

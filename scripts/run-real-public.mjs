@@ -12,7 +12,8 @@ import {
   preflightResponsesProvider,
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
-import { runProcess } from '../src/benchmark/process-runner.mjs';
+import { runProcess, openLogFile } from '../src/benchmark/process-runner.mjs';
+import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
@@ -206,6 +207,8 @@ try {
     throw new Error('persisted run capsule differs from the active capsule');
   }
   provenance.runCapsule = publicRunCapsule(persistedCapsule, resumeDecision);
+  const observation = writeRunObservation({ root, runId, capsuleFile: activeCapsuleFile,
+    runClass: resumeDecision.runClass, resuming });
   if (resumeContext) {
     provenance.resume = Object.freeze({
       resumed: true,
@@ -239,7 +242,13 @@ try {
   const childArgs = experimentRun || diagnostic
     ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
     : ['src/cli.mjs', 'run-public', '--all'];
-  const child = await runProcess(process.execPath, childArgs, {
+  const activityFd = openLogFile(observation.activityFile, { root: privateDir, append: resuming });
+  const invocationId = crypto.randomBytes(16).toString('hex');
+  const knownGames = new Set(observation.gameIds);
+  let activitySequence = 0;
+  let child;
+  try {
+    child = await runProcess(process.execPath, childArgs, {
     cwd: root,
     env: buildAgentChildEnvironment({
       source: process.env,
@@ -266,7 +275,24 @@ try {
     stdoutFile,
     stderrFile,
     maxTailChars: 64 * 1024,
-  });
+    onMessage(message) {
+      const projected = projectRunActivity(message, { runId, capsuleHash: capsule.capsuleHash });
+      if (!projected || !knownGames.has(projected.gameId) || projected.total !== games.length
+          || projected.sequence <= activitySequence) throw new Error('invalid or duplicate run activity');
+      activitySequence = projected.sequence;
+      const event = redact({ ...projected, invocationId, at: new Date().toISOString() }, { explicitSecrets });
+      if (!projectRunActivity(event, { runId, capsuleHash: capsule.capsuleHash })) throw new Error('activity redaction changed its binding');
+      const line = `${JSON.stringify(event)}\n`;
+      if (Buffer.byteLength(line) > 4096 || process.stdout.writableLength > 64 * 1024) {
+        throw new Error('run activity output exceeds its bounded channel');
+      }
+      fs.writeFileSync(activityFd, line);
+      process.stdout.write(line);
+    },
+    });
+  } finally {
+    try { fs.fsyncSync(activityFd); } finally { fs.closeSync(activityFd); }
+  }
   if (child.timedOut) {
     throw new Error(`production public runner timed out after ${timeoutMs}ms`);
   }
@@ -427,6 +453,8 @@ try {
       stdout: { file: path.basename(stdoutFile), sha256: hashFile(stdoutFile, { root: privateDir }) },
       stderr: { file: path.basename(stderrFile), sha256: hashFile(stderrFile, { root: privateDir }) },
       runCapsule: { file: path.basename(activeCapsuleFile), sha256: activeCapsuleSha256 },
+      observation: { file: 'observation.json', sha256: hashFile(path.join(privateDir, 'observation.json'), { root: privateDir }) },
+      activity: { file: path.basename(observation.activityFile), sha256: hashFile(observation.activityFile, { root: privateDir }) },
     },
   };
   writeJsonAtomic(path.join(privateDir, 'manifest.private.json'), privateManifest, {

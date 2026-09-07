@@ -22,7 +22,8 @@ export function loadMemorySnapshotEvidence(root, games = [], {
   try {
     const stat = fs.lstatSync(directory);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('memory root is not a regular directory');
-    entries = fs.readdirSync(directory, { withFileTypes: true });
+    entries = wanted.size ? [...wanted].map((gameId) => ({ name: `${gameId}.json` }))
+      : fs.readdirSync(directory, { withFileTypes: true });
   } catch (error) {
     return Object.freeze({
       status: 'error', records, evidence,
@@ -56,6 +57,7 @@ export function loadMemorySnapshotEvidence(root, games = [], {
         maxBytes,
         purpose: `Mission Control memory ${gameId}`,
       });
+      if (loaded.value?.gameId !== undefined && loaded.value.gameId !== gameId) throw new Error('memory game identity differs from its source');
       records.push({ gameId, value: loaded.value });
       evidence.push({
         gameId,
@@ -64,7 +66,7 @@ export function loadMemorySnapshotEvidence(root, games = [], {
         relativeFile: loaded.relativeFile,
       });
     } catch (error) {
-      errors.push(safeEvidenceError('memory', error, { gameId }));
+      if (error.code !== 'ENOENT') errors.push(safeEvidenceError('memory', error, { gameId }));
     }
   }
 
