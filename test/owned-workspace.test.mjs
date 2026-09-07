@@ -10,9 +10,12 @@ import { controlOwnedRun } from '../src/local/owned-run-control.mjs';
 import { acquireLocalExecutionLock, readLocalExecutionLock } from '../src/local/run-lock.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
-async function waitFor(predicate, message, timeoutMs = 5000) {
-  const deadline = performance.now() + timeoutMs;
-  while (performance.now() < deadline) {
+async function waitFor(predicate, message, timeoutMs = null) {
+  // Preserve the existing startup/resume polling contract; only cleanup has
+  // an explicit wall-clock observation deadline.
+  const deadline = timeoutMs === null ? Infinity : performance.now() + timeoutMs;
+  const maxPolls = timeoutMs === null ? 500 : Infinity;
+  for (let i = 0; i < maxPolls && performance.now() < deadline; i += 1) {
     if (predicate()) return;
     await delay(10);
   }
@@ -55,7 +58,7 @@ finally { await scope.close(); lock.release(); }
       let guardian;
       let ids = [];
       try {
-        await waitFor(() => fs.existsSync(heartbeat), `heartbeat missing: ${errors}`);
+        await waitFor(() => fs.existsSync(heartbeat), () => `heartbeat missing: ${errors}`);
         guardian = readLocalExecutionLock(root).workspaceGuardian;
         ids = fs.readdirSync(guardian.directory).filter((name) => name.endsWith('-created.json')).map((name) => JSON.parse(fs.readFileSync(path.join(guardian.directory, name))).containerId);
         assert.equal(ids.length, 1);
