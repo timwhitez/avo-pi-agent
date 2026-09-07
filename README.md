@@ -234,6 +234,12 @@ which binds the originating game/attempt/episode. Restarted local counters there
 cannot overwrite/deduplicate another attempt's history. Duplicate delivery of the
 same record remains idempotent and existing history limits remain unchanged.
 
+`supervisorInterventions` reports the lifetime count for one Agent attempt,
+independent of its bounded history view. Retry results sum each attempt once;
+completed-game checkpoints reuse the already recorded aggregate. New attempts
+start at zero even when they load earlier memory, and disabled strategy reports
+zero. Replaying an errored game does not retroactively infer costs from old memory.
+
 ### Hypothesis journal
 
 `hypothesis_propose` can record structured predictions before an experiment;
