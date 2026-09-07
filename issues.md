@@ -9,7 +9,7 @@ Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Iss
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
 | #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
 | #261 | Nested process pause/abort ownership | Open; lifecycle repair required before new benchmark |
-| #262 | Complete multi-tool transcript turns | Implemented; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. PR/review pending; not closed |
+| #262 | Complete multi-tool transcript turns | Implemented in PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent review pending; not closed |
 | #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
 | #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
 | #265 | Confined streaming log acquisition | Open; evidence producer repair required |
