@@ -57,9 +57,23 @@ export class HypothesisEvaluator {
     const missingEvidenceRefs = requestedRefs.filter((id) => !byId.has(id));
     const proposalBelongsToGame = proposal.gameId === gameId;
     const evidenceBelongsToGame = resolvedEvidence.every((event) => event.gameId === gameId);
-    const evidencePostdatesProposal = resolvedEvidence.every(
-      (event) => nonNegativeInteger(event.actionIndex) > nonNegativeInteger(proposal.baseline.actionIndex),
-    );
+    const baseline = typeof proposal.baseline.evidenceRef === 'string' && proposal.baseline.evidenceRef
+      ? byId.get(proposal.baseline.evidenceRef) : null;
+    const baselineValid = Boolean(baseline && baseline.gameId === gameId
+      && Number.isSafeInteger(baseline.sequence) && baseline.sequence > 0
+      && typeof baseline.attemptId === 'string' && baseline.attemptId
+      && typeof baseline.episodeId === 'string' && baseline.episodeId
+      && Number.isSafeInteger(baseline.actionIndex) && baseline.actionIndex >= 0
+      && typeof baseline.frameHash === 'string' && baseline.frameHash
+      && baseline.actionIndex === proposal.baseline.actionIndex
+      && baseline.frameHash === proposal.baseline.frameHash);
+    const evidencePostdatesProposal = baselineValid && resolvedEvidence.every((event) =>
+      Number.isSafeInteger(event.sequence) && event.sequence > baseline.sequence);
+    // Action counters restart at each attempt. Delayed evaluation may use the
+    // original scope's later evidence, but a new attempt/episode needs a new
+    // proposal rather than retrospectively confirming the old experiment.
+    const evidenceScopeValid = baselineValid && resolvedEvidence.every((event) =>
+      event.attemptId === baseline.attemptId && event.episodeId === baseline.episodeId);
     const actionEvidence = resolvedEvidence.filter((event) => event.type === 'environment-action');
     const predictionChecks = checkPredictions(hypothesis.predictions, actionEvidence);
     const hasEvidence = requestedRefs.length > 0 && missingEvidenceRefs.length === 0;
@@ -69,6 +83,7 @@ export class HypothesisEvaluator {
     const evidenceBoundaryValid = hasEvidence
       && evidenceBelongsToGame
       && evidencePostdatesProposal
+      && evidenceScopeValid
       && hasSubstantiveHypothesis
       && proposalBelongsToGame
       && predictionChecks.totalClaims > 0
@@ -85,7 +100,9 @@ export class HypothesisEvaluator {
     if (!requestedRefs.length) reasons.push('evaluation supplied no evidence references');
     if (missingEvidenceRefs.length) reasons.push(`unknown evidence references: ${missingEvidenceRefs.join(', ')}`);
     if (!evidenceBelongsToGame) reasons.push('evidence references cross a game boundary');
+    if (!baselineValid) reasons.push('proposal baseline must resolve to matching durable game evidence with sequence, attempt and episode identity');
     if (!evidencePostdatesProposal) reasons.push('all evaluation evidence must be produced after the proposal baseline');
+    if (!evidenceScopeValid) reasons.push('evaluation evidence must stay in the proposal baseline attempt and episode; propose a new experiment after restart or reset');
     if (!predictionChecks.totalClaims) reasons.push('predictions contain no externally checkable expected fields');
     if (predictionChecks.unmatchedPredictions.length) {
       reasons.push(`no matching post-proposal action evidence for predictions: ${predictionChecks.unmatchedPredictions.join(', ')}`);
@@ -100,7 +117,7 @@ export class HypothesisEvaluator {
     }
 
     return deepFreeze({
-      evaluator: 'arc-hypothesis-evidence-v1',
+      evaluator: 'arc-hypothesis-evidence-v2',
       evaluatedAt: new Date().toISOString(),
       proposalId: proposal.id,
       outcome,
@@ -148,7 +165,7 @@ function normalizePrediction(value) {
 }
 
 function checkPredictions(predictions, evidence) {
-  const remaining = evidence.slice().sort((a, b) => Number(a.actionIndex || 0) - Number(b.actionIndex || 0));
+  const remaining = evidence.slice().sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
   const checks = [];
   const unmatchedPredictions = [];
   let totalClaims = 0;

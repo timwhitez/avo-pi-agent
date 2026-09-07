@@ -214,6 +214,15 @@ queryable, while only a small deterministic relevant set is surfaced
 automatically. Writes are atomic and permissions are restricted. Runtime memory
 lives under a gitignored directory.
 
+Hypothesis evaluation resolves the proposal's exact baseline evidence and uses
+durable sequence order, not attempt-local action counters. Cited evidence must
+be strictly later and in the same attempt/episode. Pending proposals can be
+evaluated after restart using qualifying original-scope evidence; new actions
+after restart/full reset require a new proposal, otherwise the result is
+inconclusive. Missing or inconsistent baseline evidence is also inconclusive.
+Durable reload rechecks conclusive records against this boundary and rejects
+unreproducible historical verdicts; it does not silently upgrade or rewrite them.
+
 ### Hypothesis journal
 
 `hypothesis_propose` can record structured predictions before an experiment;
