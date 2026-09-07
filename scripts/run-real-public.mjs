@@ -119,13 +119,11 @@ try {
   if (resumeContext && String(process.env.AVO_RESUME_MODE || 'recovered') !== 'migrated') {
     const checkpointDir = path.join(privateDir, 'resume');
     if (fs.existsSync(checkpointDir)) {
-      const resumed = loadResumedRecords(checkpointDir, {
+      loadResumedRecords(checkpointDir, {
         capsuleHash: resumeContext.originalCapsule.capsuleHash,
         stateBinding: runState.currentState,
+        initialState: resumeContext.originalCapsule.definition.initialState,
       });
-      if (resumed.size === 0) {
-        assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
-      }
     } else {
       assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
     }

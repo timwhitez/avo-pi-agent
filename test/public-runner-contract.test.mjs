@@ -162,6 +162,11 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
+        if (process.env.AVO_REPAIR_ROUND === 'partial-state' && frame.gameId === 'g25-v1') {
+          await call('workspace_write', { path: 'partial.txt', content: 'saved before failure' });
+          this.state.errorMessage = 'synthetic provider unavailable after state mutation';
+          return;
+        }
         if (process.env.AVO_TEST_TOOL_FAILURE_DIAGNOSTIC === '1'
             && frame.gameId === 'g01-v1' && attempt === 1) {
           const raw = 'PRIVATE_MODEL_REASONING_do_not_emit';
@@ -538,7 +543,7 @@ class Arcade:
                 "runs": runs,
             })
         return Scorecard({
-            "card_id": "contract-scorecard",
+            "card_id": f"contract-scorecard-{os.getpid()}",
             "score": 100.0 if len(grouped) == 25 and completed == 50 else 0.0,
             "total_environments": len(grouped),
             "total_actions": sum(sum(env.run_steps) for env in self.environments),
@@ -869,6 +874,36 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.notEqual(exhaustedReport.scoreStatus, 'official');
   assert.equal(exhaustedReport.scorecardCoverage.exact, false);
   assert.equal(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g01.json')), false);
+  fs.rmSync(exhaustedReportFile);
+
+  const partialEnv = {
+    ...childEnv,
+    AVO_REPAIR_ROUND: 'partial-state',
+    AVO_GAME_CONCURRENCY: '1',
+    AVO_REAL_RUN_ID: exhaustedRunId,
+    AVO_MEMORY_DIR: exhaustedState.memoryDir,
+    AVO_WORKSPACE_DIR: exhaustedState.workspaceDir,
+    AVO_RESUME_DIR: path.join(exhaustedPrivateDir, 'resume'),
+    AVO_RUN_CAPSULE_HASH: exhaustedCapsule.capsuleHash,
+    AVO_RUN_CAPSULE_FILE: exhaustedCapsuleFile,
+  };
+  const partial = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+    cwd: root, encoding: 'utf8', timeout: 60_000, env: partialEnv,
+  });
+  assert.doesNotMatch(partial.stderr, /resume state authority does not bind/);
+  const partialReport = JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8'));
+  const partialGames = partialReport.results;
+  assert.match(partialGames.find((game) => game.gameId === 'g25').error, /synthetic provider unavailable/);
+  assert.equal(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g25.json')), false);
+  assert.ok(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g24.json')));
+  const partialRecovery = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+    cwd: root, encoding: 'utf8', timeout: 60_000,
+    env: { ...partialEnv, AVO_REPAIR_ROUND: '', AVO_RUN_CLASS: 'recovered' },
+  });
+  assert.equal(partialRecovery.status, 0, partialRecovery.stderr || partialRecovery.stdout);
+  assert.match(partialRecovery.stdout, /\[resume\] 24 completed game checkpoint/);
+  assert.doesNotMatch(partialRecovery.stdout, /g25 resumed from checkpoint/);
+  assert.ok(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g25.json')));
   fs.rmSync(exhaustedReportFile);
 
   const scorecardObservationNotBefore = Date.now();
