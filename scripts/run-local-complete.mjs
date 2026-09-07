@@ -12,6 +12,8 @@ import {
 } from '../src/local/authority-evidence.mjs';
 import { evaluateCompleteLocalAcceptance } from '../src/local/complete-acceptance.mjs';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { enterOwnedRun } from '../src/local/owned-run.mjs';
+import { managedProcessGroup } from '../src/local/process-group.mjs';
 import { redactRuntimeSecrets } from '../src/redaction.mjs';
 
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
@@ -33,7 +35,9 @@ for (const file of [reportFile, missionControlPath, repairPath]) {
   if (fs.existsSync(file)) throw new Error('local completion evidence already exists for this run ID');
 }
 
+const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId, kind: 'complete-local' });
+process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
 let activeChild = null;
 let terminal = false;
 let summaryWritten = false;
@@ -180,6 +184,7 @@ try {
     if (!process.exitCode) process.exitCode = 1;
   }
   try {
+    await scope.close();
     lock.release();
   } catch (error) {
     console.error(`[local-complete] lock release failed: ${safeText(error?.message || error)}`);
@@ -191,7 +196,7 @@ async function runStage(stage) {
   activeChild = spawn(stage.command, stage.args, {
     cwd: process.cwd(),
     stdio: 'inherit',
-    detached: process.platform !== 'win32',
+    detached: process.platform !== 'win32' && !managedProcessGroup(),
     env: {
       ...process.env,
       GITHUB_ACTIONS: '',
@@ -239,7 +244,7 @@ async function terminateActiveChild(signal) {
 }
 
 function signalChildTree(child, signal) {
-  if (process.platform === 'win32') child.kill(signal);
+  if (process.platform === 'win32' || managedProcessGroup()) child.kill(signal);
   else process.kill(-child.pid, signal);
 }
 

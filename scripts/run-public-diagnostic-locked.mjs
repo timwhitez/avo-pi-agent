@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { loadLocalEnv } from '../src/config.mjs';
 import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { enterOwnedRun } from '../src/local/owned-run.mjs';
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 
 loadLocalEnv();
@@ -28,7 +29,9 @@ if (fs.existsSync(sourceFile) || fs.existsSync(outputFile)) {
 }
 fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
 
+const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId, kind: 'public-diagnostic' });
+process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
 let code = 1;
 let signal = null;
 let sourceReport = null;
@@ -96,6 +99,7 @@ try {
     reportFile: path.relative(root, outputFile),
   }));
 } finally {
+  await scope.close();
   lock.release();
 }
 

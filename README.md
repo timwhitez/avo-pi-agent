@@ -16,6 +16,18 @@ behavior-changing candidate mechanism. The `current-v1` profile implements:
 
 ## What is implemented
 
+Locked benchmark, diagnostic, completion and repair entry points require Linux
+with readable `/proc` process metadata. Each run owns one process group; its
+Agent and ARC descendants share that group. Mission Control pause/resume stops
+and continues the group. Wall-clock deadlines continue during a pause, so a
+deadline exceeded while paused can terminate work on resume; action budgets
+are not reset or extended. Pausing prevents new local action/model dispatch;
+an already dispatched provider request may continue remotely. A separate pipe guardian cleans the group if its
+wrapper or command-line launcher dies. The execution lock cannot be released
+or reclaimed while owned descendants remain alive. Daemon-owned workspace
+containers require separate lifecycle control (open Issue #279); these process
+group checks do not establish that container computation has stopped.
+
 ```text
 ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values
