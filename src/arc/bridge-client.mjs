@@ -2,11 +2,13 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import { redactRuntimeSecrets } from '../redaction.mjs';
+import { managedProcessGroup } from '../local/process-group.mjs';
 
 const MAX_DIAGNOSTIC_CHARS = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const SUPPORTED_AUTH_MODES = new Set(['anonymous-auto', 'registered']);
 const CHILD_ENV_ALLOWLIST = Object.freeze([
+  'AVO_PROCESS_GROUP',
   'PATH',
   'HOME',
   'USERPROFILE',
@@ -119,7 +121,7 @@ export class ArcBridgeClient {
     const child = spawn(this.python, [this.script], {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
+      detached: process.platform !== 'win32' && !managedProcessGroup(),
       env: buildArcChildEnv(process.env),
     });
     this.child = child;
@@ -197,7 +199,9 @@ export class ArcBridgeClient {
       try { child.kill('SIGKILL'); } catch {}
       return;
     }
-    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    if (!managedProcessGroup()) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    }
     try { child.kill('SIGKILL'); } catch {}
   }
 

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { ensureAuthorityDirectory } from './authority-directory.mjs';
+import { liveGroupMembers, managedProcessGroup } from './process-group.mjs';
 
 const LOCK_NAME = '.local-execution.lock';
 const LOCK_MAX_BYTES = 16 * 1024;
@@ -34,7 +35,8 @@ export function acquireLocalExecutionLock({
       if (error?.code !== 'EEXIST') throw error;
       const current = readLockSnapshot(authority, lockFile);
       if (!current) throw new Error('local execution lock exists but is unreadable; inspect it manually');
-      if (isAlive(current.value.pid)) {
+      if (isAlive(current.value.pid)
+          || (current.value.processGroup && liveGroupMembers(current.value.processGroup).length > 0)) {
         throw new Error(`another local benchmark/repair execution is active (pid ${current.value.pid}, kind ${current.value.kind || 'unknown'}, run ${current.value.runId || 'unknown'})`);
       }
       try {
@@ -48,6 +50,7 @@ export function acquireLocalExecutionLock({
   const record = {
     schemaVersion: 1,
     pid: process.pid,
+    processGroup: managedProcessGroup(),
     runId: String(runId || ''),
     kind: String(kind || 'local-execution'),
     token,
@@ -212,6 +215,8 @@ function readLockSnapshot(authority, lockFile) {
     if (!sameStableFile(opened, after) || !sameStableFile(after, pathAfter)) return null;
     assertLockAuthority(authority);
     const value = JSON.parse(bytes.toString('utf8'));
+    if (value?.processGroup !== undefined && value?.processGroup !== null
+        && (!Number.isSafeInteger(value.processGroup) || value.processGroup <= 1)) return null;
     return value && typeof value === 'object'
       ? { value, identity: fileIdentity(after) }
       : null;
@@ -230,6 +235,10 @@ function releaseOwnedLock(authority, lockFile, token, identity) {
     || !sameFileIdentity(current.identity, identity)
     || !constantEqual(current.value.token, token)) {
     throw new Error('refusing to release a local execution lock owned by another process');
+  }
+  if (current.value.processGroup
+      && liveGroupMembers(current.value.processGroup, { exclude: process.pid }).length > 0) {
+    throw new Error('refusing to release a local execution lock while owned descendants remain');
   }
   removeExactLock(authority, lockFile, identity);
 }

@@ -6,6 +6,8 @@ import path from 'node:path';
 
 import { ensureAuthorityDirectory } from '../src/local/authority-directory.mjs';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { enterOwnedRun } from '../src/local/owned-run.mjs';
+import { managedProcessGroup } from '../src/local/process-group.mjs';
 import {
   discoverHashedArtifacts,
   extractStrictRoundMetrics,
@@ -54,7 +56,9 @@ for (const [directory, purpose] of [
   ensureAuthorityDirectory(directory, { root: repositoryRoot, purpose });
 }
 
+const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId: baseRunId, kind: 'trajectory-repair-loop' });
+process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
 let activeChild = null;
 let interrupted = false;
 let interruptSignal = null;
@@ -250,6 +254,7 @@ try {
     if (!process.exitCode) process.exitCode = 1;
   }
   try {
+    await scope.close();
     lock.release();
   } catch (error) {
     console.error(`[repair-loop] lock release failed: ${safeText(error?.message || error)}`);
@@ -272,7 +277,7 @@ async function runBenchmark(roundId, traceDir, memoryRoot, workspaceRoot) {
   const child = spawn(process.execPath, ['scripts/run-real-public.mjs'], {
     cwd: process.cwd(),
     stdio: 'inherit',
-    detached: process.platform !== 'win32',
+    detached: process.platform !== 'win32' && !managedProcessGroup(),
     env: {
       ...process.env,
       GITHUB_ACTIONS: '',
@@ -318,7 +323,7 @@ async function interrupt(signal) {
 }
 
 function signalChildTree(child, signal) {
-  if (process.platform === 'win32') child.kill(signal);
+  if (process.platform === 'win32' || managedProcessGroup()) child.kill(signal);
   else process.kill(-child.pid, signal);
 }
 

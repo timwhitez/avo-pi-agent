@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
+import { managedProcessGroup } from '../local/process-group.mjs';
 
 const DEFAULT_TAIL_CHARS = 64 * 1024;
 
@@ -23,11 +24,12 @@ export async function runProcess(command, args, {
   const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
   const stdoutSink = stdoutFile ? createSink(stdoutFile, { append: appendLogs }) : null;
   const stderrSink = stderrFile ? createSink(stderrFile, { append: appendLogs }) : null;
+  const ownedGroup = managedProcessGroup();
   const child = spawn(command, args, {
     cwd,
-    env,
+    env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup) } : env,
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
+    detached: process.platform !== 'win32' && !ownedGroup,
   });
 
   let stdoutTail = '';
@@ -166,7 +168,7 @@ function closeChildOutputStreams(child) {
 
 function terminateProcessTree(child, signal) {
   if (!child?.pid) return;
-  if (process.platform !== 'win32') {
+  if (process.platform !== 'win32' && !managedProcessGroup()) {
     try {
       process.kill(-child.pid, signal);
       return;

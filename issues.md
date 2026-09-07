@@ -8,11 +8,15 @@ After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; 
 
 After PR #277: #276 closed by merge `dc58e8a47642085c41a6a8bacef9997c538f0152`; 15 open Issues and 0 open PRs remain. Next is #271 bounded resume evidence acquisition. No new benchmark has started.
 
+After PR #278: #271 closed by merge `342c8e6ec88dd55db6021aab9a5f1f723e98731c`; 14 open Issues and 0 open PRs remain. Next is #261 owned process lifecycle. No new benchmark has started.
+
+During #261: new Issue #279 records daemon-owned workspace container lifecycle, distinct from wrapper/Agent/ARC POSIX descendants. There are 15 open Issues before the #261 PR. Container lifecycle remains an explicit benchmark blocker.
+
 | Issue | Scope and dependency | Current disposition |
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
 | #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
-| #261 | Nested process pause/abort ownership | Open; lifecycle repair required before new benchmark |
+| #261 | Nested process pause/abort ownership | Implemented in PR #280: shared Linux execution group, parent-death pipe guardian, descendant-aware lock. Full local Node 503/503 and 9 lifecycle tests passed; offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan/audit 0 passed. Independent review pending. Daemon container control is separately open in #279 |
 | #262 | Complete multi-tool transcript turns | Closed by PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent APPROVE at `e80e2e0ed842b955da4a1e66a3cbd3adf4b0554e`, including 2,070 additional pinned-SDK conversion cases |
 | #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
 | #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
@@ -22,11 +26,12 @@ After PR #277: #276 closed by merge `dc58e8a47642085c41a6a8bacef9997c538f0152`; 
 | #268 | Completed process-line length enforcement | Open; separate from file replay ingestion #266 |
 | #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
 | #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
-| #271 | Bounded resume evidence acquisition | Implemented in PR #278 with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent review pending; remains a provenance prerequisite |
+| #271 | Bounded resume evidence acquisition | Closed by PR #278 with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `2f5bb45e467ee2e467777d9424825cea1a916283`, including ordinary production recovery contract |
 | #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
 | #276 | Handled failure leaves final state authority stale | Closed by PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `722a2fbde56113ed7b7d9eb58de25e397a12fdad`, including 14/14 focused tests and real CLI partial recovery with synthetic external adapters. Separate from #271 |
+| #279 | Daemon-owned workspace container pause/cancellation | Open; source-audited separate runtime boundary. Real container lifecycle tests and implementation pending; blocks broad lifecycle/model-boundary claims |
 
 Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
 
