@@ -22,7 +22,7 @@ After PR #277: #276 closed by merge `dc58e8a47642085c41a6a8bacef9997c538f0152`; 
 | #268 | Completed process-line length enforcement | Open; separate from file replay ingestion #266 |
 | #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
 | #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
-| #271 | Bounded resume evidence acquisition | Implemented with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. PR/independent review pending; remains a provenance prerequisite |
+| #271 | Bounded resume evidence acquisition | Implemented in PR #278 with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent review pending; remains a provenance prerequisite |
 | #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
