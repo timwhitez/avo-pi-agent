@@ -20,6 +20,8 @@ After PR #284: #282 closed by merge `0ddc3896659d9b6e4812416031415988ed830bc6`, 
 
 After PR #283: #279 closed by merge `6243691ee40d6b7b054a7c7b28b249ac9d724a2f`; final-head independent APPROVE `67f15f59eb0d8ced02378d080290ef4d01ff5aea`. Merged source/test trees match the reviewed head. Live inventory verified: 12 open Issues, 0 open PRs. Next is #259 diagnostic capsule/launch integration. No public benchmark or provider requests started; remaining failures are not attributed to model capability.
 
+After PR #286: #259 and #285 closed by merge `df6d339482888d82ea1986ca0bad24dbc8e9de8c`; independent final-head APPROVE `e356ceeb49da5c70c8a2a0974ec4ed35662cacde`. Merged source/test trees match the reviewed head. Live inventory: 11 open Issues, 0 open PRs. Next #268 fixes bounded process-line ingestion, a prerequisite of #267. No provider/public ARC calls or model-boundary claim.
+
 | Issue | Scope and dependency | Current disposition |
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | PR #286: locked diagnostic wrapper reuses canonical cold-state/preflight/capsule/CLI/report path. Sealed diagnostic intent cannot establish competition authority, including full-set or recovery. Actual Mission Control launch/report-reader integration preserves selection, high reasoning, action budget and isolated state. Full local 536/536, UI 93/93 and production build passed. Independent code-head APPROVE `d477c1ee65579896bc041e53becff47a4397930e`, reviewer reran 3/3 including full synthetic wrapper/CLI fixture. Final ledger-head confirmation and merge pending |
@@ -32,7 +34,7 @@ After PR #283: #279 closed by merge `6243691ee40d6b7b054a7c7b28b249ac9d724a2f`; 
 | #265 | Confined streaming log acquisition | Open; evidence producer repair required |
 | #266 | Confined and bounded replay ingestion | Open; prerequisite for #267 replay consumption |
 | #267 | Capsule-owned UI memory/evidence/progress | Open; depends on #259/#264/#266/#268/#273 contracts |
-| #268 | Completed process-line length enforcement | Open; separate from file replay ingestion #266 |
+| #268 | Completed process-line length enforcement | Repair in progress: enforce the limit on completed lines too; all fragments of an oversized logical line remain truncated through newline/flush. Preserve exact-limit split CRLF; reject invalid limits. Direct production ingestion regression prevents incomplete suffixes from becoming structured events. Focused 9/9; full local/UI gates and independent review pending. Separate from file replay ingestion #266 |
 | #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
 | #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
 | #271 | Bounded resume evidence acquisition | Closed by PR #278 with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `2f5bb45e467ee2e467777d9424825cea1a916283`, including ordinary production recovery contract |

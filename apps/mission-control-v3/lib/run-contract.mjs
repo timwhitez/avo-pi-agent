@@ -120,7 +120,9 @@ export function signalProcessTree(child, signal, { platform = process.platform, 
 }
 
 export function createBoundedLineBuffer(onLine, { maxChars = MAX_PARTIAL_LINE_CHARS } = {}) {
+  if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new Error('line limit must be a positive safe integer');
   let buffer = '';
+  let fragmented = false;
   return Object.freeze({
     push(chunk) {
       buffer += String(chunk || '');
@@ -136,16 +138,24 @@ export function createBoundedLineBuffer(onLine, { maxChars = MAX_PARTIAL_LINE_CH
       if (!match || match.index === undefined) break;
       const line = buffer.slice(0, match.index);
       buffer = buffer.slice(match.index + match[0].length);
-      onLine(line, { truncated: false });
+      const truncated = fragmented || line.length > maxChars;
+      for (let offset = 0; offset < Math.max(1, line.length); offset += maxChars) {
+        onLine(line.slice(offset, offset + maxChars), { truncated });
+      }
+      fragmented = false;
     }
-    while (buffer.length > maxChars) {
+    // Retain one possible CRLF delimiter until the next chunk resolves it.
+    while (buffer.length > maxChars
+        && (flush || buffer.length !== maxChars + 1 || !buffer.endsWith('\r'))) {
       const line = buffer.slice(0, maxChars);
       buffer = buffer.slice(maxChars);
+      fragmented = true;
       onLine(line, { truncated: true });
     }
-    if (flush && buffer) {
-      onLine(buffer, { truncated: false });
+    if (flush) {
+      if (buffer) onLine(buffer, { truncated: fragmented });
       buffer = '';
+      fragmented = false;
     }
   }
 }

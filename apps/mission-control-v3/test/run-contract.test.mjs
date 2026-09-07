@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ingestProcessLine } from '../lib/control-plane-base.mjs';
 import {
   buildRunLaunch,
   createBoundedLineBuffer,
@@ -167,6 +168,53 @@ test('bounds unterminated stdout/stderr fragments', () => {
   );
   buffer.flush();
   assert.equal(lines.at(-1).line, 'qrst');
+  assert.equal(lines.at(-1).meta.truncated, true);
+});
+
+test('bounds complete lines and keeps fragmented tails incomplete through newline or flush', () => {
+  const cases = [
+    { chunks: ['abcdefghijkl\n'], expected: [['abcdefgh', true], ['ijkl', true]] },
+    { chunks: ['abcdefgh', 'ijkl\n'], expected: [['abcdefgh', true], ['ijkl', true]] },
+    { chunks: ['abcdefghi', 'j\nnext\n'], expected: [['abcdefgh', true], ['ij', true], ['next', false]] },
+    { chunks: ['abcdefgh\n'], expected: [['abcdefgh', false]] },
+    { chunks: ['abcdefgh\r', '\nnext\r\n'], expected: [['abcdefgh', false], ['next', false]] },
+    { chunks: ['abcdefghi\r', '\n'], expected: [['abcdefgh', true], ['i', true]] },
+    { chunks: ['short'], expected: [['short', false]] },
+    { chunks: ['abcdefgh\r'], expected: [['abcdefgh', true], ['\r', true]] },
+    { chunks: ['\n\r\n'], expected: [['', false], ['', false]] },
+  ];
+  for (const { chunks, expected } of cases) {
+    const observed = [];
+    const buffer = createBoundedLineBuffer((line, { truncated }) => {
+      assert.ok(line.length <= 8);
+      observed.push([line, truncated]);
+    }, { maxChars: 8 });
+    for (const chunk of chunks) {
+      buffer.push(chunk);
+      assert.ok(buffer.bufferedChars <= 9);
+    }
+    buffer.flush();
+    assert.equal(buffer.bufferedChars, 0);
+    assert.deepEqual(observed, expected, JSON.stringify(chunks));
+  }
+  for (const maxChars of [0, -1, 1.5, NaN, Infinity]) {
+    assert.throws(() => createBoundedLineBuffer(() => {}, { maxChars }), /positive safe integer/);
+  }
+});
+
+test('production ingestion does not interpret incomplete output fragments as events', () => {
+  for (const terminator of ['\n', '']) {
+    const run = { id: 'bounded-run', events: [], cursor: 0, currentGame: null };
+    const buffer = createBoundedLineBuffer((line, meta) => ingestProcessLine(run, line, false, meta), { maxChars: 64 });
+    buffer.push('x'.repeat(65));
+    // Complete-looking JSON is still only a suffix of an oversized line.
+    buffer.push(`${'x'.repeat(63)}{"runId":"bounded-run","type":"sample"}${terminator}`);
+    buffer.flush();
+    assert.ok(run.events.length > 0);
+    assert.ok(run.events.every((event) => event.type === 'process.output_truncated'));
+    buffer.push('{"runId":"bounded-run","type":"sample"}\n');
+    assert.equal(run.events.at(-1).type, 'trajectory.sample');
+  }
 });
 
 test('diagnostic wrapper is local-only, locked and permanently non-official', () => {
