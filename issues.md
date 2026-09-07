@@ -24,7 +24,7 @@ After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; 
 | #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
-| #276 | Handled failure leaves final state authority stale | Implemented; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470 (including real CLI partial-state recovery with synthetic external adapters), offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Separate from #271; independent review/PR pending |
+| #276 | Handled failure leaves final state authority stale | Implemented in PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470 (including real CLI partial-state recovery with synthetic external adapters), offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Separate from #271; independent review pending |
 
 Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
 
