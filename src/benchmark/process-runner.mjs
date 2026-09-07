@@ -27,7 +27,7 @@ export async function runProcess(command, args, {
   const ownedGroup = managedProcessGroup();
   const child = spawn(command, args, {
     cwd,
-    env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup) } : env,
+    env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32' && !ownedGroup,
   });

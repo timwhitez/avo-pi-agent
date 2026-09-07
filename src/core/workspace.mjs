@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { managedProcessGroup } from '../local/process-group.mjs';
+import { parseWorkspaceGuardian, requestWorkspaceOwner } from '../local/workspace-owner-client.mjs';
 
 const ALLOWED_EXTENSIONS = new Set(['.py', '.json', '.md', '.txt', '.csv']);
 const WORKSPACE_MODES = new Set(['disabled', 'files-only', 'isolated-python']);
@@ -180,7 +182,7 @@ export class WorkspaceSandbox {
     }
   }
 
-  async runPython(code) {
+  async runPython(code, lifecycle = null) {
     if (!this.canRunPython()) {
       throw new Error('workspace Python is disabled; set AVO_WORKSPACE_MODE=isolated-python and configure a local Docker/Podman runtime');
     }
@@ -192,12 +194,23 @@ export class WorkspaceSandbox {
       throw new Error('workspace root cannot be represented safely as a container bind mount');
     }
 
+    if (!lifecycle && managedProcessGroup()) {
+      const guardian = parseWorkspaceGuardian(process.env.AVO_WORKSPACE_GUARDIAN);
+      if (guardian.group !== managedProcessGroup()) throw new Error('workspace guardian group mismatch');
+      return await requestWorkspaceOwner(guardian, {
+        kind: 'run', code: text, workspace: {
+          root: this.baseRoot, gameId: path.basename(this.root), timeoutMs: this.timeoutMs,
+          containerRuntime: this.containerRuntime, containerImage: this.containerImage,
+        },
+      });
+    }
+
     const runtime = this.containerRuntime;
     const name = `avo-workspace-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
     const userArgs = typeof process.getuid === 'function'
       ? ['--user', `${process.getuid()}:${process.getgid()}`]
       : [];
-    const args = [
+    let args = [
       'run', '--rm', '--interactive', '--pull=never', '--name', name,
       '--network=none', '--read-only', '--cap-drop=ALL',
       '--security-opt=no-new-privileges:true', '--pids-limit=32',
@@ -211,12 +224,18 @@ export class WorkspaceSandbox {
       'python', '-I', '-S', '-c', CONTAINER_WRAPPER,
     ];
 
+    if (lifecycle) {
+      const id = await lifecycle.create(args);
+      args = ['start', '--attach', '--interactive', id];
+    }
+
     return await new Promise((resolve, reject) => {
       const child = spawn(runtime, args, {
         cwd: this.root,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: containerCliEnv(process.env),
       });
+      lifecycle?.attached(child);
       let stdout = '';
       let stderr = '';
       let timedOut = false;
@@ -241,6 +260,10 @@ export class WorkspaceSandbox {
       child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk); });
 
       const cleanupContainer = () => {
+        if (lifecycle) {
+          void lifecycle.cancel().catch(() => {}); // owner retains failed cleanup authority
+          return;
+        }
         spawnSync(runtime, ['rm', '-f', name], {
           stdio: 'ignore',
           timeout: 5_000,

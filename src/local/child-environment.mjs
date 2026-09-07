@@ -1,5 +1,6 @@
 const BASE_KEYS = Object.freeze([
   'AVO_PROCESS_GROUP',
+  'AVO_WORKSPACE_GUARDIAN',
   'PATH',
   'PATHEXT',
   'SYSTEMROOT',

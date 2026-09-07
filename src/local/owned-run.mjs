@@ -1,8 +1,14 @@
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { currentProcessGroup, liveGroupMembers, managedProcessGroup } from './process-group.mjs';
 import { acquireLocalExecutionLock } from './run-lock.mjs';
+import { containerCliEnv } from '../core/workspace.mjs';
+import { loadLocalEnv } from '../config.mjs';
 
 export async function enterOwnedRun() {
   if (process.platform !== 'linux') throw new Error('owned benchmark execution requires Linux');
@@ -39,8 +45,10 @@ export async function enterOwnedRun() {
 
   const ownerPipe = process.env.AVO_OWNER_PIPE === '3';
   delete process.env.AVO_OWNER_PIPE;
-  const guardian = spawn(process.execPath, [fileURLToPath(new URL('./process-guardian.mjs', import.meta.url)), String(process.pid), ownerPipe ? 'owner-pipe' : ''], {
-    detached: true, stdio: ['pipe', 'pipe', 'inherit', ...(ownerPipe ? [3] : [])], env: {},
+  loadLocalEnv();
+  const identity = { group: process.pid, directory: fs.mkdtempSync(path.join(os.tmpdir(), 'avo-guardian-')), id: crypto.randomBytes(16).toString('hex') };
+  const guardian = spawn(process.execPath, [fileURLToPath(new URL('./process-guardian.mjs', import.meta.url)), String(process.pid), ownerPipe ? 'owner-pipe' : '', JSON.stringify(identity)], {
+    detached: true, stdio: ['pipe', 'pipe', 'inherit', ...(ownerPipe ? [3] : [])], env: containerCliEnv(process.env),
   });
   let closing = false;
   const closed = new Promise((resolve) => guardian.once('close', resolve));
@@ -55,6 +63,7 @@ export async function enterOwnedRun() {
     });
   });
   process.env.AVO_PROCESS_GROUP = String(process.pid);
+  process.env.AVO_WORKSPACE_GUARDIAN = JSON.stringify({ ...identity, pid: guardian.pid });
   return {
     async close() {
       // Normal completion must wait for owned descendants, not only the CLI.

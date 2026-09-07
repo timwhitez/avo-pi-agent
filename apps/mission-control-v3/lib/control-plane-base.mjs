@@ -19,6 +19,7 @@ import {
   loadMemorySnapshotEvidence,
 } from './mission-control-evidence.mjs';
 import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsule-evidence.mjs';
+import { controlOwnedRun } from '../../../src/local/owned-run-control.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -143,7 +144,7 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
   return sanitizeRun(run);
 }
 
-export function controlRun(id, action, confirmation = '') {
+export async function controlRun(id, action, confirmation = '') {
   const run = requireRun(id);
   const state = store.children.get(id);
   if (!state || state.closed) throw requestError(409, 'Run process is not active');
@@ -152,15 +153,15 @@ export function controlRun(id, action, confirmation = '') {
   if (action === 'pause') {
     requireState(run, ['running']);
     if (process.platform === 'win32') throw requestError(501, 'Pause is supported only on POSIX self-hosted deployments');
-    signalTreeOrThrow(child, 'SIGSTOP');
+    await controlOwnedRun(child.pid, 'pause', { root: REPO_ROOT });
     run.state = 'paused';
-    emit(run, 'run.paused', { scope: 'process-group' });
+    emit(run, 'run.paused', { scope: 'process-group-and-owned-containers' });
   } else if (action === 'resume') {
     requireState(run, ['paused']);
     if (process.platform === 'win32') throw requestError(501, 'Resume is supported only on POSIX self-hosted deployments');
-    signalTreeOrThrow(child, 'SIGCONT');
+    await controlOwnedRun(child.pid, 'resume', { root: REPO_ROOT });
     run.state = 'running';
-    emit(run, 'run.resumed', { scope: 'process-group' });
+    emit(run, 'run.resumed', { scope: 'process-group-and-owned-containers' });
   } else if (action === 'abort') {
     requireState(run, ['running', 'paused']);
     if (!constantEqual(String(confirmation), run.id)) throw requestError(400, 'Abort confirmation must exactly match the run ID');

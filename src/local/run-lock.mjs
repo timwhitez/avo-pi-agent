@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { ensureAuthorityDirectory } from './authority-directory.mjs';
 import { liveGroupMembers, managedProcessGroup } from './process-group.mjs';
+import { parseWorkspaceGuardian, workspaceGuardianClean } from './workspace-owner-client.mjs';
 
 const LOCK_NAME = '.local-execution.lock';
 const LOCK_MAX_BYTES = 16 * 1024;
@@ -35,7 +36,8 @@ export function acquireLocalExecutionLock({
       if (error?.code !== 'EEXIST') throw error;
       const current = readLockSnapshot(authority, lockFile);
       if (!current) throw new Error('local execution lock exists but is unreadable; inspect it manually');
-      if (isAlive(current.value.pid)
+      if ((current.value.workspaceGuardian && !workspaceGuardianClean(current.value.workspaceGuardian))
+          || isAlive(current.value.pid)
           || (current.value.processGroup && liveGroupMembers(current.value.processGroup).length > 0)) {
         throw new Error(`another local benchmark/repair execution is active (pid ${current.value.pid}, kind ${current.value.kind || 'unknown'}, run ${current.value.runId || 'unknown'})`);
       }
@@ -51,6 +53,8 @@ export function acquireLocalExecutionLock({
     schemaVersion: 1,
     pid: process.pid,
     processGroup: managedProcessGroup(),
+    workspaceGuardian: process.env.AVO_WORKSPACE_GUARDIAN
+      ? parseWorkspaceGuardian(process.env.AVO_WORKSPACE_GUARDIAN) : null,
     runId: String(runId || ''),
     kind: String(kind || 'local-execution'),
     token,
@@ -215,6 +219,7 @@ function readLockSnapshot(authority, lockFile) {
     if (!sameStableFile(opened, after) || !sameStableFile(after, pathAfter)) return null;
     assertLockAuthority(authority);
     const value = JSON.parse(bytes.toString('utf8'));
+    if (value?.workspaceGuardian) parseWorkspaceGuardian(value.workspaceGuardian);
     if (value?.processGroup !== undefined && value?.processGroup !== null
         && (!Number.isSafeInteger(value.processGroup) || value.processGroup <= 1)) return null;
     return value && typeof value === 'object'
@@ -239,6 +244,9 @@ function releaseOwnedLock(authority, lockFile, token, identity) {
   if (current.value.processGroup
       && liveGroupMembers(current.value.processGroup, { exclude: process.pid }).length > 0) {
     throw new Error('refusing to release a local execution lock while owned descendants remain');
+  }
+  if (current.value.workspaceGuardian && !workspaceGuardianClean(current.value.workspaceGuardian)) {
+    throw new Error('refusing to release a local execution lock before workspace cleanup is confirmed');
   }
   removeExactLock(authority, lockFile, identity);
 }
