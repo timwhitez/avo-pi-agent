@@ -1,6 +1,6 @@
 # Benchmark and Harness Audit: Why 0 Wins Is Not Yet a Model-Capability Verdict
 
-## Current continuation audit — 2026-09-07
+## Current continuation audit — 2026-09-08
 
 Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Issues (#259–#274), no open PRs before this repair. All 16 reports were read; none is closed as duplicate or unnecessary. The historical conclusions below remain historical, not the live completion ledger.
 
@@ -12,11 +12,13 @@ After PR #278: #271 closed by merge `342c8e6ec88dd55db6021aab9a5f1f723e98731c`; 
 
 During #261: new Issue #279 records daemon-owned workspace container lifecycle, distinct from wrapper/Agent/ARC POSIX descendants. There are 15 open Issues before the #261 PR. Container lifecycle remains an explicit benchmark blocker.
 
+After PR #280: #261 closed by merge `c071f328c568736dd55cf4ed8dc2c1d03802d8aa`, independently APPROVED at `8d21fe830b869a15bca31ceb347493c6439b3591` (reviewer reran 9/9 lifecycle tests). Live inventory: 14 open Issues, 0 open PRs before this repair. Docker is available. Repair #272's output acceptance contract independently before #279's container lifecycle validation; neither issue is being closed by the other's tests. No provider calls or public benchmark started.
+
 | Issue | Scope and dependency | Current disposition |
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
 | #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
-| #261 | Nested process pause/abort ownership | Implemented in PR #280: shared Linux execution group, parent-death pipe guardian, descendant-aware lock. Full local Node 503/503 and 9 lifecycle tests passed; offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan/audit 0 passed. Independent review pending. Daemon container control is separately open in #279 |
+| #261 | Nested process pause/abort ownership | Closed by reviewed PR #280 at merge `c071f328c568736dd55cf4ed8dc2c1d03802d8aa`: shared Linux execution group, parent-death pipe guardian, descendant-aware lock. Full local Node 503/503 and 9 lifecycle tests passed; offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan/audit 0 passed. Independent APPROVE at `8d21fe830b869a15bca31ceb347493c6439b3591`. Daemon container control is separately open in #279 |
 | #262 | Complete multi-tool transcript turns | Closed by PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent APPROVE at `e80e2e0ed842b955da4a1e66a3cbd3adf4b0554e`, including 2,070 additional pinned-SDK conversion cases |
 | #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
 | #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
@@ -27,13 +29,15 @@ During #261: new Issue #279 records daemon-owned workspace container lifecycle, 
 | #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
 | #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
 | #271 | Bounded resume evidence acquisition | Closed by PR #278 with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `2f5bb45e467ee2e467777d9424825cea1a916283`, including ordinary production recovery contract |
-| #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
+| #272 | Complete bounded workspace Python envelope | PR #281; independent APPROVE at code head `2af10639d802592d5ef08859b54041f1a0821104`, final ledger-head confirmation pending. Producer-bounded stdout/stderr preserve complete JSON, Node waits for stdio close, explicit model-visible truncation, bounded transport rejects overflow. Full local Node 517/517 (no skips); reviewer independently reran output 14/14 including 8 real Docker cases at image `sha256:5d7182676c848bb67861d09f69275cc8d20a55f9e694f6c5024ac370c0c1019c`. Offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan passed, audit 0 vulnerabilities. Container lifecycle remains #279 |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
 | #276 | Handled failure leaves final state authority stale | Closed by PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `722a2fbde56113ed7b7d9eb58de25e397a12fdad`, including 14/14 focused tests and real CLI partial recovery with synthetic external adapters. Separate from #271 |
 | #279 | Daemon-owned workspace container pause/cancellation | Open; source-audited separate runtime boundary. Real container lifecycle tests and implementation pending; blocks broad lifecycle/model-boundary claims |
 
 Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
+
+#272 gate detail: an earlier nonfinal broad suite had 514/515 passes: `test/durable-memory.test.mjs:42` uses a 10ms real-clock proposal-expiry window, allowing scheduling latency to expire a newly proposed record before its evaluation. Focused rerun passed 3/3; final full suite passed 517/517. Retain this test-timing weakness for deterministic clock repair with the pending memory/evidence work (#263); do not misclassify it as Python output failure. Logs: `/tmp/avo-272-full-tests.log`, `/tmp/avo-272-memory-check.log`, `/tmp/avo-272-release-tests.log`. No benchmark attribution is drawn from these contract tests.
 
 The retained r12 tuning process is terminal: its previous execution handle no longer exists; stdout contains the final three-game summary and stderr contains `resume state authority does not bind the current state and checkpoint set`. It reports 0/3 whole-game wins, 1/20 levels, 575 actions and zero post-terminal gameplay actions. This is an invalid/incomplete attribution run, not model-capability evidence. #276 records the diagnosed mismatch: failed later attempts mutate state after the last completed checkpoint, but final scorecard loading checks the older state authority. No new public run or held-out evaluation may start until the open repairs and this validity failure are resolved and independently reviewed.
 

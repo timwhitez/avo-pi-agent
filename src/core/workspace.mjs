@@ -8,6 +8,8 @@ const WORKSPACE_MODES = new Set(['disabled', 'files-only', 'isolated-python']);
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_PYTHON_BYTES = 128 * 1024;
 const MAX_OUTPUT_CHARS = 200_000;
+// JSON control-character escaping takes at most six bytes per code point.
+const MAX_PROTOCOL_BYTES = (2 * MAX_OUTPUT_CHARS + 4000) * 6 + 4096;
 const MAX_LIST_ENTRIES = 500;
 const MAX_LIST_DEPTH = 8;
 const MAX_LIST_BYTES = 8 * 1024 * 1024;
@@ -25,8 +27,23 @@ import traceback
 workspace = pathlib.Path('/workspace').resolve()
 request = json.loads(sys.stdin.read())
 code = str(request.get('code', ''))
-stdout = io.StringIO()
-stderr = io.StringIO()
+class BoundedOutput(io.TextIOBase):
+    def __init__(self):
+        super().__init__()
+        self.buffered = io.StringIO()
+        self.truncated = False
+
+    def write(self, text):
+        remaining = max(0, 200000 - self.buffered.tell())
+        self.truncated |= len(text) > remaining
+        self.buffered.write(text[:remaining])
+        return len(text)
+
+    def getvalue(self):
+        return self.buffered.getvalue()
+
+stdout = BoundedOutput()
+stderr = BoundedOutput()
 
 def guard(event, args):
     blocked = (
@@ -54,7 +71,9 @@ try:
     result = {'ok': True, 'stdout': stdout.getvalue(), 'stderr': stderr.getvalue(), 'error': None}
 except BaseException as error:
     traceback.print_exc(file=stderr)
-    result = {'ok': False, 'stdout': stdout.getvalue(), 'stderr': stderr.getvalue(), 'error': type(error).__name__ + ': ' + str(error)}
+    result = {'ok': False, 'stdout': stdout.getvalue(), 'stderr': stderr.getvalue(), 'error': (type(error).__name__ + ': ' + str(error))[:4000]}
+result['stdoutTruncated'] = stdout.truncated
+result['stderrTruncated'] = stderr.truncated
 print(json.dumps(result, ensure_ascii=False))
 `;
 
@@ -201,11 +220,24 @@ export class WorkspaceSandbox {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let outputExceeded = false;
+      let stdoutBytes = 0;
       let settled = false;
       const append = (current, chunk) => `${current}${chunk}`.slice(-MAX_OUTPUT_CHARS);
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
-      child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk); });
+      child.stdout.on('data', (chunk) => {
+        stdoutBytes += Buffer.byteLength(chunk, 'utf8');
+        if (stdoutBytes > MAX_PROTOCOL_BYTES) {
+          if (!outputExceeded) {
+            outputExceeded = true;
+            child.kill('SIGKILL');
+            cleanupContainer();
+          }
+          return;
+        }
+        stdout += chunk;
+      });
       child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk); });
 
       const cleanupContainer = () => {
@@ -233,7 +265,11 @@ export class WorkspaceSandbox {
         `isolated workspace runtime unavailable: ${error.message}. Pre-pull ${this.containerImage} and verify ${runtime}.`,
         { cause: error },
       )));
-      child.once('exit', (codeValue, signal) => {
+      child.once('close', (codeValue, signal) => {
+        if (outputExceeded) {
+          finish(new Error(`isolated workspace protocol exceeds ${MAX_PROTOCOL_BYTES} bytes`));
+          return;
+        }
         if (timedOut) {
           finish(new Error(`isolated workspace Python timed out after ${this.timeoutMs}ms`));
           return;
@@ -246,14 +282,23 @@ export class WorkspaceSandbox {
         let payload;
         try {
           payload = JSON.parse(lines.at(-1));
+          if (!payload || typeof payload.ok !== 'boolean'
+              || typeof payload.stdout !== 'string' || typeof payload.stderr !== 'string'
+              || !(payload.error === null || typeof payload.error === 'string')) {
+            throw new Error('invalid workspace output fields');
+          }
         } catch (error) {
           finish(new Error('isolated workspace runtime produced no valid protocol output', { cause: error }));
           return;
         }
+        const output = Array.from(String(payload.stdout || ''));
+        const errors = Array.from(String(payload.stderr || ''));
         finish(null, {
           ok: payload.ok === true,
-          stdout: String(payload.stdout || '').slice(0, MAX_OUTPUT_CHARS),
-          stderr: String(payload.stderr || '').slice(0, MAX_OUTPUT_CHARS),
+          stdout: output.slice(0, MAX_OUTPUT_CHARS).join(''),
+          stderr: errors.slice(0, MAX_OUTPUT_CHARS).join(''),
+          stdoutTruncated: payload.stdoutTruncated === true || output.length > MAX_OUTPUT_CHARS,
+          stderrTruncated: payload.stderrTruncated === true || errors.length > MAX_OUTPUT_CHARS,
           error: payload.error ? String(payload.error).slice(0, 4000) : null,
           isolation: {
             backend: runtime,
