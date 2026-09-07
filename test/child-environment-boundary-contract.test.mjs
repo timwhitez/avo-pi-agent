@@ -12,7 +12,7 @@ test('canonical local execution boundaries use the shared child environment poli
   assert.doesNotMatch(missionControl, /const commonEnv\s*=\s*\{\s*\.\.\.env/s);
 
   const diagnostic = source('scripts/run-public-diagnostic-locked.mjs');
-  assert.match(diagnostic, /buildAgentChildEnvironment/);
+  assert.match(diagnostic, /import\('\.\/run-real-public\.mjs'\)/);
   assert.doesNotMatch(diagnostic, /env:\s*\{\s*\.\.\.process\.env/s);
 
   const benchmark = source('scripts/run-real-public.mjs');

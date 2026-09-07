@@ -51,6 +51,7 @@ const ARC_RUNTIME_KEYS = Object.freeze([
 
 const AVO_RUNTIME_KEYS = Object.freeze([
   'AVO_REQUIRE_REAL_PROVIDER',
+  'AVO_DIAGNOSTIC_RUN',
   'AVO_REAL_RUN_ID',
   'AVO_UI_RUN_ID',
   'AVO_RESUME_DIR',
