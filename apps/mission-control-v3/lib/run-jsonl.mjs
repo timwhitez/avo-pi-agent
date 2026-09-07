@@ -56,6 +56,7 @@ export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord
           if (depth >= limits.maxDepth) metadata.truncated = true;
           else pending.push({ directory: file, depth: depth + 1 });
         } else if (entry.isFile() && entry.name.endsWith('.jsonl')) candidates.push(file);
+        else if (entry.name.endsWith('.jsonl')) issue('non-regular-file', file);
       }
       if (metadata.entriesVisited >= limits.maxEntries || candidates.length >= limits.maxFiles) metadata.truncated = true;
       authority.assertIdentity();

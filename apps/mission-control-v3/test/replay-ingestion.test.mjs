@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { scanRunJsonl } from '../lib/run-jsonl.mjs';
 
 test('bounded JSONL scan charges traversal, line, byte and failed-read budgets', () => {
@@ -133,13 +134,21 @@ test('authenticated run detail confines replay and usage and retains only a boun
       ].join('\n'));
       let nested = path.join(dir, 'deep');
       for (let index = 0; index < 10; index += 1) { fs.mkdirSync(nested); nested = path.join(nested, 'deep'); }
-      const run = await read(id);
+      const socket = net.createServer();
+      await new Promise((resolve, reject) => {
+        socket.once('error', reject);
+        socket.listen(path.join(dir, 'socket.jsonl'), resolve);
+      });
+      let run;
+      try { run = await read(id); }
+      finally { await new Promise((resolve) => socket.close(resolve)); }
       assert.equal(run.trajectory.events.length, 1);
       assert.equal(run.trajectory.status, 'partial');
       assert.equal(run.trajectory.truncated, true);
       assert.ok(run.trajectory.errors.some((error) => error.code === 'invalid-record'));
       assert.ok(run.trajectory.errors.some((error) => error.code === 'run-identity-mismatch'));
       assert.ok(run.trajectory.errors.some((error) => error.code === 'line-too-large'));
+      assert.ok(run.trajectory.errors.some((error) => error.code === 'non-regular-file'));
       assert.equal(run.telemetry.totals.inputTokens, 2);
       assert.equal(run.telemetry.status, 'partial');
     });
