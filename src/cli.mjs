@@ -210,6 +210,17 @@ async function runPublic(args) {
       let observedLevels = 0;
       let observedTotalLevels = positiveCountOrNull(info.total_levels ?? info.totalLevels);
       let activeAttempt = null;
+      let activeAgent = null;
+      let completedAttemptActions = 0;
+      let completedAttemptLevels = 0;
+      const observeAgentProgress = () => {
+        if (!activeAgent?.frame) return null;
+        const frame = activeAgent.frame;
+        observedActions = completedAttemptActions + activeAgent.commandTelemetry().environmentActions;
+        observedLevels = Math.max(completedAttemptLevels, frame.levelsCompleted);
+        observedTotalLevels ??= positiveCountOrNull(frame.totalLevels);
+        return frame;
+      };
       let contextSequence = 0;
       const pendingToolCalls = new Map();
       const completedPrivateToolCalls = new Set();
@@ -271,16 +282,11 @@ async function runPublic(args) {
         }
         if (event.type !== 'tool_execution_end') return;
         process.stdout.write('.');
-        if (!['act', 'reset'].includes(event.toolName) || event.result?.details?.ok !== true) return;
-        observedActions += 1;
-        const frame = event.result?.details?.frame || {};
-        observedLevels = Math.max(
-          observedLevels,
-          Number(frame.levelsCompleted ?? frame.levels_completed ?? observedLevels),
-        );
-        observedTotalLevels ??= positiveCountOrNull(
-          frame.totalLevels ?? frame.total_levels,
-        );
+        if (duplicateToolEnd || !['act', 'reset', 'act_sequence'].includes(event.toolName)) return;
+        // Outer tool calls are not environment actions: sequences may execute
+        // a prefix even when their final result is unsuccessful.
+        const frame = observeAgentProgress();
+        if (!frame) return;
         progress.gameProgress({
           index: ordinal,
           total: selected.length,
@@ -301,11 +307,14 @@ async function runPublic(args) {
         const attemptResults = [];
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           activeAttempt = attempt;
+          activeAgent = null;
           pendingToolCalls.clear();
           completedPrivateToolCalls.clear();
           const consumed = attemptResults.length
             ? aggregateAttemptTelemetry(attemptResults)
             : { actions: 0, outerTurns: 0 };
+          completedAttemptActions = consumed.actions;
+          completedAttemptLevels = attemptResults.length ? aggregateAttemptProgress(attemptResults).levelsCompleted : 0;
           const remainingActions = actionBudget.total - consumed.actions;
           const remainingOuterTurns = gameConfig.maxOuterTurns - consumed.outerTurns;
           if (remainingActions < 1 || remainingOuterTurns < 1) break;
@@ -332,6 +341,7 @@ async function runPublic(args) {
             config: attemptConfig,
             captureScorecard: false,
           });
+          activeAgent = agent;
           const agentResult = await agent.run();
           attemptResults.push(agentResult);
           const executionGuids = agent.scorecardExecutionGuids();
@@ -376,6 +386,8 @@ async function runPublic(args) {
         progress.gameFinished({ index: ordinal, total: selected.length, gameId, result });
         console.log(`\n${gameId}: state=${result.state} levels=${result.levelsCompleted}/${result.totalLevels ?? '?'} actions=${result.actions}/${actionBudget.total}`);
       } catch (error) {
+        // A failure can occur after a durable transition but before tool-end.
+        observeAgentProgress();
         progress.gameFinished({
           index: ordinal,
           total: selected.length,

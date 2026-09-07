@@ -41,6 +41,25 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     path.resolve('scripts/pi-provider-smoke.mjs'),
     path.join(root, 'scripts', 'pi-provider-smoke.mjs'),
   );
+  // Record calls at the real CLI/reporter boundary without publishing statuses.
+  const progressFile = path.join(root, 'src', 'benchmark', 'progress-status.mjs');
+  const progressSource = fs.readFileSync(progressFile, 'utf8').replace(
+    'export function createProgressStatusReporter(', 'function createRealProgressStatusReporter(',
+  );
+  fs.writeFileSync(progressFile, `import fs from 'node:fs';\n${progressSource}\n
+export function createProgressStatusReporter(env = process.env) {
+  const reporter = createRealProgressStatusReporter(env);
+  if (!env.AVO_TEST_PROGRESS_FILE) return reporter;
+  for (const name of ['gameStarted', 'gameProgress', 'gameFinished']) {
+    const original = reporter[name];
+    reporter[name] = (value) => {
+      fs.appendFileSync(env.AVO_TEST_PROGRESS_FILE, JSON.stringify({ name, value }) + '\\n');
+      return original(value);
+    };
+  }
+  return reporter;
+}
+`);
   fs.writeFileSync(path.join(root, 'src', 'benchmark', 'provider-attestation.mjs'), String.raw`
     import { providerCapabilityDigest } from '../provider-capabilities.mjs';
     export async function preflightResponsesProvider(config) {
@@ -112,7 +131,23 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
           context: { messages: [] },
         });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
-        const call = async (name, params = {}) => tools.get(name).execute('test-call', params);
+        let callSequence = 0;
+        const call = async (name, params = {}) => {
+          const toolCallId = 'test-call-' + (++callSequence);
+          if (process.env.AVO_REPAIR_ROUND?.startsWith('progress-')) {
+            this.listener?.({ type: 'tool_execution_start', toolCallId, toolName: name, args: params });
+          }
+          const result = await tools.get(name).execute(toolCallId, params);
+          if (process.env.AVO_REPAIR_ROUND?.startsWith('progress-')) {
+            if (name === 'act_sequence' && process.env.AVO_REPAIR_ROUND === 'progress-exception') {
+              throw new Error('synthetic failure after transition before tool-end');
+            }
+            const event = { type: 'tool_execution_end', toolCallId, toolName: name, result };
+            this.listener?.(event);
+            this.listener?.(event); // Duplicate notification must not double count.
+          }
+          return result;
+        };
         const handoff = async (toolResult = '') => {
           const result = await this.options.streamFn(
             this.options.initialState.model,
@@ -163,6 +198,34 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
         let frame = (await call('observe')).details.frame;
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
+        const progressMode = process.env.AVO_REPAIR_ROUND || '';
+        if (progressMode.startsWith('progress-')) {
+          if (progressMode === 'progress-prefix-error') {
+            await call('act_sequence', { steps: [{ action: 'ACTION4' }, { action: 'ACTION4' }, { action: 'ACTION4' }] });
+            return;
+          }
+          if (progressMode === 'progress-retry' && attempt === 1) {
+            await call('act_sequence', { steps: [{ action: 'ACTION4' }] });
+            this.state.errorMessage = 'synthetic first-attempt failure';
+            return;
+          }
+          if (progressMode === 'progress-mixed') {
+            await call('reset', { rationale: 'exercise controller accounting' });
+            frame = (await call('act', { action: 'ACTION4' })).details.frame;
+          }
+          while (frame.state !== 'WIN') {
+            const player = find(frame.frame, 1);
+            const goal = find(frame.frame, 2);
+            const steps = [
+              ...Array.from({ length: goal[0] - player[0] }, () => ({ action: 'ACTION4' })),
+              ...Array.from({ length: goal[1] - player[1] }, () => ({ action: 'ACTION2' })),
+              { action: 'ACTION1' }, // Must be skipped on level progress / WIN.
+            ];
+            await call('act_sequence', { steps });
+            frame = (await call('observe')).details.frame;
+          }
+          return;
+        }
         if (process.env.AVO_REPAIR_ROUND === 'partial-state' && frame.gameId === 'g25-v1') {
           await call('workspace_write', { path: 'partial.txt', content: 'saved before failure' });
           this.state.errorMessage = 'synthetic provider unavailable after state mutation';
@@ -453,6 +516,8 @@ class Env:
         return Frame(self)
 
     def step(self, action, data=None, reasoning=None):
+        if os.environ.get("AVO_REPAIR_ROUND") == "progress-prefix-error" and self.steps == 1:
+            raise RuntimeError("synthetic environment failure after one executed action")
         if action is GameAction.RESET:
             self.full_reset = self.steps == 0
             self.steps += 1
@@ -821,6 +886,55 @@ globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(
 process.argv = [process.execPath, ${JSON.stringify(cliFile)}, 'run-public', '--all'];
 await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   `;
+  for (const [mode, actions, levels, exitCode] of [
+    ['sequence', 16, 2, 0], ['mixed', 17, 2, 0], ['retry', 17, 2, 0],
+    ['prefix-error', 1, 0, 1], ['exception', 8, 1, 1],
+  ]) {
+    const id = `progress-${mode}`;
+    const directory = path.join(root, 'runs', 'private', id);
+    const state = prepareRunState({ root, privateDir: directory, runId: id, env: {} });
+    const bound = buildRunCapsule({
+      root, runId: id, python: fakePython,
+      provenance: { wireApi: 'responses', ...providerIdentityFor(id), ...capabilityProvenance,
+        reasoningEffort: 'max', gitSha, arcAuth: { mode: 'registered' } },
+      arcRuntime: { officialPackageAttested: true },
+      games: [{ versionedGameId: 'g02-v1' }], config,
+      workspaceAttestation: workspaceAttestationFixture(config),
+      initialState: state.initialState, memoryDir: state.memoryDir,
+      env: { AVO_GAME_CONCURRENCY: '1' },
+    });
+    const capsulePath = path.join(directory, 'run-capsule.json');
+    writeRunCapsule(capsulePath, bound, { root: directory });
+    const progressPath = path.join(directory, 'progress.jsonl');
+    const execution = spawnSync(process.execPath, ['--input-type=module', '--eval',
+      fastRetryBootstrap.replace("'--all'", "'--game=g02-v1'")], {
+      cwd: root, encoding: 'utf8', timeout: 60000,
+      env: { ...childEnv, AVO_REPAIR_ROUND: id, AVO_REAL_RUN_ID: id,
+        AVO_GAME_CONCURRENCY: '1', AVO_STATUS_TOKEN: '', AVO_TEST_PROGRESS_FILE: progressPath,
+        AVO_MEMORY_DIR: state.memoryDir, AVO_WORKSPACE_DIR: state.workspaceDir,
+        AVO_RESUME_DIR: path.join(directory, 'resume'), AVO_RUN_CAPSULE_FILE: capsulePath,
+        AVO_RUN_CAPSULE_HASH: bound.capsuleHash },
+    });
+    assert.equal(execution.status, exitCode, `${id}: ${execution.stderr}\n${execution.stdout}`);
+    if (mode === 'prefix-error') {
+      assert.match(execution.stderr, /forwarded gameplay count differs from agent accounting/);
+    }
+    const events = fs.readFileSync(progressPath, 'utf8').trim().split('\n').map(JSON.parse);
+    const finished = events.filter((event) => event.name === 'gameFinished').at(-1).value.result;
+    assert.equal(finished.actions, actions, id);
+    assert.equal(finished.levelsCompleted, levels, id);
+    assert.equal(finished.totalLevels, 2, id);
+    const progress = events.filter((event) => event.name === 'gameProgress').map((event) => event.value);
+    assert.ok(progress.every((value, index) => value.actions <= actions
+      && (index === 0 || value.actions >= progress[index - 1].actions)), id);
+    if (mode === 'exception') assert.equal(progress.length, 0, 'catch must recover actions even without tool-end');
+    else {
+      assert.equal(progress.at(-1).actions, actions, id);
+      assert.equal(progress.at(-1).levelsCompleted, levels, id);
+    }
+    fs.renameSync(path.join(root, 'runs', `${id}-official-public-environments.json`),
+      path.join(directory, 'source-report.json'));
+  }
   const exhaustedRunId = 'exhaust-open';
   const exhaustedPrivateDir = path.join(root, 'runs', 'private', exhaustedRunId);
   const exhaustedState = prepareRunState({
