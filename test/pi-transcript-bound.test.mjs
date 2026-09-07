@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages';
+import { convertResponsesMessages } from '@earendil-works/pi-ai/api/openai-responses-shared';
 
 import {
   COMPACTION_NOTICE_TEMPLATE_SHA256,
@@ -27,6 +29,49 @@ function assistant(index) {
 function user(index) {
   return { role: 'user', content: [{ type: 'text', text: `prompt ${index}` }], timestamp: index };
 }
+
+test('multi-tool hard compaction retains complete successful turns through pinned Responses conversion', () => {
+  const model = { id: 'fixture', provider: 'fixture', api: 'openai-responses', input: ['text'] };
+  const ref = 'evidence-000002-aaaaaaaaaaaa';
+  const turn = {
+    role: 'assistant', provider: model.provider, model: model.id, api: model.api,
+    stopReason: 'toolUse', timestamp: 1, usage: {},
+    content: [
+      { type: 'toolCall', id: 'write|fc_write', name: 'workspace_write', arguments: { path: 'notes.txt', content: 'saved' } },
+      { type: 'toolCall', id: 'read|fc_read', name: 'trajectory_read', arguments: { ref } },
+    ],
+  };
+  const write = { role: 'toolResult', toolCallId: 'write|fc_write', toolName: 'workspace_write',
+    content: [{ type: 'text', text: 'saved successfully' }], isError: false };
+  const read = { role: 'toolResult', toolCallId: 'read|fc_read', toolName: 'trajectory_read',
+    content: [{ type: 'text', text: 'exact frame' }], details: { evidenceRef: ref }, isError: false };
+  const status = runtimeStatusMessage({ state: 'ACTIVE', environmentActions: 2, maxActions: 100,
+    terminalReason: 'none', allowedNext: 'inspect or act' }, { outerTurns: 2, maxOuterTurns: 100 });
+  const messages = replaceRuntimeStatus([user(0), turn, write, read, user(2), user(3)], status.text);
+  for (const maxMessages of [3, 4, 5, 6]) {
+    for (const maxTokens of [650, 120_000]) {
+      const events = [];
+      const bounded = boundTranscript(messages, { maxMessages, maxTokens,
+        onCompaction: (event) => events.push(event) });
+      const transformed = transformMessages(bounded, model);
+      assert.equal(transformed.length, bounded.length, 'SDK must not insert missing-result errors');
+      assert.ok(transformed.length <= maxMessages);
+      const converted = convertResponsesMessages(model, { messages: bounded, tools: [] }, new Set(), {});
+      const outputs = converted.filter((item) => item.type === 'function_call_output');
+      assert.ok(outputs.length === 0 || outputs.length === 2);
+      assert.ok(!JSON.stringify(outputs).includes('No result provided'));
+      if (outputs.length) {
+        assert.ok(bounded.includes(write));
+        assert.ok(bounded.includes(read));
+        assert.equal(events.at(-1).exactLatestEvidenceRetained, true);
+      } else {
+        assert.ok(JSON.stringify(bounded).includes(`latest_evidence_ref=${ref}`));
+        assert.equal(events.at(-1).exactLatestEvidenceRetained, false);
+      }
+    }
+  }
+  assert.equal(messages[1], turn, 'compaction must not mutate original history');
+});
 
 test('transcript under the limits is returned untouched', () => {
   const messages = [user(0), assistant(1), toolResult(1), assistant(2), toolResult(2)];

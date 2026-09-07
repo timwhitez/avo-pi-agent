@@ -1,5 +1,32 @@
 # Benchmark and Harness Audit: Why 0 Wins Is Not Yet a Model-Capability Verdict
 
+## Current continuation audit — 2026-09-07
+
+Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Issues (#259–#274), no open PRs before this repair. All 16 reports were read; none is closed as duplicate or unnecessary. The historical conclusions below remain historical, not the live completion ledger.
+
+| Issue | Scope and dependency | Current disposition |
+| --- | --- | --- |
+| #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
+| #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
+| #261 | Nested process pause/abort ownership | Open; lifecycle repair required before new benchmark |
+| #262 | Complete multi-tool transcript turns | Implemented in PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent review pending; not closed |
+| #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
+| #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
+| #265 | Confined streaming log acquisition | Open; evidence producer repair required |
+| #266 | Confined and bounded replay ingestion | Open; prerequisite for #267 replay consumption |
+| #267 | Capsule-owned UI memory/evidence/progress | Open; depends on #259/#264/#266/#268/#273 contracts |
+| #268 | Completed process-line length enforcement | Open; separate from file replay ingestion #266 |
+| #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
+| #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
+| #271 | Bounded resume evidence acquisition | Open; source defect confirmed; provenance prerequisite |
+| #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
+| #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
+| #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
+
+Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
+
+The retained r12 tuning process is terminal: its previous execution handle no longer exists and its stdout contains the final three-game summary followed by `resume state authority does not bind the current state and checkpoint set`. It reports 0/3 whole-game wins, 1/20 levels, 575 actions and zero post-terminal gameplay actions. This is an invalid/incomplete attribution run, not model-capability evidence. The final state/checkpoint mismatch still requires diagnosis; it is not presumed fixed by any Issue above. No new public run or held-out evaluation may start until the open repairs and this validity failure are resolved and independently reviewed.
+
 **Audit date:** 2026-08-30
 **Repository state reviewed:** `main` after PR #165
 **Primary evidence:** production code, the published public-set result, validation/provenance code, open and historical Issues/PRs, NVIDIA's public AVO/NOOA material and ARC example, Pi, and the Browser Use “Bitter Lesson” analysis.

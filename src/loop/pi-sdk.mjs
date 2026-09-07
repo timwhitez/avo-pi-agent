@@ -1020,6 +1020,26 @@ function hardBoundTranscript(messages, {
   estimateContextTokens,
   onCompaction,
 }) {
+  // Retain whole tool turns: Pi synthesizes error results for any retained
+  // call whose real result was trimmed. Keep reasoning blocks with their turn.
+  const resultIndexes = new Map();
+  messages.forEach((message, index) => {
+    if (message?.role === 'toolResult') {
+      resultIndexes.set(String(message.toolCallId || '').split('|')[0], index);
+    }
+  });
+  const groups = new Map();
+  messages.forEach((message, index) => {
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) return;
+    const group = [index];
+    for (const block of message.content) {
+      if (block?.type !== 'toolCall') continue;
+      const resultIndex = resultIndexes.get(String(block.id || '').split('|')[0]);
+      if (resultIndex !== undefined) group.push(resultIndex);
+    }
+    for (const member of group) groups.set(member, group);
+  });
+  const includeGroups = (indexes) => new Set([...indexes].flatMap((index) => groups.get(index) || [index]));
   const taskIndex = messages.findIndex((message) => message?.role === 'user'
     && !isRuntimeStatus(message)
     && !isCompactionNotice(message));
@@ -1045,12 +1065,12 @@ function hardBoundTranscript(messages, {
   }
   const latestEvidence = latestEvidencePair(messages);
   const evidenceIndexes = latestEvidence.indexes.filter((index) => !selected.has(index));
-  const withEvidence = new Set([...selected, ...evidenceIndexes]);
+  const withEvidence = includeGroups([...selected, ...evidenceIndexes]);
   const keepsExactEvidence = latestEvidence.exact
     && latestEvidence.indexes.length === 2
     && fits(withEvidence);
   if (keepsExactEvidence) {
-    for (const index of evidenceIndexes) selected.add(index);
+    for (const index of withEvidence) selected.add(index);
   }
   const reserveNotice = fits(selected, true);
   if (latestEvidence.ref && !keepsExactEvidence && !reserveNotice) {
@@ -1059,8 +1079,10 @@ function hardBoundTranscript(messages, {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (selected.has(index)) continue;
     if (selected.size + (reserveNotice ? 1 : 0) >= maxMessages) break;
-    const candidate = new Set([...selected, index]);
-    if (fits(candidate, reserveNotice)) selected.add(index);
+    const candidate = includeGroups([...selected, index]);
+    if (fits(candidate, reserveNotice)) {
+      for (const member of candidate) selected.add(member);
+    }
   }
   const selectedMessages = messages.filter((_message, index) => selected.has(index));
   let retained = repairToolPairs(selectedMessages);
