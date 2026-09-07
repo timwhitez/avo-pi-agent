@@ -19,6 +19,7 @@ import {
   loadMemorySnapshotEvidence,
 } from './mission-control-evidence.mjs';
 import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsule-evidence.mjs';
+import { controlOwnedRun } from '../../../src/local/owned-run-control.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -143,28 +144,32 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
   return sanitizeRun(run);
 }
 
-export function controlRun(id, action, confirmation = '') {
+export async function controlRun(id, action, confirmation = '') {
   const run = requireRun(id);
   const state = store.children.get(id);
   if (!state || state.closed) throw requestError(409, 'Run process is not active');
   const child = state.child;
 
-  if (action === 'pause') {
-    requireState(run, ['running']);
-    if (process.platform === 'win32') throw requestError(501, 'Pause is supported only on POSIX self-hosted deployments');
-    signalTreeOrThrow(child, 'SIGSTOP');
-    run.state = 'paused';
-    emit(run, 'run.paused', { scope: 'process-group' });
-  } else if (action === 'resume') {
-    requireState(run, ['paused']);
-    if (process.platform === 'win32') throw requestError(501, 'Resume is supported only on POSIX self-hosted deployments');
-    signalTreeOrThrow(child, 'SIGCONT');
-    run.state = 'running';
-    emit(run, 'run.resumed', { scope: 'process-group' });
+  if (action === 'pause' || action === 'resume') {
+    const expected = action === 'pause' ? 'running' : 'paused';
+    requireState(run, [expected]);
+    if (state.controlPending) throw requestError(409, 'A run control operation is already pending');
+    if (process.platform === 'win32') throw requestError(501, 'Pause/resume requires a Linux owned run');
+    state.controlPending = action;
+    try {
+      await controlOwnedRun(child.pid, action, { root: REPO_ROOT });
+      if (state.closed || run.state !== expected || child.exitCode !== null || child.signalCode !== null) {
+        throw requestError(409, 'Run changed while control acknowledgement was pending');
+      }
+      run.state = action === 'pause' ? 'paused' : 'running';
+      emit(run, action === 'pause' ? 'run.paused' : 'run.resumed', { scope: 'process-group-and-owned-containers' });
+    } finally { state.controlPending = null; }
   } else if (action === 'abort') {
     requireState(run, ['running', 'paused']);
     if (!constantEqual(String(confirmation), run.id)) throw requestError(400, 'Abort confirmation must exactly match the run ID');
-    if (run.state === 'paused' && process.platform !== 'win32') signalTreeOrThrow(child, 'SIGCONT');
+    // A pending pause may already have stopped the group before its UI state
+    // changes. Always thaw it so termination can be delivered.
+    if (process.platform !== 'win32') signalTreeOrThrow(child, 'SIGCONT');
     run.state = 'aborting';
     emit(run, 'run.abort_requested', { scope: 'process-group' });
     signalTreeOrThrow(child, 'SIGTERM');

@@ -10,7 +10,7 @@ export async function POST(request, context) {
     assertRateLimit('run-control', session.subject, { limit: 30, windowMs: 60_000 });
     const { id } = await context.params;
     const body = await readJsonBody(request, { maxBytes: 8 * 1024 });
-    const run = controlRun(id, body.action, body.confirmation || '', { subject: session.subject });
+    const run = await controlRun(id, body.action, body.confirmation || '', { subject: session.subject });
     return Response.json({ ok: true, run }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return jsonError(error);

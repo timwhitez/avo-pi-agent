@@ -2,6 +2,8 @@
 // EOF means the owning wrapper died: its entire execution group must stop.
 import { liveGroupMembers } from './process-group.mjs';
 import fs from 'node:fs';
+import path from 'node:path';
+import { serveWorkspaceOwner } from './workspace-owner-server.mjs';
 
 const owner = Number(process.argv[2]);
 if (!Number.isSafeInteger(owner) || owner <= 1 || process.ppid !== owner) {
@@ -9,8 +11,9 @@ if (!Number.isSafeInteger(owner) || owner <= 1 || process.ppid !== owner) {
 }
 let clean = false;
 let terminating = false;
-const terminate = () => {
-  if (clean) return process.exit(0);
+const config = JSON.parse(process.argv[4]);
+const workspace = await serveWorkspaceOwner({ ...config, pid: process.pid });
+const terminate = async () => {
   if (terminating) return;
   terminating = true;
   const signal = (value) => {
@@ -18,13 +21,26 @@ const terminate = () => {
       if (error.code !== 'ESRCH') throw error;
     }
   };
-  signal('SIGCONT');
-  signal('SIGTERM');
+  if (!clean) { signal('SIGCONT'); signal('SIGTERM'); }
   const deadline = Date.now() + 2000;
-  const poll = setInterval(() => {
-    if (liveGroupMembers(owner).length === 0) { clearInterval(poll); process.exit(1); }
-    if (Date.now() >= deadline) signal('SIGKILL');
-  }, 20);
+  const groupGone = clean ? Promise.resolve() : new Promise((resolve) => {
+    const poll = setInterval(() => {
+      if (liveGroupMembers(owner).length === 0) { clearInterval(poll); resolve(); }
+      if (Date.now() >= deadline) signal('SIGKILL');
+    }, 20);
+  });
+  try {
+    await Promise.all([groupGone, workspace.close()]);
+    const fd = fs.openSync(path.join(config.directory, 'closed.json'), 'wx', 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify({ id: config.id, clean: true })); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    process.exit(clean ? 0 : 1);
+  } catch (error) {
+    // No receipt means authority stays unresolved even if this guardian dies.
+    console.error(`workspace guardian cleanup failed: ${error.message}`);
+    signal('SIGKILL');
+    process.exit(2);
+  }
 };
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (data) => {
