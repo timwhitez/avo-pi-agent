@@ -16,7 +16,7 @@ During #261: new Issue #279 records daemon-owned workspace container lifecycle, 
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
 | #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
-| #261 | Nested process pause/abort ownership | Implemented: shared Linux execution group, parent-death pipe guardian, descendant-aware lock. Full local Node 503/503 and 9 lifecycle tests passed; offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan/audit 0 passed. PR/independent review pending. Daemon container control is separately open in #279 |
+| #261 | Nested process pause/abort ownership | Implemented in PR #280: shared Linux execution group, parent-death pipe guardian, descendant-aware lock. Full local Node 503/503 and 9 lifecycle tests passed; offline 25/25 games, 75/75 levels, 816 actions, zero post-terminal; secret scan/audit 0 passed. Independent review pending. Daemon container control is separately open in #279 |
 | #262 | Complete multi-tool transcript turns | Closed by PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent APPROVE at `e80e2e0ed842b955da4a1e66a3cbd3adf4b0554e`, including 2,070 additional pinned-SDK conversion cases |
 | #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
 | #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
