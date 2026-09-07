@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import readline from 'node:readline';
 import path from 'node:path';
 import { redactRuntimeSecrets } from '../redaction.mjs';
 import { managedProcessGroup } from '../local/process-group.mjs';
+import { assertJsonComplexity } from '../local/regular-file-evidence.mjs';
 
 const MAX_DIAGNOSTIC_CHARS = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const RESPONSE_LIMITS = Object.freeze({ maxBytes: 8 * 1024 * 1024, maxJsonNodes: 200_000, maxJsonDepth: 64 });
 const SUPPORTED_AUTH_MODES = new Set(['anonymous-auto', 'registered']);
 const CHILD_ENV_ALLOWLIST = Object.freeze([
   'AVO_PROCESS_GROUP',
@@ -88,6 +89,7 @@ export class ArcBridgeClient {
     cwd = process.cwd(),
     script = null,
     requestTimeoutMs = Number(process.env.AVO_ARC_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS),
+    responseLimits = {},
   }) {
     this.python = python;
     this.gameId = gameId;
@@ -97,6 +99,11 @@ export class ArcBridgeClient {
       ? (path.isAbsolute(script) ? script : path.join(cwd, script))
       : path.join(cwd, 'bridge', 'arc_bridge.py');
     this.requestTimeoutMs = positiveTimeout(requestTimeoutMs);
+    this.responseLimits = Object.freeze(Object.fromEntries(Object.entries(RESPONSE_LIMITS).map(([key, maximum]) => {
+      const value = responseLimits[key] ?? maximum;
+      if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw new Error(`Invalid ARC response limit: ${key}`);
+      return [key, value];
+    })));
     this.pending = [];
     this.stderr = '';
     this.child = null;
@@ -130,38 +137,67 @@ export class ArcBridgeClient {
     child.on('error', (error) => {
       if (this.child === child) this.abortBridge(error);
     });
-    child.on('exit', (code, signal) => {
+    // 'close' follows stdout drainage, so a child's final response is not lost.
+    child.on('close', (code, signal) => {
       if (this.child !== child) return;
       this.closed = true;
       const suffix = this.stderr ? `: ${this.stderr.trim()}` : '';
       this.rejectPending(new Error(`ARC bridge exited with code ${code ?? 'null'}${signal ? ` (${signal})` : ''}${suffix}`));
     });
 
-    const lines = readline.createInterface({ input: child.stdout });
-    lines.on('line', (line) => {
-      if (this.child !== child || !line.trim()) return;
-
-      let response;
+    let buffer = Buffer.alloc(0);
+    let used = 0;
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const discard = () => { buffer = Buffer.alloc(0); used = 0; };
+    child.stdout.on('data', (chunk) => {
+      if (this.child !== child || this.closed) { discard(); return; }
       try {
-        response = JSON.parse(line);
-      } catch {
-        this.appendDiagnostic(`[bridge-stdout] ${line}\n`);
-        return;
-      }
-
-      const item = this.pending.shift();
-      if (!item) {
-        this.appendDiagnostic('[bridge-protocol] unsolicited JSON response ignored\n');
-        return;
-      }
-      if (!response || typeof response !== 'object' || typeof response.ok !== 'boolean') {
-        this.settle(item, new Error('Invalid ARC bridge JSON response shape'));
-      } else if (!response.ok) {
-        this.settle(item, new Error(redactRuntimeSecrets(response.error || 'ARC bridge error')));
-      } else {
-        this.settle(item, null, response);
+        let offset = 0;
+        while (offset < chunk.length && !this.closed) {
+          const newline = chunk.indexOf(10, offset);
+          const end = newline < 0 ? chunk.length : newline;
+          const length = used + end - offset;
+          if (length > this.responseLimits.maxBytes) throw new Error('ARC bridge response exceeds byte limit');
+          if (length > buffer.length) {
+            const next = Buffer.allocUnsafe(Math.min(this.responseLimits.maxBytes,
+              Math.max(length, buffer.length * 2, 4096)));
+            buffer.copy(next, 0, 0, used);
+            buffer = next;
+          }
+          chunk.copy(buffer, used, offset, end);
+          used = length;
+          offset = newline < 0 ? chunk.length : newline + 1;
+          if (newline < 0) continue;
+          const line = decoder.decode(buffer.subarray(0, used)).trim();
+          used = 0;
+          if (!line) continue;
+          // Compatibility for known SDK logger output only; malformed protocol
+          // JSON must never be skipped and attributed to the next FIFO request.
+          if (/^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL):arc_agi(?:\.[A-Za-z0-9_]+)*:/.test(line)) {
+            this.appendDiagnostic(`[bridge-stdout] ${line}\n`);
+            continue;
+          }
+          let response;
+          try { response = JSON.parse(line); }
+          catch { throw new Error('Invalid ARC bridge JSON framing'); }
+          assertJsonComplexity(response, { ...this.responseLimits, purpose: 'ARC bridge response' });
+          if (!response || typeof response !== 'object' || Array.isArray(response) || typeof response.ok !== 'boolean') {
+            throw new Error('Invalid ARC bridge JSON response shape');
+          }
+          if (!this.pending.length) throw new Error('Unsolicited ARC bridge JSON response');
+          const item = this.pending.shift();
+          this.settle(item, response.ok ? null : new Error(redactRuntimeSecrets(response.error || 'ARC bridge error')), response);
+        }
+      } catch (error) {
+        discard();
+        this.abortBridge(error);
       }
     });
+    child.stdout.on('end', () => {
+      if (used && !this.closed) this.abortBridge(new Error('Truncated ARC bridge JSON framing'));
+      discard();
+    });
+    child.stdout.on('error', (error) => this.abortBridge(error));
   }
 
   appendDiagnostic(value) {

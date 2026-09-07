@@ -52,6 +52,13 @@ recorded for playback without provider calls. Raw provider output is not that
 channel; missing usage, latency or cost is not invented. The observation contract
 does not grant official score authority, which still requires validated reports.
 
+ARC bridge stdout is byte-bounded JSONL: at most 8 MiB per response, 200,000
+JSON nodes and depth 64. Limits may be tightened, not raised. UTF-8 is decoded
+only after a complete bounded line; malformed/partial protocol responses abort
+the client generation and reject its whole pending FIFO. Known `arc_agi` logger
+lines retain bounded diagnostic compatibility; other non-protocol output is
+rejected. Process-group ownership and request deadlines remain unchanged.
+
 Streaming benchmark logs require an explicit `logRoot` and Linux directory
 descriptors. Fresh logs use exclusive creation; intentional recovery appends to
 validated singly linked regular files. Acquisition checks directory and file
