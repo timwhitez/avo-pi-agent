@@ -42,6 +42,11 @@ runner. It accepts `--all` or `--game=id[,id]` and writes to `runs/diagnostic`.
 Its sealed diagnostic intent and reports remain non-official even for the full
 public set or a resumed run; failures retain the actual failed stage.
 
+Streaming benchmark logs require an explicit `logRoot` and Linux directory
+descriptors. Fresh logs use exclusive creation; intentional recovery appends to
+validated singly linked regular files. Acquisition checks directory and file
+identity before starting the child, and streams retain the acquired descriptor.
+
 ```text
 ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values

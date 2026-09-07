@@ -16,6 +16,7 @@ test('process runner streams complete logs to disk while keeping only a bounded 
       process.stderr.write('B'.repeat(100000));
     `;
     const result = await runProcess(process.execPath, ['-e', script], {
+      logRoot: root,
       stdoutFile,
       stderrFile,
       maxTailChars: 4096,
@@ -28,9 +29,90 @@ test('process runner streams complete logs to disk while keeping only a bounded 
     assert.equal(fs.statSync(stdoutFile).size, 200000);
     assert.equal(fs.statSync(stderrFile).size, 100000);
     assert.equal(fs.readFileSync(stdoutFile, 'utf8').at(-1), 'A');
+    const inode = fs.statSync(stdoutFile).ino;
+    await runProcess(process.execPath, ['-e', "process.stdout.write('C'.repeat(200000)); process.stderr.write('D'.repeat(100000))"], {
+      logRoot: root, stdoutFile, stderrFile, appendLogs: true, timeoutMs: 10000,
+    });
+    assert.equal(fs.statSync(stdoutFile).ino, inode, 'resume appends to the validated original file');
+    assert.equal(fs.readFileSync(stdoutFile, 'utf8'), 'A'.repeat(200000) + 'C'.repeat(200000));
+    assert.equal(fs.readFileSync(stderrFile, 'utf8'), 'B'.repeat(100000) + 'D'.repeat(100000));
+    assert.equal(fs.statSync(stdoutFile).mode & 0o777, 0o600);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('log acquisition rejects unsafe file shapes before starting a child', async (t) => {
+  for (const appendLogs of [false, true]) {
+    for (const shape of ['file-link', 'dangling-link', 'parent-link', 'root-link', 'hard-link', 'outside-root']) {
+      await t.test(`${shape}, append=${appendLogs}`, async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-log-acquisition-'));
+        const authority = path.join(root, 'evidence');
+        const outside = path.join(root, 'untouched');
+        fs.mkdirSync(authority);
+        fs.mkdirSync(outside);
+        const sentinel = path.join(outside, 'stdout.log');
+        fs.writeFileSync(sentinel, 'preserve fixture');
+        const marker = path.join(root, 'child-started');
+        let stdoutFile = path.join(authority, 'stdout.log');
+        let logRoot = authority;
+        try {
+          if (shape === 'file-link') fs.symlinkSync(sentinel, stdoutFile);
+          if (shape === 'dangling-link') fs.symlinkSync(path.join(outside, 'missing'), stdoutFile);
+          if (shape === 'parent-link') {
+            fs.symlinkSync(outside, path.join(authority, 'nested'), 'dir');
+            stdoutFile = path.join(authority, 'nested', 'stdout.log');
+          }
+          if (shape === 'root-link') {
+            logRoot = path.join(root, 'alias');
+            fs.symlinkSync(authority, logRoot, 'dir');
+            stdoutFile = path.join(logRoot, 'stdout.log');
+          }
+          if (shape === 'hard-link') fs.linkSync(sentinel, stdoutFile);
+          if (shape === 'outside-root') stdoutFile = sentinel;
+          await assert.rejects(runProcess(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`], {
+            env: {}, logRoot, stdoutFile, appendLogs,
+          }));
+          assert.equal(fs.existsSync(marker), false);
+          assert.equal(fs.readFileSync(sentinel, 'utf8'), 'preserve fixture');
+          assert.equal(fs.existsSync(path.join(outside, 'missing')), false);
+        } finally { fs.rmSync(root, { recursive: true, force: true }); }
+      });
+    }
+  }
+});
+
+test('sink acquisition and synchronous spawn failures close already acquired descriptors', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-log-close-'));
+  const stdoutFile = path.join(root, 'stdout.log');
+  const stderrFile = path.join(root, 'stderr.log');
+  const marker = path.join(root, 'started');
+  const descriptorIsOpen = () => fs.readdirSync('/proc/self/fd').some((name) => {
+    try { return fs.readlinkSync(`/proc/self/fd/${name}`) === stdoutFile; }
+    catch { return false; }
+  });
+  try {
+    fs.mkdirSync(stderrFile);
+    await assert.rejects(runProcess(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`], {
+      logRoot: root, stdoutFile, stderrFile,
+    }), /regular/);
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(descriptorIsOpen(), false);
+    assert.equal(fs.statSync(stdoutFile).size, 0);
+    await assert.rejects(runProcess(null, [], { logRoot: root, stdoutFile, appendLogs: true }), /file|command/i);
+    assert.equal(descriptorIsOpen(), false);
+    await assert.rejects(runProcess(process.execPath, ['-e', ''], { stdoutFile }), /explicit logRoot/);
+    await assert.rejects(runProcess(process.execPath, ['-e', ''], { logRoot: root, stdoutFile }), /already exists/);
+    assert.equal(fs.statSync(stdoutFile).size, 0, 'fresh acquisition must never truncate an existing log');
+    const result = await runProcess(process.execPath, ['-e', "process.stdout.write('resumed')"], {
+      logRoot: root, stdoutFile, appendLogs: true,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(fs.readFileSync(stdoutFile, 'utf8'), 'resumed');
+    assert.equal(descriptorIsOpen(), false);
+    await assert.rejects(runProcess(process.execPath, ['-e', ''], { logRoot: root, stdoutFile }), /already exists/);
+    assert.equal(fs.readFileSync(stdoutFile, 'utf8'), 'resumed');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('process runner terminates a timed-out process group and returns a diagnostic tail', async () => {
@@ -40,6 +122,7 @@ test('process runner terminates a timed-out process group and returns a diagnost
       process.stderr.write('started');
       setInterval(() => {}, 1000);
     `], {
+      logRoot: root,
       stdoutFile: path.join(root, 'stdout.log'),
       stderrFile: path.join(root, 'stderr.log'),
       timeoutMs: 1000,
