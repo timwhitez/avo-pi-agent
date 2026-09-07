@@ -131,11 +131,24 @@ function createSink(file, { root, append = false }) {
   }
   const target = path.resolve(file);
   const parent = path.dirname(target);
+  root = path.resolve(root);
+  const rootIdentity = fs.lstatSync(root, { bigint: true });
   ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
+  const parentIdentity = fs.lstatSync(parent, { bigint: true });
   const directoryFd = fs.openSync(parent, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   let fd;
   try {
     const directory = fs.fstatSync(directoryFd, { bigint: true });
+    const assertDirectoryIdentity = () => {
+      ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
+      if (!sameInode(rootIdentity, fs.lstatSync(root, { bigint: true }))
+          || !sameInode(parentIdentity, directory)
+          || !sameInode(directory, fs.lstatSync(parent, { bigint: true }))) {
+        throw new Error('benchmark log directory changed during acquisition');
+      }
+    };
+    // Establish descriptor authority before any writable basename acquisition.
+    assertDirectoryIdentity();
     // Resolve the basename through the held directory, not replaceable parents.
     const anchored = `/proc/self/fd/${directoryFd}/${path.basename(target)}`;
     let before = null;
@@ -156,10 +169,7 @@ function createSink(file, { root, append = false }) {
     if (!sameInode(opened, named) || (before && !sameInode(before, opened))) {
       throw new Error('benchmark log identity changed during acquisition');
     }
-    ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
-    if (!sameInode(directory, fs.lstatSync(parent, { bigint: true }))) {
-      throw new Error('benchmark log directory changed during acquisition');
-    }
+    assertDirectoryIdentity();
     fs.fchmodSync(fd, 0o600);
     const stream = fs.createWriteStream(target, { fd, autoClose: true });
     fd = undefined;
