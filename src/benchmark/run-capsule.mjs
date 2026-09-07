@@ -69,6 +69,8 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/local/process-group.mjs',
   'src/local/process-guardian.mjs',
   'src/local/owned-run.mjs',
+  'scripts/run-public-diagnostic-locked.mjs',
+  'src/benchmark/diagnostic.mjs',
   'src/local/owned-run-control.mjs',
   'src/local/workspace-container-owner.mjs',
   'src/local/workspace-owner-client.mjs',
@@ -401,6 +403,7 @@ export function buildRunCapsule({
       },
     },
     task: {
+      ...(env.AVO_DIAGNOSTIC_RUN === '1' ? { executionIntent: 'diagnostic' } : {}),
       arcAuthMode: String(provenance?.arcAuth?.mode || 'unknown'),
       versionedGameIds,
       gameBudgets: deriveGameBudgets(games, {
@@ -587,6 +590,12 @@ export function verifyRunCapsuleExecution({
 } = {}) {
   validateRunCapsule(capsule);
   const definition = capsule.definition;
+  if (definition.task.executionIntent !== undefined && definition.task.executionIntent !== 'diagnostic') {
+    throw new Error('run capsule has an unknown execution intent');
+  }
+  if ((definition.task.executionIntent === 'diagnostic') !== (env.AVO_DIAGNOSTIC_RUN === '1')) {
+    throw new Error('execution intent differs from the sealed run capsule');
+  }
   if (canonicalJson(git) !== canonicalJson(definition.git)) {
     throw new Error('execution Git checkout differs from the sealed run capsule');
   }

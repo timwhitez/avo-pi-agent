@@ -56,6 +56,7 @@ import {
 import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
 import { readJsonFileEvidence } from '../src/local/regular-file-evidence.mjs';
+import { diagnosticSelection, selectDiagnosticGames, diagnosticReportFields } from '../src/benchmark/diagnostic.mjs';
 
 loadLocalEnv();
 
@@ -70,9 +71,11 @@ const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, 
 const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
 const root = process.cwd();
 const runsRoot = path.join(root, 'runs');
+const diagnostic = process.env.AVO_DIAGNOSTIC_RUN === '1';
+let requestedDiagnosticGames = null;
 const privateRoot = path.join(runsRoot, 'private');
 const privateDir = path.join(privateRoot, runId);
-const publicDir = path.join(runsRoot, 'public');
+const publicDir = path.join(runsRoot, diagnostic ? 'diagnostic' : 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
 fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
 fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
@@ -97,6 +100,10 @@ if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mod
 let provider;
 const stage = { value: 'configuration' };
 try {
+  if (diagnostic) {
+    requestedDiagnosticGames = diagnosticSelection(process.argv.slice(2));
+    if (experimentRun) throw new Error('diagnostic selection cannot override a sealed experiment plan');
+  }
   provider = requireRealProviderEnvironment();
   const explicitSecrets = [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean);
   const config = getRuntimeConfig();
@@ -148,7 +155,9 @@ try {
   process.env.AVO_ARC_AUTH_MODE = process.env.AVO_ARC_AUTH_MODE || 'anonymous-auto';
   if (process.env.AVO_ARC_AUTH_MODE === 'anonymous-auto') process.env.ARC_API_KEY = '';
   const discoveredGames = await discoverPublicGames({ python, cwd: root });
-  const games = selectExperimentGames(experimentRun, discoveredGames);
+  const games = diagnostic
+    ? selectDiagnosticGames(requestedDiagnosticGames, discoveredGames)
+    : selectExperimentGames(experimentRun, discoveredGames);
   const gitSha = await currentGitSha(root);
   const provenance = buildProvenance({
     provider,
@@ -190,7 +199,13 @@ try {
     stateBinding: runState.currentState,
     requireInitialState: !resumeContext || resumeDecision.runClass === 'diagnostic-migrated',
   });
-  provenance.runCapsule = publicRunCapsule(capsule, resumeDecision);
+  // Recovery can reuse an immutable capsule with an earlier envelope timestamp.
+  // Commit to the saved bytes, not a newly built equivalent definition.
+  const persistedCapsule = readRunCapsule(activeCapsuleFile, { root: privateDir });
+  if (persistedCapsule.capsuleHash !== capsule.capsuleHash) {
+    throw new Error('persisted run capsule differs from the active capsule');
+  }
+  provenance.runCapsule = publicRunCapsule(persistedCapsule, resumeDecision);
   if (resumeContext) {
     provenance.resume = Object.freeze({
       resumed: true,
@@ -221,7 +236,7 @@ try {
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
   const timeoutMs = benchmarkTimeout();
-  const childArgs = experimentRun
+  const childArgs = experimentRun || diagnostic
     ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
     : ['src/cli.mjs', 'run-public', '--all'];
   const child = await runProcess(process.execPath, childArgs, {
@@ -377,9 +392,16 @@ try {
   }
   const aggregates = aggregateGameMetrics(selected.records);
   const resultClassification = classifyCapsuleResult(resumeDecision, scorecardAuthority);
-  const { status: acceptedStatus, officialScore } = resultClassification;
+  const acceptedStatus = diagnostic ? 'complete' : resultClassification.status;
+  const officialScore = diagnostic
+    ? { value: null, origin: 'unavailable', reason: 'diagnostic runs cannot publish competition scores' }
+    : resultClassification.officialScore;
+  const diagnosticFields = diagnostic
+    ? diagnosticReportFields(requestedDiagnosticGames, aggregates, resultClassification.officialScore.value)
+    : {};
 
   const privateManifest = {
+    ...diagnosticFields,
     ...provenance,
     completedAt: new Date().toISOString(),
     status: acceptedStatus,
@@ -413,6 +435,7 @@ try {
 
   stage.value = 'redaction-acceptance';
   const publicReport = redact({
+    ...diagnosticFields,
     schemaVersion: 2,
     runId,
     status: acceptedStatus,
@@ -449,6 +472,7 @@ try {
     ? [provider.baseUrl, provider.apiKey, provider.model, process.env.ARC_API_KEY].filter(Boolean)
     : [process.env.OPENAI_BASE_URL, process.env.OPENAI_API_KEY, process.env.OPENAI_MODEL, process.env.ARC_API_KEY].filter(Boolean);
   const failure = redact({
+    ...(diagnostic ? diagnosticReportFields(requestedDiagnosticGames) : {}),
     schemaVersion: 2,
     runId,
     status: 'failed',

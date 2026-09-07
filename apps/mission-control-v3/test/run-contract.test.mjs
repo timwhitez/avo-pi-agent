@@ -176,7 +176,10 @@ test('diagnostic wrapper is local-only, locked and permanently non-official', ()
   );
   assert.match(wrapper, /refuses GitHub Actions execution/);
   assert.match(wrapper, /acquireLocalExecutionLock/);
-  assert.match(wrapper, /kind:\s*'diagnostic-public-environments'/);
-  assert.match(wrapper, /official:\s*false/);
+  assert.match(wrapper, /AVO_DIAGNOSTIC_RUN\s*=\s*'1'/);
+  assert.match(wrapper, /import\('\.\/run-real-public\.mjs'\)/);
+  const report = fs.readFileSync(fileURLToPath(new URL('../../../src/benchmark/diagnostic.mjs', import.meta.url)), 'utf8');
+  assert.match(report, /kind:\s*'diagnostic-public-environments'/);
+  assert.match(report, /official:\s*false/);
   assert.doesNotMatch(wrapper, /official:\s*true/);
 });

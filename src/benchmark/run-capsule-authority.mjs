@@ -202,6 +202,7 @@ export function evaluatePublicRunCapsule(value, {
     reasons.push('run capsule workspace capability is absent or malformed');
   }
   const task = recordOrEmpty(capsule.task);
+  requireCondition(task.executionIntent === undefined, 'diagnostic capsule or unknown intent cannot establish competition authority', reasons);
   requireCondition(['anonymous-auto', 'registered'].includes(String(task.arcAuthMode || '')), 'run capsule ARC auth mode is unknown', reasons);
   requireCondition(Array.isArray(task.versionedGameIds) && task.versionedGameIds.length > 0, 'run capsule versioned game set is absent', reasons);
   try {

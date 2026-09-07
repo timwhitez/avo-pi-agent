@@ -25,6 +25,7 @@ import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
 import { providerCapabilities, providerEnvironment } from './support/provider.mjs';
 import { workspaceAttestationFixture } from './support/run-capsule.mjs';
 import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
+import { buildRunLaunch, loadExactRunReport } from '../apps/mission-control-v3/lib/run-contract.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -1217,6 +1218,83 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     publishedReport.provenance.runCapsule,
     { privateCapsuleEvidence: outerEvidence },
   ).accepted, true);
+
+  const diagnosticEnv = {
+    ...process.env, AVO_DISABLE_DOTENV: '1', AVO_ARC_AUTH_MODE: 'registered',
+    ARC_API_KEY: 'contract-arc-key', ARC_PYTHON: fakePython,
+    OPENAI_BASE_URL: 'https://provider.invalid/v1', OPENAI_API_KEY: 'contract-provider-key-1234567890',
+    OPENAI_MODEL: 'production-model', OPENAI_REASONING_EFFORT: 'max', ...providerEnvironment(),
+    AVO_MAX_ACTIONS: '200', AVO_POLICY_PROFILE: 'minimal-v1', AVO_BENCHMARK_TIMEOUT_MS: '60000',
+    AVO_RESUME_DIR: '', AVO_RUN_CAPSULE_HASH: '', AVO_RUN_CAPSULE_FILE: '', AVO_RUN_CLASS: '',
+  };
+  for (const selection of ['g01-v1,g02-v1', null]) {
+    const id = selection ? 'diagnostic-subset' : 'diagnostic-full';
+    const launch = buildRunLaunch({
+      repoRoot: root, runId: id, storageNamespace: 'diagnostic-subject', env: diagnosticEnv,
+      options: { mode: 'diagnostic', games: selection ? selection.split(',') : [], reasoningLevel: 'high', actionBudget: 200 },
+    });
+    const diagnostic = spawnSync(launch.command, launch.args, {
+      cwd: launch.cwd, encoding: 'utf8', timeout: 60000, detached: launch.detached,
+      env: launch.env,
+    });
+    assert.equal(diagnostic.status, 0, diagnostic.stderr || diagnostic.stdout);
+    const report = loadExactRunReport(launch.report);
+    assert.equal(report.executionMode, 'diagnostic');
+    assert.equal(report.official, false);
+    assert.equal(report.officialScore.value, null);
+    assert.equal(report.status, 'complete');
+    assert.equal(report.summary.games, selection ? 2 : 25);
+    assert.equal(report.provenance.runCapsule.task.executionIntent, 'diagnostic');
+    const privateEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report });
+    const definition = privateEvidence.value.definition;
+    assert.equal(definition.modelInterface.reasoningEffort, 'high');
+    assert.equal(definition.runtime.config.maxActions, 200);
+    assert.equal(definition.initialState.memory.empty, true);
+    assert.equal(definition.initialState.workspace.empty, true);
+    assert.equal(fs.existsSync(path.join(root, 'state', 'mission-control', 'diagnostic-subject')), false);
+    const authority = evaluatePublicRunCapsule(report.provenance.runCapsule, { privateCapsuleEvidence: privateEvidence });
+    assert.equal(authority.accepted, false);
+    assert.ok(authority.reasons.some((reason) => reason.includes('diagnostic capsule')));
+    assert.equal(fs.existsSync(path.join(root, 'runs', 'public', `${id}.json`)), false);
+    if (selection) {
+      const relabelled = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', `--game=${selection}`], {
+        cwd: root, encoding: 'utf8', timeout: 60000,
+        env: { ...diagnosticEnv, AVO_REAL_RUN_ID: id, AVO_REQUIRE_REAL_PROVIDER: '1',
+          AVO_DIAGNOSTIC_RUN: '0', AVO_RUN_CLASS: 'recovered',
+          AVO_RESUME_DIR: path.join(root, 'runs/private', id, 'resume'),
+          AVO_MEMORY_DIR: path.join(root, 'runs/private', id, 'state', 'memory'),
+          AVO_WORKSPACE_DIR: path.join(root, 'runs/private', id, 'state', 'workspace'),
+          AVO_RUN_CAPSULE_FILE: path.join(root, 'runs/private', id, 'run-capsule.json'),
+          AVO_RUN_CAPSULE_HASH: report.provenance.runCapsule.capsuleHash },
+      });
+      assert.equal(relabelled.status, 1);
+      assert.match(relabelled.stderr, /execution intent differs/);
+    }
+  }
+  const recoveredId = 'diagnostic-recovery';
+  const recoveryArgs = ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g25-v1'];
+  const diagnosticRecoveryEnv = { ...diagnosticEnv, AVO_GAME_ATTEMPTS: '1', AVO_TRANSIENT_TURN_RECOVERIES: '1' };
+  const partialDiagnostic = spawnSync(process.execPath, recoveryArgs, {
+    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+    env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_REPAIR_ROUND: 'partial-state' },
+  });
+  assert.equal(partialDiagnostic.status, 1, partialDiagnostic.stderr || partialDiagnostic.stdout);
+  const recoveredDiagnostic = spawnSync(process.execPath, recoveryArgs, {
+    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+    env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_RESUME_RUN: '1', AVO_REPAIR_ROUND: '' },
+  });
+  assert.equal(recoveredDiagnostic.status, 0, recoveredDiagnostic.stderr || recoveredDiagnostic.stdout);
+  const recoveredReport = JSON.parse(fs.readFileSync(path.join(root, 'runs', 'diagnostic', `${recoveredId}.json`)));
+  assert.equal(recoveredReport.status, 'complete');
+  assert.equal(recoveredReport.official, false);
+  assert.equal(recoveredReport.executionMode, 'diagnostic');
+  assert.equal(recoveredReport.provenance.runCapsule.task.executionIntent, 'diagnostic');
+  assert.equal(recoveredReport.provenance.runCapsule.runClass, 'recovered');
+  const recoveredEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report: recoveredReport });
+  assert.equal(recoveredReport.provenance.runCapsule.capsuleEvidenceSha256, recoveredEvidence.sha256);
+  assert.equal(evaluatePublicRunCapsule(recoveredReport.provenance.runCapsule, {
+    privateCapsuleEvidence: recoveredEvidence,
+  }).accepted, false);
 
   const sealed = publishedReport.provenance.runCapsule;
   const experimentRuntime = {

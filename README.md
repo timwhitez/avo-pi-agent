@@ -36,6 +36,12 @@ execution lock. Bare SIGSTOP only controls a process group: use Mission Control
 or `controlOwnedRun` for acknowledged container pause. These guarantees apply
 to the locked run entry points, not unsupervised direct library calls.
 
+The locked diagnostic entry point uses the same clean-checkout, initialized
+state, provider/runtime preflights and capsule-bound CLI path as the canonical
+runner. It accepts `--all` or `--game=id[,id]` and writes to `runs/diagnostic`.
+Its sealed diagnostic intent and reports remain non-official even for the full
+public set or a resumed run; failures retain the actual failed stage.
+
 ```text
 ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values
