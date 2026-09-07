@@ -11,7 +11,7 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",
-    "test": "node --test test/*.test.mjs"
+    "test": "node scripts/dependency-smoke.mjs && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@copilotkit/react-core": "1.69.3",
@@ -23,6 +23,7 @@
     "react-dom": "19.2.8"
   },
   "overrides": {
+    "qs": "6.16.0",
     "@ai-sdk/google-vertex": "4.0.193"
   }
 }
