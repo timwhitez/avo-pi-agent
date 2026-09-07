@@ -1138,7 +1138,7 @@ export class AvoArcAgent {
     const mechanismMetrics = this.lastResult?.mechanismMetrics
       ? {
           ...this.lastResult.mechanismMetrics,
-          supervisorInterventions: this.strategyEnabled ? this.supervisor.history(100).length : 0,
+          supervisorInterventions: this.strategyEnabled ? this.supervisor.interventionSequence : 0,
           actionBudgetExhaustions: this.actions >= this.config.maxActions
             && !this.finished
             && !isWin(this.frame) ? 1 : 0,

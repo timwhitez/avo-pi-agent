@@ -15,6 +15,8 @@ import {
 import { canonicalJson, inspectRunState } from '../src/benchmark/run-capsule.mjs';
 import { hashExecutionId, normalizeScorecardSnapshot } from '../src/benchmark/scorecard-evidence.mjs';
 import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
+import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
+import { aggregateGameMetrics } from '../src/benchmark/report-records.mjs';
 
 function sandbox() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-resume-'));
@@ -107,6 +109,28 @@ test('resume directory must live inside runs/private and be a regular directory'
   assert.equal(path.basename(dir), 'resume');
   assert.throws(() => resolveResumeDirectory('/tmp/avo-outside', { root }), /inside runs\/private/);
   assert.throws(() => resolveResumeDirectory('runs/private', { root }), /inside runs\/private/);
+});
+
+test('completed checkpoint preserves its already aggregated intervention count without recounting', () => {
+  const root = sandbox();
+  try {
+    const dir = resolveResumeDirectory('runs/private/counter-run/resume', { root });
+    const mechanismMetrics = Object.fromEntries(MECHANISM_METRIC_FIELDS.map((field) => [field, 0]));
+    Object.assign(mechanismMetrics, { supervisorInterventions: 122, toolCalls: 366, actCalls: 366 });
+    // This is checkpoint schema fixture data, not a claim of real provider work.
+    saveResumedRecord(dir, 'counter', record('counter', {
+      actions: 366, gameplayActions: 366, outerTurns: 2, mechanismMetrics,
+    }), options);
+    const file = path.join(dir, 'counter.json');
+    const committed = fs.readFileSync(file);
+    for (let index = 0; index < 2; index++) {
+      const loaded = loadResumedRecords(dir, options);
+      assert.equal(loaded.size, 1);
+      assert.equal(loaded.get('counter').mechanismMetrics.supervisorInterventions, 122);
+      assert.equal(aggregateGameMetrics([...loaded.values()]).mechanismMetrics.supervisorInterventions, 122);
+      assert.deepEqual(fs.readFileSync(file), committed);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('checkpoints round-trip and only pi-sdk records are accepted', () => {
