@@ -49,7 +49,7 @@ identity before starting the child, and streams retain the acquired descriptor.
 
 CLI source reports intentionally replace the same-run source report on resume
 through the shared 8 MiB atomic JSON writer. It uses exclusive random staging,
-file/directory fsync and rejects linked targets. A post-commit persistence error
+file/directory fsync and rejects symbolic-link targets. A post-commit persistence error
 still exits nonzero and explicitly reports that replacement already committed.
 
 ```text
