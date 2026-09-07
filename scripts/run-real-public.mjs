@@ -55,6 +55,7 @@ import {
 } from '../src/benchmark/run-capsule.mjs';
 import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { buildAgentChildEnvironment } from '../src/local/child-environment.mjs';
+import { readJsonFileEvidence } from '../src/local/regular-file-evidence.mjs';
 
 loadLocalEnv();
 
@@ -86,14 +87,10 @@ if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
   console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
   // Regenerable private artifacts from earlier passes would trip exclusive
   // copy/write guards. The original capsule, provenance and checkpoints stay.
-  for (const stale of ['raw-run-report.json', 'manifest.private.json']) {
-    const target = path.join(privateDir, stale);
-    if (fs.existsSync(target)) fs.unlinkSync(target);
-  }
-  if (fs.existsSync(publicFile)) {
-    const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
-    if (prior?.status !== 'complete') fs.unlinkSync(publicFile);
-  }
+  const staleRawReport = path.join(privateDir, 'raw-run-report.json');
+  if (fs.existsSync(staleRawReport)) fs.unlinkSync(staleRawReport);
+  removeAcceptedResumeArtifact(path.join(privateDir, 'manifest.private.json'), resumeContext.manifestEvidence);
+  removeAcceptedResumeArtifact(publicFile, resumeContext.publicEvidence);
 }
 if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
 
@@ -205,6 +202,7 @@ try {
       currentCapsuleHash: capsule.capsuleHash,
       runClass: resumeDecision.runClass,
       comparable: resumeDecision.comparable,
+      inputEvidence: resumeContext.inputEvidence,
     });
   }
   if (resuming && fs.existsSync(path.join(privateDir, 'provenance.json'))) {
@@ -456,6 +454,7 @@ try {
     status: 'failed',
     failedStage: stage.value,
     failedAt: new Date().toISOString(),
+    resumeInputEvidence: resumeContext?.inputEvidence ?? null,
     experiment: publicExperimentBinding(experimentRun?.binding),
     error: redactText(error instanceof Error ? error.message : String(error), { explicitSecrets }),
   }, { explicitSecrets });
@@ -528,15 +527,11 @@ function persistRunCapsule({ privateDir, capsule, resumeContext }) {
 
 function assertResumableContext({ privateDir, publicFile, runId }) {
   const provenanceFile = path.join(privateDir, 'provenance.json');
-  if (!fs.existsSync(provenanceFile)) {
+  const provenanceEvidence = readResumeEvidence(provenanceFile);
+  if (!provenanceEvidence) {
     throw new Error(`cannot resume ${runId}: original provenance.json is missing`);
   }
-  let original;
-  try {
-    original = JSON.parse(fs.readFileSync(provenanceFile, 'utf8'));
-  } catch (error) {
-    throw new Error(`cannot resume ${runId}: provenance.json is unreadable`, { cause: error });
-  }
+  const original = provenanceEvidence.value;
   const capsuleFile = path.join(privateDir, 'run-capsule.json');
   if (!fs.existsSync(capsuleFile)) {
     throw new Error(`cannot resume ${runId}: original run-capsule.json is missing`);
@@ -545,21 +540,23 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
   if (originalCapsule.definition.runId !== runId) {
     throw new Error(`cannot resume ${runId}: original run capsule has a different run ID`);
   }
-  if (original.runId !== runId
+  if (original?.runId !== runId
       || original.runCapsule?.capsuleHash !== originalCapsule.capsuleHash
       || original.gitSha !== originalCapsule.definition.git?.commit) {
     throw new Error(`cannot resume ${runId}: original provenance is not bound to the run capsule`);
   }
   const manifestFile = path.join(privateDir, 'manifest.private.json');
-  if (fs.existsSync(manifestFile)) {
-    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(manifest.status)) {
+  const manifestEvidence = readResumeEvidence(manifestFile);
+  if (manifestEvidence) {
+    assertResumeStatus(manifestEvidence.value.status);
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(manifestEvidence.value.status)) {
       throw new Error(`cannot resume ${runId}: the run already completed`);
     }
   }
-  if (fs.existsSync(publicFile)) {
-    const prior = JSON.parse(fs.readFileSync(publicFile, 'utf8'));
-    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(prior.status)) {
+  const publicEvidence = readResumeEvidence(publicFile);
+  if (publicEvidence) {
+    assertResumeStatus(publicEvidence.value.status);
+    if (['complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(publicEvidence.value.status)) {
       throw new Error(`cannot resume ${runId}: a complete public report already exists`);
     }
   }
@@ -567,5 +564,38 @@ function assertResumableContext({ privateDir, publicFile, runId }) {
     originalGitSha: original.gitSha || null,
     originalCreatedAt: original.createdAt || null,
     originalCapsule,
+    manifestEvidence,
+    publicEvidence,
+    inputEvidence: Object.fromEntries([
+      ['provenance', provenanceEvidence], ['manifest', manifestEvidence], ['publicReport', publicEvidence],
+    ].map(([name, evidence]) => [name, evidence ? { sha256: evidence.sha256, bytes: evidence.bytes } : null])),
   };
+}
+
+function assertResumeStatus(status) {
+  if (!['failed', 'complete', 'diagnostic-migrated', 'diagnostic-recovered'].includes(status)) {
+    throw new Error('resume evidence has an unknown completion status');
+  }
+}
+
+function readResumeEvidence(file) {
+  try { fs.lstatSync(file); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  const evidence = readJsonFileEvidence(file, { root: path.dirname(file), purpose: 'resume evidence' });
+  if (!evidence.value || typeof evidence.value !== 'object' || Array.isArray(evidence.value)) {
+    throw new Error('resume evidence must be a JSON object');
+  }
+  return evidence;
+}
+
+function removeAcceptedResumeArtifact(file, accepted) {
+  const current = readResumeEvidence(file);
+  if (!accepted && !current) return;
+  if (!accepted || !current || current.sha256 !== accepted.sha256
+      || canonicalJson(current.identity) !== canonicalJson(accepted.identity)) {
+    throw new Error('resume evidence changed after acceptance');
+  }
+  fs.unlinkSync(file);
 }

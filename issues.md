@@ -6,6 +6,8 @@ Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Iss
 
 After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; new validity Issue #276 opened from retained r12 evidence. Live inventory is again 16 open Issues, 0 open PRs. #276 is the next repair, before any new benchmark.
 
+After PR #277: #276 closed by merge `dc58e8a47642085c41a6a8bacef9997c538f0152`; 15 open Issues and 0 open PRs remain. Next is #271 bounded resume evidence acquisition. No new benchmark has started.
+
 | Issue | Scope and dependency | Current disposition |
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
@@ -20,11 +22,11 @@ After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; 
 | #268 | Completed process-line length enforcement | Open; separate from file replay ingestion #266 |
 | #269 | Attempt intervention total independent of history view | Open; source defect confirmed; follows #260 |
 | #270 | Shared atomic CLI report writer | Open; separate from streaming log sink #265 |
-| #271 | Bounded resume evidence acquisition | Open; source defect confirmed; provenance prerequisite |
+| #271 | Bounded resume evidence acquisition | Implemented with shared bounded reader, accepted-byte hashes and checked cleanup. Local Node 494/494, production guard 26/26, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. PR/independent review pending; remains a provenance prerequisite |
 | #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
-| #276 | Handled failure leaves final state authority stale | Implemented in PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470 (including real CLI partial-state recovery with synthetic external adapters), offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Separate from #271; independent review pending |
+| #276 | Handled failure leaves final state authority stale | Closed by PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470, offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Independent APPROVE at `722a2fbde56113ed7b7d9eb58de25e397a12fdad`, including 14/14 focused tests and real CLI partial recovery with synthetic external adapters. Separate from #271 |
 
 Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
 
