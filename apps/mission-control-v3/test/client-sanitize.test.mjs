@@ -59,3 +59,13 @@ test('browser response bounds are applied after canonical redaction', () => {
   assert.equal(value.items.length, 3);
   assert.equal(value.nested.a.b, '<max-depth>');
 });
+
+test('browser depth limit stops canonical traversal before visiting deeper input', () => {
+  let visited = false;
+  const input = { a: { b: { get privateValue() { visited = true; return 'not visited'; } } } };
+  assert.equal(sanitizeForClient(input, { maxDepth: 2 }).a.b, '<max-depth>');
+  assert.equal(visited, false);
+  const secret = 'boundary-secret-fixture';
+  const output = sanitizeForClient({ text: `1234567${secret}` }, { maxStringChars: 12, explicitSecrets: [secret] });
+  assert.equal(output.text.includes('bound'), false, 'redact a whole secret before truncating text');
+});

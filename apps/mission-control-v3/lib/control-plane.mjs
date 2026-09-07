@@ -1,6 +1,7 @@
 import path from 'node:path';
 import * as base from './control-plane-base.mjs';
 import { loadUsageTelemetry } from './usage-telemetry.mjs';
+import { sanitizeForClient } from './client-sanitize.mjs';
 import {
   preserveUnavailableScoreDeltas,
   preserveUnavailableSummaryDeltas,
@@ -43,7 +44,7 @@ export function getRun(id, { subject } = {}) {
   const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id });
   run.telemetry = telemetry;
   run.summary = { ...(run.summary || {}), telemetry: telemetrySummary(telemetry) };
-  return run;
+  return sanitizeForClient(run);
 }
 
 export function getEventsSince(id, cursor = 0, limit = 500, { subject } = {}) {
@@ -68,7 +69,7 @@ export function compareRuns(baselineId, candidateId, { subject } = {}) {
     ...(comparison.delta || {}),
     ...usageTelemetryDeltas(baselineTelemetry, candidateTelemetry),
   };
-  return comparison;
+  return sanitizeForClient(comparison);
 }
 
 export function activeRunLimit(env = process.env) {

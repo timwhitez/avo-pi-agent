@@ -5,6 +5,7 @@ const SENSITIVE_NORMALIZED_KEYS = new Set([
   'apikey', 'authorization', 'credential', 'credentials', 'password', 'secret',
   'clientsecret', 'privatekey', 'accesstoken', 'refreshtoken', 'idtoken',
   'authtoken', 'bearertoken', 'sessiontoken', 'githubtoken', 'arcapikey',
+  'cookie', 'cookies', 'setcookie',
   'baseurl', 'endpoint', 'providerurl', 'providerendpoint', 'model', 'modelid', 'modelname',
   'rawreasoning', 'reasoningcontent', 'thinkingcontent', 'chainofthought',
 ]);
@@ -12,6 +13,7 @@ const SAFE_FINGERPRINT_KEY = /fingerprint|hash|sha|digest/i;
 const URL = /https?:\/\/[^\s"'<>]+/gi;
 const IPV4_ENDPOINT = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/gi;
+const AUTHORIZATION = /\bauthorization\s*[:=]\s*(?:(?:Basic|Bearer)\s+)?[^\s,;]+/gi;
 const KEY_LIKE = /\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}\b/g;
 
 export function fingerprint(value, salt) {
@@ -22,9 +24,11 @@ export function fingerprint(value, salt) {
     .digest('hex');
 }
 
-export function redact(value, { explicitSecrets = [] } = {}) {
+export function redact(value, {
+  explicitSecrets = [], maxDepth = Infinity, maxArrayItems = Infinity, maxObjectEntries = Infinity,
+} = {}) {
   const secrets = explicitSecrets.filter((item) => typeof item === 'string' && item.length >= 4);
-  return visit(value, '', secrets, new WeakSet());
+  return visit(value, '', secrets, new WeakSet(), 0, { maxDepth, maxArrayItems, maxObjectEntries });
 }
 
 export function redactText(text, { explicitSecrets = [] } = {}) {
@@ -33,6 +37,7 @@ export function redactText(text, { explicitSecrets = [] } = {}) {
     output = output.split(secret).join('<redacted>');
   }
   return output
+    .replace(AUTHORIZATION, 'authorization=<redacted>')
     .replace(BEARER, 'Bearer <redacted>')
     .replace(KEY_LIKE, '<redacted-key>')
     .replace(URL, '<redacted-url>')
@@ -57,18 +62,20 @@ export function assertNoPrivateMaterial(value, { explicitSecrets = [] } = {}) {
   return true;
 }
 
-function visit(value, key, secrets, seen) {
+function visit(value, key, secrets, seen, depth, limits) {
   if (value === null || value === undefined) return value;
   if (isSensitiveKey(key)) return '<redacted>';
   if (typeof value === 'string') return redactText(value, { explicitSecrets: secrets });
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value !== 'object') return String(value);
+  if (depth >= limits.maxDepth) return '<max-depth>';
   if (seen.has(value)) return '<circular>';
   seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => visit(item, key, secrets, seen));
-  return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [
+  if (Array.isArray(value)) return value.slice(0, limits.maxArrayItems)
+    .map((item) => visit(item, key, secrets, seen, depth + 1, limits));
+  return Object.fromEntries(Object.entries(value).slice(0, limits.maxObjectEntries).map(([childKey, child]) => [
     childKey,
-    isSensitiveKey(childKey) ? '<redacted>' : visit(child, childKey, secrets, seen),
+    isSensitiveKey(childKey) ? '<redacted>' : visit(child, childKey, secrets, seen, depth + 1, limits),
   ]));
 }
 
