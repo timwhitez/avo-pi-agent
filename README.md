@@ -52,6 +52,13 @@ through the shared 8 MiB atomic JSON writer. It uses exclusive random staging,
 file/directory fsync and rejects symbolic-link targets. A post-commit persistence error
 still exits nonzero and explicitly reports that replacement already committed.
 
+Replay and numeric-usage views share a descriptor-bound JSONL scan with directory,
+byte-window, line, JSON-complexity and record budgets. Replay retains at most
+2,000 events; usage totals cover accepted samples only. Partial/unavailable status,
+errors and truncation are explicit. Window digests cover only returned bytes, not
+the omitted file prefix; full JSON evidence readers retain full-file semantics.
+Descriptor-bound acquisition uses the same Linux requirement as managed runs.
+
 ```text
 ARC-AGI-3 public environment (official arc-agi package)
    ⇅ JSONL, exact FrameData and legal GameAction values

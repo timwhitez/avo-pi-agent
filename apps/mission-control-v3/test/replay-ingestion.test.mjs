@@ -43,6 +43,9 @@ test('bounded JSONL scan charges traversal, line, byte and failed-read budgets',
     assert.equal(failed.errorCount, 2);
     assert.equal(failed.status, 'partial');
     assert.throws(() => scanRunJsonl({ repoRoot: root, runId: '..', onRecord() {} }), /runId is invalid/);
+    assert.throws(() => scanRunJsonl({ repoRoot: root, runId: '.', onRecord() {} }), /runId is invalid/);
+    assert.throws(() => scanRunJsonl({ repoRoot: root, runId: 'run-1' }), /requires onRecord/);
+    assert.equal(scanRunJsonl({ repoRoot: root, runId: '_legacy', onRecord() {} }).status, 'unavailable');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

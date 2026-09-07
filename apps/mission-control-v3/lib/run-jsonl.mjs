@@ -12,7 +12,9 @@ const LIMITS = {
 };
 
 export function scanRunJsonl({ repoRoot, runId, limits: requested = {}, onRecord, hooks = null }) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(String(runId || ''))) throw new Error('runId is invalid');
+  runId = String(runId || '');
+  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(runId) || runId === '.' || runId === '..') throw new Error('runId is invalid');
+  if (typeof onRecord !== 'function') throw new Error('run JSONL scan requires onRecord');
   const root = path.resolve(repoRoot);
   const limits = Object.fromEntries(Object.entries(LIMITS).map(([key, [fallback, maximum]]) => {
     const value = Number(requested[key] ?? fallback);
