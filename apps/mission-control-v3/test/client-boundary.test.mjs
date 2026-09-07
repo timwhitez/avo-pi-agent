@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { observationFixture, writeActivityFixture } from '../../../test/support/observation.mjs';
 
 test('authenticated run and event routes apply canonical privacy policy to stored data', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-client-boundary-'));
@@ -38,10 +39,12 @@ test('authenticated run and event routes apply canonical privacy policy to store
   for (let index = 0; index < 32; index += 1) deep = { next: deep };
   payload.deep = deep;
   const memoryDir = path.join(root, 'memory');
-  const trajectoryDir = path.join(root, 'runs', 'private', 'trajectories', id);
   fs.mkdirSync(memoryDir);
-  fs.mkdirSync(trajectoryDir, { recursive: true });
-  fs.writeFileSync(path.join(trajectoryDir, 'events.jsonl'), `${JSON.stringify({ type: 'observation', payload })}\n`);
+  fs.writeFileSync(path.join(memoryDir, 'g01.json'), JSON.stringify({ notes: ['stale-source-memory'] }));
+  const observation = observationFixture(root, id, { mode: 'diagnostic' });
+  fs.writeFileSync(path.join(observation.memoryDir, 'g01.json'), JSON.stringify({ gameId: 'g01', ...payload }));
+  fs.writeFileSync(observation.sources[0].file, `${JSON.stringify({ gameId: 'g01', sequence: 1, type: 'observation', payload })}\n`);
+  writeActivityFixture(observation, [{ metrics: { inputTokens: 17, outputTokens: 9, reasoningTokens: 3, tokenLatencyMs: 7 } }]);
   const run = { id, state: 'completed', mode: 'diagnostic', executionMode: 'diagnostic',
     games: ['g01'], createdAt: new Date().toISOString(), memoryDir,
     cursor: 1, summary: payload, events: [{ cursor: 1, runId: id, type: 'fixture', payload }] };
@@ -73,7 +76,7 @@ test('authenticated run and event routes apply canonical privacy policy to store
     reader = stream.body.getReader();
     const chunk = new TextDecoder().decode((await reader.read()).value);
     const event = JSON.parse(chunk.split('\n').find((line) => line.startsWith('data: ')).slice(6));
-    for (const value of [snapshot.run.summary, snapshot.run.trajectory.events[0].payload, event.payload]) {
+    for (const value of [snapshot.run.summary, snapshot.run.memory[0].value, snapshot.run.trajectory.events[0].payload, event.payload]) {
       for (const key of Object.keys(privateFields)) assert.equal(value[key], '<redacted>', key);
       assert.equal(value.inputTokens, 17);
       assert.equal(value.output_tokens, 9);
@@ -83,6 +86,7 @@ test('authenticated run and event routes apply canonical privacy policy to store
       assert.match(JSON.stringify(value.deep), /<max-depth>/);
     }
     const serialized = JSON.stringify(snapshot) + chunk;
+    assert.equal(serialized.includes('stale-source-memory'), false);
     for (const secret of [...Object.values(privateFields), ...runtimeSecrets,
       'opaque-token-shaped-text', 'opaque-authorization-fixture']) {
       assert.equal(serialized.includes(secret), false, 'private fixture value survived output projection');

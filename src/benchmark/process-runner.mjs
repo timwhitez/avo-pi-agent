@@ -20,6 +20,7 @@ export async function runProcess(command, args, {
   maxStderrBytes = null,
   onStdout = null,
   onStderr = null,
+  onMessage = null,
 } = {}) {
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
   const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
@@ -34,10 +35,11 @@ export async function runProcess(command, args, {
     stdoutSink = stdoutFile ? createSink(stdoutFile, { root: logRoot, append: appendLogs }) : null;
     stderrSink = stderrFile ? createSink(stderrFile, { root: logRoot, append: appendLogs }) : null;
     const ownedGroup = managedProcessGroup();
+    const childEnv = ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env;
     child = spawn(command, args, {
       cwd,
-      env: ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: onMessage ? { ...childEnv, AVO_PROGRESS_CHANNEL: 'ipc' } : childEnv,
+      stdio: onMessage ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32' && !ownedGroup,
     });
   } catch (error) {
@@ -68,6 +70,7 @@ export async function runProcess(command, args, {
     terminateProcessTree(child, 'SIGKILL');
     closeChildOutputStreams(child);
   };
+  if (onMessage) child.on('message', (message) => invokeCallback(onMessage, message, 'activity', failStream));
 
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -126,6 +129,13 @@ export async function runProcess(command, args, {
 }
 
 function createSink(file, { root, append = false }) {
+  const fd = openLogFile(file, { root, append });
+  try { return fs.createWriteStream(path.resolve(file), { fd, autoClose: true }); }
+  catch (error) { fs.closeSync(fd); throw error; }
+}
+
+export function openLogFile(file, { root, append = false }) {
+  if (typeof root !== 'string' || !root.trim()) throw new Error('benchmark log files require an explicit root');
   const target = path.resolve(file);
   const parent = path.dirname(target);
   const { fd: directoryFd, assertIdentity: assertDirectoryIdentity } = acquireAuthorityDirectory(parent, {
@@ -157,9 +167,9 @@ function createSink(file, { root, append = false }) {
     }
     assertDirectoryIdentity();
     fs.fchmodSync(fd, 0o600);
-    const stream = fs.createWriteStream(target, { fd, autoClose: true });
+    const result = fd;
     fd = undefined;
-    return stream;
+    return result;
   } finally {
     try { if (fd !== undefined) fs.closeSync(fd); }
     finally { fs.closeSync(directoryFd); }

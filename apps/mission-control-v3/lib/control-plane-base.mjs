@@ -22,6 +22,8 @@ import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsul
 import { controlOwnedRun } from '../../../src/local/owned-run-control.mjs';
 import { sanitizeForClient, sanitizeClientText as safeText } from './client-sanitize.mjs';
 import { scanRunJsonl } from './run-jsonl.mjs';
+import { readRunObservation, projectRunActivity, ACTIVITY_SCHEMA } from '../../../src/benchmark/run-observation.mjs';
+import { loadUsageTelemetry } from './usage-telemetry.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -80,7 +82,7 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     currentGame: null,
     progress: {
       gameIndex: 0,
-      gameTotal: options.games.length || 25,
+      gameTotal: options.games.length || null,
       actions: 0,
       levelsCompleted: 0,
       totalLevels: null,
@@ -90,7 +92,7 @@ export function startRun(input = {}, { storageNamespace = 'local' } = {}) {
     reportEvidence: null,
     lastError: null,
     reportContract: launch.report,
-    memoryDir: launch.env.AVO_MEMORY_DIR,
+    inputMemoryDir: launch.env.AVO_MEMORY_DIR,
   };
   store.runs.set(id, run);
   emit(run, 'run.created', {
@@ -202,7 +204,31 @@ export function listRuns() {
 export function getRun(id) {
   const run = requireRun(id);
   const snapshot = sanitizeRun(run);
-  const memory = loadMemorySnapshotEvidence(run.memoryDir, run.games);
+  if (run.reportContract) {
+    const summary = loadSummaryForRun(run);
+    if (summary) {
+      snapshot.summary = summary;
+      snapshot.reportStatus = summary.status;
+      snapshot.reportEvidence = summary.reportEvidence ? { ...summary.reportEvidence } : null;
+      snapshot.official = summary.official === true;
+      snapshot.authorityState = summary.authorityState;
+      snapshot.authorityReasons = [...(summary.authorityReasons || [])];
+    } else if (['completed', 'failed', 'aborted'].includes(run.state)) {
+      snapshot.reportStatus = 'unavailable';
+      snapshot.official = false;
+      snapshot.authorityState = 'rejected';
+      snapshot.authorityReasons = ['Current exact report evidence is unavailable'];
+    }
+  }
+  const observation = readRunObservation({ root: REPO_ROOT, runId: id, mode: run.executionMode ?? run.mode ?? null });
+  snapshot.observability = observation.public;
+  const telemetry = loadUsageTelemetry({ repoRoot: REPO_ROOT, runId: id, observation });
+  snapshot.telemetry = telemetry;
+  if (telemetry.latestProgress) applyActivityProgress(snapshot, telemetry.latestProgress);
+  if (observation.status === 'available') snapshot.games = [...observation.gameIds];
+  const memory = observation.status === 'available'
+    ? loadMemorySnapshotEvidence(observation.memoryDir, observation.gameIds)
+    : { records: [], evidence: [], status: 'unavailable', errors: observation.errors };
   const findings = loadFindingsSnapshotEvidence(REPO_ROOT, id);
   snapshot.memory = memory.records.map((entry) => ({
     gameId: entry.gameId,
@@ -213,7 +239,7 @@ export function getRun(id) {
     files: memory.evidence,
     errors: memory.errors,
   });
-  snapshot.trajectory = loadTrajectorySnapshot(id, run.games);
+  snapshot.trajectory = loadTrajectorySnapshot(id, observation, snapshot.currentGame);
   snapshot.findings = findings.value === null ? null : deepSanitize(findings.value);
   snapshot.findingsEvidence = deepSanitize({
     status: findings.status,
@@ -289,6 +315,8 @@ export function sanitizeRun(run) {
     cursor: run.cursor,
     currentGame: run.currentGame,
     progress: { ...run.progress },
+    progressSource: run.progressSource ?? null,
+    progressObservedAt: run.progressObservedAt ?? null,
     summary: run.summary,
     reportStatus: run.reportStatus,
     reportEvidence: run.reportEvidence,
@@ -425,6 +453,20 @@ export function ingestProcessLine(run, line, isError, { truncated = false } = {}
   if (text.startsWith('{') && text.endsWith('}')) {
     try {
       const parsed = JSON.parse(text);
+      if (parsed.schema === ACTIVITY_SCHEMA) {
+        if (isError) return;
+        const observation = readRunObservation({ root: REPO_ROOT, runId: run.id, mode: run.executionMode ?? run.mode ?? null });
+        const activity = observation.status === 'available'
+          ? projectRunActivity(parsed, { runId: run.id, capsuleHash: observation.capsuleHash }) : null;
+        if (!activity || !observation.gameIds.includes(activity.gameId)) {
+          emit(run, 'process.observability_rejected', { message: 'Activity did not match the active run capsule' });
+          return;
+        }
+        run.games = observation.gameIds;
+        if (activity.type !== 'usage') applyActivityProgress(run, activity);
+        emit(run, activity.type === 'usage' ? 'usage.updated' : activity.type, activity);
+        return;
+      }
       if (parsed?.type && String(parsed?.runId || '') === run.id) {
         emit(run, `trajectory.${safeText(parsed.type)}`, parsed);
       } else if (parsed?.reportFile || parsed?.status) {
@@ -471,18 +513,26 @@ function loadSummaryForRun(run) {
 }
 
 function summarizeVerifiedReport(report, mode) {
-  const privateCapsuleEvidence = mode === 'competition'
+  const privateCapsuleEvidence = mode === 'competition' && report?.status !== 'failed'
     ? readPrivateRunCapsuleEvidence({ repositoryRoot: REPO_ROOT, report })
     : null;
   return summarizeMissionControlReport(report, mode, { privateCapsuleEvidence });
 }
 
-function loadTrajectorySnapshot(runId, games) {
+function loadTrajectorySnapshot(runId, observation, currentGame) {
+  if (observation.status !== 'available') return { status: 'unavailable', games: [], events: [], eventCount: 0, errors: observation.errors };
   const limit = 2000;
   const events = [];
   let cursor = 0;
   let observed = 0;
-  const ingestion = scanRunJsonl({ repoRoot: REPO_ROOT, runId, onRecord(event) {
+  let baselineExcluded = 0;
+  const sources = observation.sources.filter((source) => source.gameId !== currentGame)
+    .concat(observation.sources.filter((source) => source.gameId === currentGame));
+  const byFile = new Map(sources.map((source) => [source.file, source]));
+  const ingestion = scanRunJsonl({ repoRoot: REPO_ROOT, runId, files: sources.map((source) => source.file), onRecord(event, { file }) {
+    const source = byFile.get(file);
+    if (event.gameId !== source.gameId || !Number.isSafeInteger(event.sequence)) throw new Error('evidence identity differs from its sealed source');
+    if (event.sequence <= source.startSequence) { baselineExcluded += 1; return; }
     const projected = deepSanitize(event);
     observed += 1;
     if (events.length < limit) events.push(projected);
@@ -490,8 +540,17 @@ function loadTrajectorySnapshot(runId, games) {
   } });
   const window = events.slice(cursor).concat(events.slice(0, cursor));
   const truncated = ingestion.truncated || observed > limit;
-  return { ...ingestion, games, eventCount: window.length, eventsObserved: observed, events: window,
+  return { ...ingestion, games: [...observation.gameIds], capsuleHash: observation.capsuleHash,
+    baselineExcluded, eventCount: window.length, eventsObserved: observed, events: window,
     truncated, status: ingestion.status === 'complete' && truncated ? 'partial' : ingestion.status };
+}
+
+function applyActivityProgress(run, event) {
+  run.currentGame = event.gameId;
+  run.progress = { gameIndex: event.index, gameTotal: event.total, actions: event.actions,
+    levelsCompleted: event.levelsCompleted, totalLevels: event.totalLevels, state: event.state, resumed: event.resumed };
+  run.progressSource = 'capsule-activity';
+  run.progressObservedAt = event.at ?? null;
 }
 
 function normalizeGames(value) {

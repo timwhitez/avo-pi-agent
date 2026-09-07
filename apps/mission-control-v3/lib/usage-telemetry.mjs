@@ -2,6 +2,7 @@ import path from 'node:path';
 import { sanitizeForClient } from './client-sanitize.mjs';
 import { finiteNumberOrNull } from '../../../src/local/numeric.mjs';
 import { scanRunJsonl } from './run-jsonl.mjs';
+import { readRunObservation, projectRunActivity } from '../../../src/benchmark/run-observation.mjs';
 
 const DEFAULT_LIMITS = Object.freeze({
   maxFiles: 500,
@@ -40,24 +41,30 @@ const SUM_METRICS = new Set([
 ]);
 const MAX_METRICS = new Set(['tokenBudget', 'tokenLatencyMs', 'tokensPerSecond']);
 
-export function loadUsageTelemetry({ repoRoot, runId, limits = {} }) {
+export function loadUsageTelemetry({ repoRoot, runId, limits = {}, observation = null }) {
   const root = path.resolve(repoRoot);
   const id = validateRunId(runId);
   const bounded = normalizeLimits(limits);
   const samples = [];
   const totals = {};
   const maxima = {};
-  const ingestion = scanRunJsonl({ repoRoot: root, runId: id, limits: { ...limits, ...bounded },
+  const observed = observation ?? readRunObservation({ root, runId: id });
+  let latestProgress = null;
+  const sequences = new Map();
+  const ingestion = scanRunJsonl({ repoRoot: root, runId: id,
+    files: observed.status === 'available' ? [observed.activityFile] : [], limits: { ...limits, ...bounded },
     onRecord(event) {
-      const metrics = extractUsageMetrics(event);
-      if (Object.keys(metrics).length === 0) return;
+      const activity = projectRunActivity(event, { runId: id, capsuleHash: observed.capsuleHash });
+      if (!activity?.invocationId || activity.sequence <= (sequences.get(activity.invocationId) ?? 0)) {
+        throw new Error('activity binding or sequence is invalid');
+      }
+      sequences.set(activity.invocationId, activity.sequence);
+      if (activity.type !== 'usage') { latestProgress = activity; return; }
+      const metrics = activity.metrics;
       if (samples.length >= bounded.maxSamples) return false;
       const sample = sanitizeForClient({
-        at: event?.at ?? event?.timestamp ?? event?.time ?? null,
-        sequence: finiteNumberOrNull(event?.sequence ?? event?.seq ?? event?.cursor),
-        gameId: event?.gameId ?? event?.game_id ?? null,
-        turnId: event?.turnId ?? event?.turn_id ?? null,
-        type: event?.type ?? event?.event ?? 'usage',
+        at: activity.at ?? null, sequence: activity.sequence, gameId: activity.gameId,
+        invocationId: activity.invocationId, type: activity.type,
         metrics,
       }, { maxDepth: 5, maxArrayItems: 32, maxObjectEntries: 64, maxStringChars: 256 });
       samples.push(sample);
@@ -72,7 +79,13 @@ export function loadUsageTelemetry({ repoRoot, runId, limits = {} }) {
     ...ingestion,
     schemaVersion: 1,
     runId: id,
-    source: 'private-local-trajectory-numeric-allowlist',
+    source: 'capsule-bound-reported-sdk-usage',
+    capsuleHash: observed.capsuleHash ?? null,
+    activityStatus: ingestion.status,
+    status: samples.length ? ingestion.status : 'unavailable',
+    latestProgress,
+    errors: observed.status === 'available' ? ingestion.errors : observed.errors,
+    errorCount: observed.status === 'available' ? ingestion.errorCount : observed.errors.length,
     sampleCount: samples.length,
     totalsScope: 'accepted-samples-only',
     totals,

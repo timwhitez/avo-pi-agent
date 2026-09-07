@@ -65,6 +65,8 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'scripts/run-real-public.mjs',
   'scripts/run-real-public-locked.mjs',
   'src/benchmark/process-runner.mjs',
+  'src/benchmark/run-observation.mjs',
+  'src/benchmark/progress-status.mjs',
   'src/local/run-lock.mjs',
   'src/local/process-group.mjs',
   'src/local/process-guardian.mjs',
@@ -781,7 +783,7 @@ function scanDirectoryTree(directory) {
   };
 }
 
-function validateRunCapsule(capsule) {
+export function validateRunCapsule(capsule) {
   if (capsule?.schemaVersion !== 2 || capsule?.definition?.schema !== RUN_CAPSULE_SCHEMA) {
     throw new Error('run capsule schema is invalid');
   }

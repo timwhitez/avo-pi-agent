@@ -26,8 +26,10 @@ import { providerCapabilities, providerEnvironment } from './support/provider.mj
 import { workspaceAttestationFixture } from './support/run-capsule.mjs';
 import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 import { buildRunLaunch, loadExactRunReport } from '../apps/mission-control-v3/lib/run-contract.mjs';
+import { verifyLiveObservation } from './support/live-observation.mjs';
+import { readRunObservation } from '../src/benchmark/run-observation.mjs';
 
-test('full public-runner boundary completes 25 mocked games in one cumulative session', () => {
+test('full public-runner boundary completes 25 mocked games in one cumulative session', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
@@ -131,20 +133,33 @@ export function createProgressStatusReporter(env = process.env) {
           context: { messages: [] },
         });
         const tools = new Map(this.options.initialState.tools.map((tool) => [tool.name, tool]));
+        const observationMode = process.env.AVO_REPAIR_ROUND?.startsWith('observation-');
+        const structuredEvents = observationMode || process.env.AVO_REPAIR_ROUND?.startsWith('progress-');
         let callSequence = 0;
         const call = async (name, params = {}) => {
           const toolCallId = 'test-call-' + (++callSequence);
-          if (process.env.AVO_REPAIR_ROUND?.startsWith('progress-')) {
+          if (structuredEvents) {
             this.listener?.({ type: 'tool_execution_start', toolCallId, toolName: name, args: params });
           }
           const result = await tools.get(name).execute(toolCallId, params);
-          if (process.env.AVO_REPAIR_ROUND?.startsWith('progress-')) {
+          if (structuredEvents) {
             if (name === 'act_sequence' && process.env.AVO_REPAIR_ROUND === 'progress-exception') {
               throw new Error('synthetic failure after transition before tool-end');
             }
             const event = { type: 'tool_execution_end', toolCallId, toolName: name, result };
             this.listener?.(event);
             this.listener?.(event); // Duplicate notification must not double count.
+          }
+          if (observationMode && name === 'act' && result.details?.frame?.gameId === 'g01-v1'
+              && result.details.frame.levelsCompleted === 1) {
+            const marker = 'runs/observation-ready-' + process.env.AVO_REAL_RUN_ID;
+            if (!fs.existsSync(marker)) {
+              fs.writeFileSync(marker, 'ready');
+              const release = 'runs/observation-go-' + process.env.AVO_REAL_RUN_ID;
+              const deadline = Date.now() + 20000;
+              while (!fs.existsSync(release) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+              if (!fs.existsSync(release)) throw new Error('observation fixture release missing');
+            }
           }
           return result;
         };
@@ -160,10 +175,9 @@ export function createProgressStatusReporter(env = process.env) {
             },
             { reasoning: this.options.initialState.thinkingLevel },
           );
-          this.listener?.({
-            type: 'message_end',
-            message: { role: 'assistant', content: [], stopReason: 'stop', usage: {} },
-          });
+          const message = { role: 'assistant', content: [], stopReason: 'stop', usage: { input: 3, output: 1, totalTokens: 4 } };
+          this.state.messages.push(message);
+          this.listener?.({ type: 'message_end', message });
           return result;
         };
         await handoff();
@@ -301,7 +315,7 @@ export function createProgressStatusReporter(env = process.env) {
             throw new Error('controller reset did not return full-reset episode evidence');
           }
           frame = reset.details.frame;
-          if (frame.state !== 'PLAYING') throw new Error('controller reset did not recover GAME_OVER');
+          if (!['PLAYING', 'NOT_FINISHED'].includes(frame.state)) throw new Error('controller reset did not recover GAME_OVER');
         }
         if (process.env.AVO_TEST_MULTI_ATTEMPT === '1' && frame.gameId === 'g02-v1' && attempt === 1) {
           this.listener?.({
@@ -503,7 +517,7 @@ class Env:
     def reset_level(self):
         self.player = [0, 0]
         self.goal = [self.size - 1, self.size - 1]
-        self.state = "PLAYING"
+        self.state = "NOT_FINISHED" if os.environ.get("AVO_REPAIR_ROUND", "").startswith("observation-") else "PLAYING"
 
     def grid(self):
         out = [[0 for _ in range(self.size)] for _ in range(self.size)]
@@ -647,7 +661,7 @@ process.exit(result.status ?? 1);
 `);
   fs.chmodSync(fakePython, 0o755);
 
-  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\nruns/\n__pycache__/\n');
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\nruns/\nstate/\n__pycache__/\n');
   for (const args of [
     ['init'],
     ['config', 'user.email', 'contract@example.invalid'],
@@ -1393,6 +1407,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_REPAIR_ROUND: 'partial-state' },
   });
   assert.equal(partialDiagnostic.status, 1, partialDiagnostic.stderr || partialDiagnostic.stdout);
+  const partialObservation = readRunObservation({ root, runId: recoveredId, mode: 'diagnostic' });
+  assert.equal(partialObservation.status, 'available');
+  assert.equal(fs.readFileSync(path.join(partialObservation.workspaceDir, 'g25', 'partial.txt'), 'utf8'), 'saved before failure');
   const recoveredDiagnostic = spawnSync(process.execPath, recoveryArgs, {
     cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_RESUME_RUN: '1', AVO_REPAIR_ROUND: '' },
@@ -1404,11 +1421,20 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(recoveredReport.executionMode, 'diagnostic');
   assert.equal(recoveredReport.provenance.runCapsule.task.executionIntent, 'diagnostic');
   assert.equal(recoveredReport.provenance.runCapsule.runClass, 'recovered');
+  const resumedObservation = readRunObservation({ root, runId: recoveredId, mode: 'diagnostic' });
+  assert.equal(resumedObservation.status, 'available');
+  assert.equal(resumedObservation.memoryDir, partialObservation.memoryDir);
+  assert.equal(resumedObservation.capsuleHash, partialObservation.capsuleHash);
+  const activity = fs.readFileSync(resumedObservation.activityFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(new Set(activity.map((event) => event.invocationId)).size, 2);
+  assert.ok(activity.some((event) => event.type === 'game.started' && event.gameId === 'g01' && event.resumed));
   const recoveredEvidence = readPrivateRunCapsuleEvidence({ repositoryRoot: root, report: recoveredReport });
   assert.equal(recoveredReport.provenance.runCapsule.capsuleEvidenceSha256, recoveredEvidence.sha256);
   assert.equal(evaluatePublicRunCapsule(recoveredReport.provenance.runCapsule, {
     privateCapsuleEvidence: recoveredEvidence,
   }).accepted, false);
+
+  await verifyLiveObservation(root, diagnosticEnv);
 
   const sealed = publishedReport.provenance.runCapsule;
   const experimentRuntime = {
