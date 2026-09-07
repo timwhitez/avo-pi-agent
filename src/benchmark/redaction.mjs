@@ -9,7 +9,7 @@ const SENSITIVE_NORMALIZED_KEYS = new Set([
   'baseurl', 'endpoint', 'providerurl', 'providerendpoint', 'model', 'modelid', 'modelname',
   'rawreasoning', 'reasoningcontent', 'thinkingcontent', 'chainofthought',
 ]);
-const SAFE_FINGERPRINT_KEY = /fingerprint|hash|sha|digest/i;
+const SAFE_FINGERPRINT_KEY = /fingerprint|hash|digest|sha(?:1|224|256|384|512)|(?:^|[_-])sha(?:$|[_-])/i;
 const URL = /https?:\/\/[^\s"'<>]+/gi;
 const IPV4_ENDPOINT = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/gi;
@@ -32,12 +32,11 @@ export function redact(value, {
 }
 
 export function redactText(text, { explicitSecrets = [] } = {}) {
-  let output = String(text ?? '');
+  let output = String(text ?? '').replace(AUTHORIZATION, 'authorization=<redacted>');
   for (const secret of explicitSecrets.filter((item) => typeof item === 'string' && item.length >= 4)) {
     output = output.split(secret).join('<redacted>');
   }
   return output
-    .replace(AUTHORIZATION, 'authorization=<redacted>')
     .replace(BEARER, 'Bearer <redacted>')
     .replace(KEY_LIKE, '<redacted-key>')
     .replace(URL, '<redacted-url>')
@@ -64,7 +63,7 @@ export function assertNoPrivateMaterial(value, { explicitSecrets = [] } = {}) {
 
 function visit(value, key, secrets, seen, depth, limits) {
   if (value === null || value === undefined) return value;
-  if (isSensitiveKey(key)) return '<redacted>';
+  if (isSensitiveKey(key, value)) return '<redacted>';
   if (typeof value === 'string') return redactText(value, { explicitSecrets: secrets });
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value !== 'object') return String(value);
@@ -75,14 +74,20 @@ function visit(value, key, secrets, seen, depth, limits) {
     .map((item) => visit(item, key, secrets, seen, depth + 1, limits));
   return Object.fromEntries(Object.entries(value).slice(0, limits.maxObjectEntries).map(([childKey, child]) => [
     childKey,
-    isSensitiveKey(childKey) ? '<redacted>' : visit(child, childKey, secrets, seen, depth + 1, limits),
+    isSensitiveKey(childKey, child) ? '<redacted>' : visit(child, childKey, secrets, seen, depth + 1, limits),
   ]));
 }
 
-function isSensitiveKey(key) {
+function isSensitiveKey(key, value) {
   const source = String(key || '');
-  if (!source || SAFE_FINGERPRINT_KEY.test(source) || SAFE_TOKEN_METRIC.test(source)) return false;
+  if (!source || SAFE_TOKEN_METRIC.test(source)) return false;
+  const privateField = /(?:api.?key|authorization|secret|base.?url|endpoint|model.?id|raw.?reasoning)/i.test(source);
+  if (SAFE_FINGERPRINT_KEY.test(source)) {
+    // Preserve public hashes, not private text merely put under a hash-like key.
+    return privateField && value !== null && value !== undefined
+      && !(typeof value === 'string' && /^[a-f0-9]{16,128}$/i.test(value));
+  }
   const normalized = source.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
   if (SENSITIVE_NORMALIZED_KEYS.has(normalized)) return true;
-  return /(?:apikey|clientsecret|privatekey|access(?:token|credential)|refresh(?:token|credential)|bearertoken|authorization)$/.test(normalized);
+  return privateField || /(?:apikey|clientsecret|privatekey|access(?:token|credential)|refresh(?:token|credential)|bearertoken|authorization)$/.test(normalized);
 }

@@ -21,11 +21,15 @@ test('authenticated run and event routes apply canonical privacy policy to store
   const privateFields = Object.fromEntries([
     'model', 'modelName', 'model_id', 'reasoningContent', 'thinkingContent',
     'chainOfThought', 'rawReasoning', 'password', 'cookie', 'set_cookie', 'apiKey',
+    'providerSecret', 'rawReasoningText', 'apiKeyHint', 'endpointUrl', 'modelIdValue',
+    'authorizationValue', 'rawReasoningHash',
   ].map((key) => [key, `PRIVATE_FIXTURE_${key}`]));
+  privateFields.sharedSecret = 'b'.repeat(64); // "shared" is not an explicit SHA field.
   const runtimeSecrets = Object.entries(env).filter(([key]) =>
     !['AVO_REPO_ROOT', 'AVO_MISSION_CONTROL_USER'].includes(key)).map(([, value]) => value);
   const payload = {
     ...privateFields, inputTokens: 17, output_tokens: 9, reasoningTokens: 3,
+    providerEndpointFingerprint: 'a'.repeat(64),
     inputTokenCount: 'opaque-token-shaped-text',
     note: `${runtimeSecrets.join(' ')} authorization=opaque-authorization-fixture`,
   };
@@ -67,6 +71,7 @@ test('authenticated run and event routes apply canonical privacy policy to store
       assert.equal(value.inputTokens, 17);
       assert.equal(value.output_tokens, 9);
       assert.equal(value.reasoningTokens, 3);
+      assert.equal(value.providerEndpointFingerprint, 'a'.repeat(64));
       assert.equal(value.inputTokenCount, '<redacted>');
       assert.match(JSON.stringify(value.deep), /<max-depth>/);
     }
