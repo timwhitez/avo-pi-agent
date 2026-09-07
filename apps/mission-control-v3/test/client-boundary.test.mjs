@@ -28,7 +28,7 @@ test('authenticated run and event routes apply canonical privacy policy to store
   const runtimeSecrets = Object.entries(env).filter(([key]) =>
     !['AVO_REPO_ROOT', 'AVO_MISSION_CONTROL_USER'].includes(key)).map(([, value]) => value);
   const payload = {
-    ...privateFields, inputTokens: 17, output_tokens: 9, reasoningTokens: 3,
+    ...privateFields, inputTokens: 17, output_tokens: 9, reasoningTokens: 3, tokenLatencyMs: 7,
     providerEndpointFingerprint: 'a'.repeat(64),
     inputTokenCount: 'opaque-token-shaped-text',
     note: `${runtimeSecrets.join(' ')} authorization=opaque-authorization-fixture`,
@@ -65,6 +65,8 @@ test('authenticated run and event routes apply canonical privacy policy to store
     assert.equal(snapshot.run.telemetry.totals.inputTokens, 17);
     assert.equal(snapshot.run.telemetry.totals.outputTokens, 9);
     assert.equal(snapshot.run.telemetry.totals.reasoningTokens, 3);
+    assert.equal(snapshot.run.summary.telemetry.maxima.tokenLatencyMs, 7);
+    assert.equal(snapshot.run.telemetry.maxima.tokenLatencyMs, 7);
     const stream = await getEvents(new Request(`http://localhost/api/runs/${id}/events`, { headers }), context);
     assert.equal(stream.status, 200);
     reader = stream.body.getReader();
