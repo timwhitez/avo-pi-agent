@@ -20,6 +20,7 @@ import {
 } from './mission-control-evidence.mjs';
 import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsule-evidence.mjs';
 import { controlOwnedRun } from '../../../src/local/owned-run-control.mjs';
+import { sanitizeForClient, sanitizeClientText as safeText } from './client-sanitize.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -220,7 +221,7 @@ export function getRun(id) {
   });
   snapshot.evidenceErrors = deepSanitize([...memory.errors, ...findings.errors]);
   snapshot.provider = providerStatus();
-  return snapshot;
+  return deepSanitize(snapshot);
 }
 
 export function getEventsSince(id, cursor = 0, limit = 500) {
@@ -228,7 +229,8 @@ export function getEventsSince(id, cursor = 0, limit = 500) {
   const numericCursor = Math.max(0, Number(cursor) || 0);
   return run.events
     .filter((event) => event.cursor > numericCursor)
-    .slice(0, Math.min(2000, Math.max(1, Number(limit) || 500)));
+    .slice(0, Math.min(2000, Math.max(1, Number(limit) || 500)))
+    .map(sanitizeEvent);
 }
 
 export function compareRuns(baselineId, candidateId) {
@@ -544,32 +546,8 @@ function constantEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function safeText(value) {
-  return String(value ?? '')
-    .replace(/https?:\/\/[^\s"']+/gi, '<redacted-url>')
-    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, '<redacted-endpoint>')
-    .replace(/authorization\s*[:=]\s*[^\s,;]+/gi, 'authorization=<redacted>')
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '<redacted-secret>')
-    .slice(0, 1000);
-}
-
 function deepSanitize(value) {
-  if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return safeText(value);
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.slice(0, 5000).map((item) => deepSanitize(item));
-  if (typeof value === 'object') {
-    const out = {};
-    for (const [childKey, childValue] of Object.entries(value)) {
-      if (/(?:api.?key|authorization|token|secret|base.?url|endpoint|model.?id|raw.?reasoning)/i.test(childKey)) {
-        out[childKey] = '<redacted>';
-      } else {
-        out[childKey] = deepSanitize(childValue);
-      }
-    }
-    return out;
-  }
-  return safeText(value);
+  return sanitizeForClient(value, { maxStringChars: 1000 });
 }
 
 function walkBounded(root, limit) {

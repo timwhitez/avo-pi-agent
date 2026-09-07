@@ -16,12 +16,19 @@ const REDACTED = '<redacted>';
  */
 export function sanitizeForClient(value, options = {}) {
   const limits = normalizeLimits(options);
-  const redacted = redact(value, { explicitSecrets: options.explicitSecrets || [] });
+  const redacted = redact(value, { ...limits, explicitSecrets: clientSecrets(options.explicitSecrets || []) });
   return bound(redacted, '', 0, limits);
 }
 
 export function sanitizeClientText(value, { maxChars = 1000, explicitSecrets = [] } = {}) {
-  return redactText(String(value ?? ''), { explicitSecrets }).slice(0, maxChars);
+  return redactText(String(value ?? ''), { explicitSecrets: clientSecrets(explicitSecrets) }).slice(0, maxChars);
+}
+
+function clientSecrets(explicitSecrets = []) {
+  return [...explicitSecrets, ...[
+    'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'ARC_API_KEY',
+    'AVO_MISSION_CONTROL_ACCESS_TOKEN', 'AVO_STATUS_TOKEN',
+  ].map((name) => process.env[name])].filter((value) => typeof value === 'string');
 }
 
 function bound(value, key, depth, limits) {
