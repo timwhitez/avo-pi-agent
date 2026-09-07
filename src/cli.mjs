@@ -8,6 +8,7 @@ import { loadResumedRecords, loadSessionScorecards, resolveResumeDirectory, save
 import { runWithConcurrency } from './benchmark/game-pool.mjs';
 import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
+import { writeJsonAtomic } from './benchmark/report-safe-files.mjs';
 import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
 import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
@@ -597,13 +598,12 @@ function requiredCapsuleFile(value) {
 }
 
 function writeReport(report) {
-  fs.mkdirSync('runs', { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const identity = report.runId ? safeFileSegment(report.runId) : stamp;
   const file = path.join('runs', `${identity}-${report.kind}.json`);
-  const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, file);
+  // The CLI source report is replaceable on resume; published capsules and
+  // canonical report artifacts retain their separate exclusive-write contract.
+  writeJsonAtomic(file, report, { root: path.resolve('runs'), exclusive: false });
   return file;
 }
 
