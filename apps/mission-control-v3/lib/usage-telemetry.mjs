@@ -50,18 +50,21 @@ export function loadUsageTelemetry({ repoRoot, runId, limits = {}, observation =
   const maxima = {};
   const observed = observation ?? readRunObservation({ root, runId: id });
   let latestProgress = null;
+  let usageTruncated = false;
   const sequences = new Map();
   const ingestion = scanRunJsonl({ repoRoot: root, runId: id,
     files: observed.status === 'available' ? [observed.activityFile] : [], limits: { ...limits, ...bounded },
     onRecord(event) {
       const activity = projectRunActivity(event, { runId: id, capsuleHash: observed.capsuleHash });
-      if (!activity?.invocationId || activity.sequence <= (sequences.get(activity.invocationId) ?? 0)) {
+      if (!activity?.invocationId || !observed.gameIds.includes(activity.gameId)
+          || activity.total !== observed.gameIds.length
+          || activity.sequence <= (sequences.get(activity.invocationId) ?? 0)) {
         throw new Error('activity binding or sequence is invalid');
       }
       sequences.set(activity.invocationId, activity.sequence);
       if (activity.type !== 'usage') { latestProgress = activity; return; }
       const metrics = activity.metrics;
-      if (samples.length >= bounded.maxSamples) return false;
+      if (samples.length >= bounded.maxSamples) { usageTruncated = true; return; }
       const sample = sanitizeForClient({
         at: activity.at ?? null, sequence: activity.sequence, gameId: activity.gameId,
         invocationId: activity.invocationId, type: activity.type,
@@ -82,7 +85,9 @@ export function loadUsageTelemetry({ repoRoot, runId, limits = {}, observation =
     source: 'capsule-bound-reported-sdk-usage',
     capsuleHash: observed.capsuleHash ?? null,
     activityStatus: ingestion.status,
-    status: samples.length ? ingestion.status : 'unavailable',
+    status: samples.length ? (usageTruncated ? 'partial' : ingestion.status) : 'unavailable',
+    usageTruncated,
+    truncated: ingestion.truncated || usageTruncated,
     latestProgress,
     errors: observed.status === 'available' ? ingestion.errors : observed.errors,
     errorCount: observed.status === 'available' ? ingestion.errorCount : observed.errors.length,

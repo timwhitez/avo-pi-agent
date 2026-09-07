@@ -159,6 +159,7 @@ function telemetrySummary(value) {
   return {
     status: value.status,
     activityStatus: value.activityStatus,
+    usageTruncated: value.usageTruncated,
     totalsScope: value.totalsScope,
     errorCount: value.errorCount,
     source: value.source,

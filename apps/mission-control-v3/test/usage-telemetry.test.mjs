@@ -101,3 +101,30 @@ test('rejects traversal-shaped run IDs and skips symlinked or oversized files', 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('usage sample cap does not stop later progress and recorded activity stays in the sealed game set', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-usage-progress-'));
+  try {
+    const observation = observationFixture(root, 'run-1');
+    writeActivityFixture(observation, [
+      { metrics: { inputTokens: 3 } },
+      { metrics: { inputTokens: 4 } },
+      { type: 'game.progress', actions: 5, levelsCompleted: 1, state: 'NOT_FINISHED' },
+      { metrics: { inputTokens: 6 } },
+      { type: 'game.finished', actions: 9, levelsCompleted: 2, state: 'WIN' },
+      { type: 'game.finished', gameId: 'other', actions: 99, levelsCompleted: 99, state: 'WIN' },
+      { type: 'game.finished', total: 2, actions: 98, levelsCompleted: 98, state: 'WIN' },
+    ]);
+    const result = loadUsageTelemetry({ repoRoot: root, runId: 'run-1', limits: { maxSamples: 1 } });
+    assert.equal(result.sampleCount, 1);
+    assert.equal(result.totals.inputTokens, 3);
+    assert.equal(result.usageTruncated, true);
+    assert.equal(result.truncated, true);
+    assert.equal(result.status, 'partial');
+    assert.equal(result.latestProgress.type, 'game.finished');
+    assert.equal(result.latestProgress.actions, 9);
+    assert.equal(result.latestProgress.sequence, 5);
+    assert.equal(result.errorCount, 2);
+    assert.equal(result.linesScanned, 7);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

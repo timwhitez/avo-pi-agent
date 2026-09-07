@@ -44,7 +44,11 @@ test('authenticated run and event routes apply canonical privacy policy to store
   const observation = observationFixture(root, id, { mode: 'diagnostic' });
   fs.writeFileSync(path.join(observation.memoryDir, 'g01.json'), JSON.stringify({ gameId: 'g01', ...payload }));
   fs.writeFileSync(observation.sources[0].file, `${JSON.stringify({ gameId: 'g01', sequence: 1, type: 'observation', payload })}\n`);
-  writeActivityFixture(observation, [{ metrics: { inputTokens: 17, outputTokens: 9, reasoningTokens: 3, tokenLatencyMs: 7 } }]);
+  writeActivityFixture(observation, [
+    { metrics: { inputTokens: 17, outputTokens: 9, reasoningTokens: 3, tokenLatencyMs: 7 } },
+    ...Array.from({ length: 5000 }, () => ({ metrics: { inputTokens: 0 } })),
+    { type: 'game.finished', actions: 19, levelsCompleted: 2, totalLevels: 2, state: 'WIN' },
+  ]);
   const run = { id, state: 'completed', mode: 'diagnostic', executionMode: 'diagnostic',
     games: ['g01'], createdAt: new Date().toISOString(), memoryDir,
     cursor: 1, summary: payload, events: [{ cursor: 1, runId: id, type: 'fixture', payload }] };
@@ -65,6 +69,12 @@ test('authenticated run and event routes apply canonical privacy policy to store
     const response = await getRun(new Request(`http://localhost/api/runs/${id}`, { headers }), context);
     assert.equal(response.status, 200);
     const snapshot = await response.json();
+    assert.equal(snapshot.run.telemetry.sampleCount, 5000);
+    assert.equal(snapshot.run.telemetry.usageTruncated, true);
+    assert.equal(snapshot.run.telemetry.activityStatus, 'complete');
+    assert.equal(snapshot.run.summary.telemetry.usageTruncated, true);
+    assert.equal(snapshot.run.progress.actions, 19);
+    assert.equal(snapshot.run.progress.levelsCompleted, 2);
     assert.equal(snapshot.run.summary.telemetry.totals.inputTokens, 17);
     assert.equal(snapshot.run.telemetry.totals.inputTokens, 17);
     assert.equal(snapshot.run.telemetry.totals.outputTokens, 9);
