@@ -60,7 +60,9 @@ export class StallSupervisor {
       this.resolveActiveEpisode(tail.at(-1), 'pattern-changed');
       this.episodeSequence += 1;
       this.activeEpisode = {
-        id: `stall-episode-${String(this.episodeSequence).padStart(4, '0')}`,
+        // Durable evidence refs already bind game/attempt/episode.
+        // ponytail: unanchored legacy calls have instance-local IDs; supply durable refs for persistence.
+        id: `stall-episode-${String(this.episodeSequence).padStart(4, '0')}${evidenceRefs[0] ? `-${evidenceRefs[0]}` : ''}`,
         key,
         reason,
         firstEvidenceRef: evidenceRefs[0] || null,
@@ -163,7 +165,7 @@ export class StallSupervisor {
 
     this.interventionSequence += 1;
     const intervention = {
-      id: `supervisor-${String(this.interventionSequence).padStart(6, '0')}`,
+      id: `supervisor-${String(this.interventionSequence).padStart(6, '0')}${episode.firstEvidenceRef ? `-${episode.firstEvidenceRef}` : ''}`,
       episodeId: episode.id,
       stalled: true,
       repeated: false,

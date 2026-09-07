@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { StallSupervisor } from '../src/core/supervisor.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
+import { DurableMemory } from '../src/core/durable-memory.mjs';
 
 for (const period of [3, 4]) test(`production period-${period} cycle injects and persists only bounded guidance`, async () => {
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-supervisor-cycle-'));
@@ -33,6 +34,50 @@ for (const period of [3, 4]) test(`production period-${period} cycle injects and
     const persisted = JSON.parse(fs.readFileSync(agent.memory.file, 'utf8'));
     assert.equal(persisted.supervisorInterventions.length, 3);
     assert.equal(persisted.failedHypotheses.length, 3);
+    const restarted = new AvoArcAgent({ gameId: 'cycle-game', environment, loop,
+      config: { memoryDir, maxActions: 40, stallWindow: 8, policyProfile: 'current-v1', workspaceMode: 'disabled' } });
+    const second = await restarted.run();
+    assert.equal(injected.length, 6);
+    assert.notEqual(restarted.attemptId, agent.attemptId);
+    assert.equal(second.mechanismMetrics.supervisorInterventions, 3);
+    const records = restarted.memory.data.supervisorInterventions;
+    assert.equal(records.length, 6);
+    assert.equal(new Set(records.map((record) => record.id)).size, 6);
+    assert.equal(new Set(records.map((record) => record.episodeId)).size, 2);
+    assert.deepEqual(records.slice(0, 3), persisted.supervisorInterventions);
+    for (const record of restarted.supervisor.history()) {
+      const anchor = restarted.evidenceLedger.find((event) => event.id === record.firstEvidenceRef);
+      assert.equal(anchor.attemptId, restarted.attemptId);
+      assert.ok(record.id.includes(anchor.id));
+      assert.ok(record.episodeId.includes(anchor.id));
+    }
+    const beforeDuplicate = fs.readFileSync(restarted.memory.file);
+    restarted.memory.recordSupervisor(restarted.supervisor.history()[0]);
+    assert.deepEqual(fs.readFileSync(restarted.memory.file), beforeDuplicate);
+  } finally { fs.rmSync(memoryDir, { recursive: true, force: true }); }
+});
+
+test('evidence-scoped supervisor identities retain bounded history without losing distinct records', () => {
+  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-supervisor-retention-'));
+  try {
+    const memory = new DurableMemory(memoryDir, 'retention').load();
+    const supervisor = new StallSupervisor(1, { maxEvents: 2, maxInterventions: 3, maxEscalations: 0 });
+    const emitted = [];
+    for (let index = 0; index < 120; index++) {
+      supervisor.observe({ id: `evidence-${index}`, gameId: 'retention', attemptId: 'attempt-1',
+        episodeId: `episode-${index}`, action: 'ACTION1', frameHash: 'same', levelsCompleted: 0 });
+      const record = supervisor.status();
+      assert.equal(record.stalled, true);
+      emitted.push(record);
+      memory.recordSupervisor(record);
+    }
+    assert.equal(supervisor.history(100).length, 3);
+    assert.equal(supervisor.interventionSequence, 120);
+    const reloaded = new DurableMemory(memoryDir, 'retention').load();
+    assert.deepEqual(reloaded.data.supervisorInterventions.map((record) => record.id),
+      emitted.slice(-100).map((record) => record.id));
+    reloaded.recordSupervisor(emitted.at(-1));
+    assert.equal(reloaded.data.supervisorInterventions.length, 100);
   } finally { fs.rmSync(memoryDir, { recursive: true, force: true }); }
 });
 

@@ -229,6 +229,11 @@ objective progress or reset releases the prior stall. An uninterrupted cycle
 therefore receives one initial intervention and only the configured escalations,
 not new guidance on every sliding-window phase.
 
+Persisted supervisor and stall IDs include their first durable evidence reference,
+which binds the originating game/attempt/episode. Restarted local counters therefore
+cannot overwrite/deduplicate another attempt's history. Duplicate delivery of the
+same record remains idempotent and existing history limits remain unchanged.
+
 ### Hypothesis journal
 
 `hypothesis_propose` can record structured predictions before an experiment;
