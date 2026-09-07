@@ -39,7 +39,8 @@ function evaluation(outcome = 'inconclusive', evidence = []) {
   };
 }
 
-test('expires stale proposals and protects evidence for both conclusive outcomes', () => {
+test('expires stale proposals and protects evidence for both conclusive outcomes', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_700_000_000_000 });
   const dir = root();
   try {
     const memory = new DurableMemory(dir, 'game-a', { pendingMaxAgeMs: 10, maxPending: 4 }).load();
@@ -47,12 +48,14 @@ test('expires stale proposals and protects evidence for both conclusive outcomes
       gameId: 'game-a', hypothesis: hypothesis('h1'),
       baseline: { actionIndex: 0, evidenceRef: 'evidence-baseline' },
     });
-    memory.journal.proposals[0] = Object.freeze({ ...proposal, createdAt: new Date(0).toISOString() });
-    memory.syncHypothesisJournal();
-    memory.save();
+    t.mock.timers.tick(10);
+    const atBoundary = new DurableMemory(dir, 'game-a', { pendingMaxAgeMs: 10, maxPending: 4 }).load();
+    assert.equal(atBoundary.journal.pendingProposals()[0].id, proposal.id);
+    t.mock.timers.tick(1);
     const reloaded = new DurableMemory(dir, 'game-a', { pendingMaxAgeMs: 10, maxPending: 4 }).load();
     assert.equal(reloaded.journal.pendingProposals().length, 0);
     assert.equal(reloaded.journal.evaluations.at(-1).outcome, 'expired');
+    assert.equal(reloaded.journal.evaluations.at(-1).evaluatedAt, new Date().toISOString());
 
     for (const [index, outcome] of ['confirmed', 'contradicted'].entries()) {
       const next = reloaded.proposeHypothesis({
