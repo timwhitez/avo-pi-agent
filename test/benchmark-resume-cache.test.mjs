@@ -12,7 +12,7 @@ import {
   saveResumedRecord,
   saveSessionScorecard,
 } from '../src/benchmark/resume-cache.mjs';
-import { canonicalJson } from '../src/benchmark/run-capsule.mjs';
+import { canonicalJson, inspectRunState } from '../src/benchmark/run-capsule.mjs';
 import { hashExecutionId, normalizeScorecardSnapshot } from '../src/benchmark/scorecard-evidence.mjs';
 import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
 
@@ -273,4 +273,45 @@ test('checkpoint authority rejects injected or rolled-back durable state', () =>
     () => loadResumedRecords(dir, { capsuleHash, stateBinding: changed }),
     /does not bind the current state/,
   );
+});
+
+test('partial session finalization commits real state without checkpointing failed games', async (t) => {
+  for (const completedFirst of [true, false, null]) {
+    await t.test(`completion ordering ${completedFirst}`, () => {
+      const root = sandbox();
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const dir = resolveResumeDirectory('runs/private/partial/resume', { root });
+      const memoryDir = path.join(root, 'memory');
+      const workspaceDir = path.join(root, 'workspace');
+      fs.mkdirSync(memoryDir);
+      fs.mkdirSync(workspaceDir);
+      const inspect = () => inspectRunState({ memoryDir, workspaceDir });
+      const initialState = inspect();
+      const opts = () => ({ capsuleHash, stateBinding: inspect(), initialState });
+      assert.equal(loadResumedRecords(dir, opts()).size, 0);
+      const complete = () => saveResumedRecord(dir, 'ls20', record('ls20'), opts());
+      if (completedFirst === true) complete();
+      // A failed attempt still records its observed evidence and scratch work.
+      fs.writeFileSync(path.join(memoryDir, 'failed-attempt.json'), '{"actions":41}');
+      fs.writeFileSync(path.join(workspaceDir, 'notes.txt'), 'observed before provider failure');
+      if (completedFirst === false) complete();
+      if (completedFirst !== false) {
+        assert.throws(() => loadResumedRecords(dir, opts()), /not bound|does not bind/);
+      }
+      const records = [record('vc33', { error: 'synthetic provider unavailable' })];
+      const games = ['vc33'];
+      if (completedFirst !== null) { records.unshift(record('ls20')); games.unshift('ls20'); }
+      saveSessionScorecard(dir, { evidence: scorecardEvidence(games), records, ...opts() });
+      assert.equal(loadSessionScorecards(dir, opts()).length, 1);
+      const resumed = loadResumedRecords(dir, opts());
+      assert.deepEqual([...resumed.keys()], completedFirst === null ? [] : ['ls20']);
+      assert.equal(resumed.has('vc33'), false, 'failed game must be replayed');
+      const committed = opts();
+      fs.writeFileSync(path.join(workspaceDir, 'uncommitted.txt'), 'later mutation');
+      assert.throws(() => loadResumedRecords(dir, opts()), /does not bind/);
+      assert.throws(() => loadSessionScorecards(dir, opts()), /does not bind/);
+      assert.throws(() => loadResumedRecords(dir, { ...committed, capsuleHash: 'b'.repeat(64) }),
+        /different run capsule|does not bind/);
+    });
+  }
 });

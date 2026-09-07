@@ -11,7 +11,6 @@ import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
 import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
-  assertRunStateMatchesInitial,
   inspectRunState,
   readRunCapsule,
   verifyRunCapsuleExecution,
@@ -159,10 +158,8 @@ async function runPublic(args) {
       allowedCapsuleHashes: sourceCapsuleHashes,
       stateBinding,
       requireStateMatch: runClass !== 'diagnostic-migrated',
+      initialState: runCapsule.definition.initialState,
     });
-    if (runClass === 'recovered' && resumedRecords.size === 0) {
-      assertRunStateMatchesInitial(stateBinding, runCapsule.definition.initialState);
-    }
   }
   if (workspaceAttestation.effective.container?.imageId) {
     config.workspaceContainerImage = workspaceAttestation.effective.container.imageId;

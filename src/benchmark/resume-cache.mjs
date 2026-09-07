@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
-import { canonicalJson, validateRunState } from './run-capsule.mjs';
+import { assertRunStateMatchesInitial, canonicalJson, validateRunState } from './run-capsule.mjs';
 import { normalizeGameRecord, validateProductionLoops } from './report-records.mjs';
 import { writeJsonAtomic } from './report-safe-files.mjs';
 import { evaluateScorecardCoverage, validateScorecardEvidence } from './scorecard-evidence.mjs';
@@ -47,6 +47,7 @@ export function loadResumedRecords(resumeDir, {
   allowedCapsuleHashes = [],
   stateBinding,
   requireStateMatch = true,
+  initialState,
 } = {}) {
   if (!resumeDir) return new Map();
   validateRunState(stateBinding);
@@ -59,8 +60,12 @@ export function loadResumedRecords(resumeDir, {
     }
     records.set(record.gameId, value.record);
   }
-  if (wrappers.length > 0 && requireStateMatch) {
-    verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers);
+  if (requireStateMatch) {
+    if (wrappers.length > 0 || fs.existsSync(path.join(resumeDir, STATE_FILE))) {
+      verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers);
+    } else if (initialState) {
+      assertRunStateMatchesInitial(stateBinding, initialState);
+    }
   }
   return records;
 }
@@ -143,6 +148,13 @@ export function saveSessionScorecard(resumeDir, {
       evidence: normalizedEvidence,
     }],
   }, { root: resumeDir });
+  // Failed games change durable state without becoming completed checkpoints.
+  // Commit that final state only after the session evidence has been persisted.
+  writeStateAuthority(resumeDir, {
+    capsuleHash: boundCapsuleHash,
+    allowedCapsuleHashes,
+    stateBinding,
+  });
   return file;
 }
 
@@ -156,7 +168,7 @@ export function loadSessionScorecards(resumeDir, {
   validateRunState(stateBinding);
   const acceptedCapsules = acceptedCapsuleSet(capsuleHash, allowedCapsuleHashes);
   const wrappers = readRecordWrappers(resumeDir, acceptedCapsules);
-  if (wrappers.length > 0 && requireStateMatch) {
+  if ((wrappers.length > 0 || fs.existsSync(path.join(resumeDir, STATE_FILE))) && requireStateMatch) {
     verifyStateAuthority(resumeDir, acceptedCapsules, stateBinding, wrappers);
   }
   const journal = readScorecardJournal(resumeDir, acceptedCapsules, { allowMissing: true });

@@ -4,12 +4,14 @@
 
 Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Issues (#259–#274), no open PRs before this repair. All 16 reports were read; none is closed as duplicate or unnecessary. The historical conclusions below remain historical, not the live completion ledger.
 
+After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; new validity Issue #276 opened from retained r12 evidence. Live inventory is again 16 open Issues, 0 open PRs. #276 is the next repair, before any new benchmark.
+
 | Issue | Scope and dependency | Current disposition |
 | --- | --- | --- |
 | #259 | Diagnostic capsule/launch contract; coordinate with #261 and #267 | Open; integration validation pending |
 | #260 | Rotation-invariant supervisor cycle identity | Open; source defect confirmed; independent of #269 counter |
 | #261 | Nested process pause/abort ownership | Open; lifecycle repair required before new benchmark |
-| #262 | Complete multi-tool transcript turns | Implemented in PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent review pending; not closed |
+| #262 | Complete multi-tool transcript turns | Closed by PR #275; retain whole call/result groups. Local Node 466/466, transcript 13/13, secret scan, audit (0 vulnerabilities), offline 25/25 games and 75/75 levels (816 actions, 0 post-terminal) passed. Independent APPROVE at `e80e2e0ed842b955da4a1e66a3cbd3adf4b0554e`, including 2,070 additional pinned-SDK conversion cases |
 | #263 | Hypothesis baseline ordering across attempts | Open; causal-evidence repair required |
 | #264 | Canonical browser redaction | Open; repair before exposing new #267 telemetry |
 | #265 | Confined streaming log acquisition | Open; evidence producer repair required |
@@ -22,10 +24,11 @@ Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Iss
 | #272 | Complete bounded workspace Python envelope | Open; source defect confirmed; capability prerequisite |
 | #273 | Sequence-aware CLI progress/failure counts | Open; producer prerequisite for #267 |
 | #274 | Bounded ARC JSONL ingestion | Open; preserve lifecycle ownership in #261 |
+| #276 | Handled failure leaves final state authority stale | Implemented in PR #277; session evidence persistence commits final state while failed games remain replayable. Local Node 470/470 (including real CLI partial-state recovery with synthetic external adapters), offline 25/25 games and 75/75 levels, secret scan and audit 0 vulnerabilities passed. Separate from #271; independent review pending |
 
 Order: evidence/provenance and process lifecycle first, then context/compute/action and UI integration, then supervisor/hypothesis research telemetry. #262 is being repaired while this inventory is established because its false result history directly affects interpretation of r12. Each independent defect keeps its own PR unless actual shared implementation requires a documented combination.
 
-The retained r12 tuning process is terminal: its previous execution handle no longer exists and its stdout contains the final three-game summary followed by `resume state authority does not bind the current state and checkpoint set`. It reports 0/3 whole-game wins, 1/20 levels, 575 actions and zero post-terminal gameplay actions. This is an invalid/incomplete attribution run, not model-capability evidence. The final state/checkpoint mismatch still requires diagnosis; it is not presumed fixed by any Issue above. No new public run or held-out evaluation may start until the open repairs and this validity failure are resolved and independently reviewed.
+The retained r12 tuning process is terminal: its previous execution handle no longer exists; stdout contains the final three-game summary and stderr contains `resume state authority does not bind the current state and checkpoint set`. It reports 0/3 whole-game wins, 1/20 levels, 575 actions and zero post-terminal gameplay actions. This is an invalid/incomplete attribution run, not model-capability evidence. #276 records the diagnosed mismatch: failed later attempts mutate state after the last completed checkpoint, but final scorecard loading checks the older state authority. No new public run or held-out evaluation may start until the open repairs and this validity failure are resolved and independently reviewed.
 
 **Audit date:** 2026-08-30
 **Repository state reviewed:** `main` after PR #165
