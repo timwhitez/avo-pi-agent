@@ -29,7 +29,7 @@ test('real native container owner pause, admission, cancellation and deadline', 
   assert.equal(inspect.status, 0, inspect.stderr);
   const image = inspect.stdout.trim();
   assert.match(image, /^sha256:[a-f0-9]{64}$/);
-  for (const mode of ['abort', 'owner-close', 'paused-timeout', 'paused-admission', 'pause-during-create', 'cancel-during-create']) {
+  for (const mode of ['abort', 'owner-close', 'paused-timeout', 'paused-admission', 'pause-during-create', 'cancel-during-create', 'cancel-pause-overlap']) {
     await t.test(mode, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-container-owner-'));
       const owner = createWorkspaceContainerOwner();
@@ -38,7 +38,8 @@ test('real native container owner pause, admission, cancellation and deadline', 
       const unrelatedHeartbeat = path.join(root, 'unrelated', 'fixture', 'heartbeat.txt');
       const runtime = path.join(root, 'runtime');
       const creating = path.join(root, 'creating');
-      if (mode.endsWith('during-create')) {
+      const delayedRuntime = mode.endsWith('during-create') || mode === 'cancel-pause-overlap';
+      if (delayedRuntime) {
         // Delay only the real Docker create client to make admission ordering
         // deterministic; every container operation still reaches local Docker.
         fs.writeFileSync(runtime, `#!/usr/bin/env node
@@ -46,10 +47,10 @@ const {spawn} = require('node:child_process');
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 const launch = () => { const child = spawn('docker', args, {stdio:'inherit'}); child.on('exit', code => process.exit(code ?? 1)); };
-if(args[0] === 'create') { fs.writeFileSync(${JSON.stringify(creating)}, 'accepted'); setTimeout(launch, 300); } else launch();
+if(args[0] === ${JSON.stringify(mode === 'cancel-pause-overlap' ? 'rm' : 'create')}) { fs.writeFileSync(${JSON.stringify(creating)}, 'accepted'); setTimeout(launch, 300); } else launch();
 `, { mode: 0o700 });
       }
-      const workspace = new WorkspaceSandbox({ root, gameId: mode, mode: 'isolated-python', containerRuntime: mode.endsWith('during-create') ? runtime : 'docker', containerImage: image, timeoutMs: mode === 'paused-timeout' ? 3000 : 15000 });
+      const workspace = new WorkspaceSandbox({ root, gameId: mode, mode: 'isolated-python', containerRuntime: delayedRuntime ? runtime : 'docker', containerImage: image, timeoutMs: mode === 'paused-timeout' ? 3000 : 15000 });
       const heartbeat = path.join(workspace.root, 'heartbeat.txt');
       const signal = new AbortController();
       let run;
@@ -81,6 +82,16 @@ if(args[0] === 'create') { fs.writeFileSync(${JSON.stringify(creating)}, 'accept
           await owner.resume();
         }
         await waitFor(() => fs.existsSync(heartbeat), 'container did not start heartbeat');
+        if (mode === 'cancel-pause-overlap') {
+          signal.abort();
+          await waitFor(() => fs.existsSync(creating), 'removal was not dispatched');
+          await owner.pause();
+          const stopped = fs.readFileSync(heartbeat, 'utf8');
+          await delay(150);
+          assert.equal(fs.readFileSync(heartbeat, 'utf8'), stopped, 'pause must await pending daemon removal');
+          assert.ok((await run).error);
+          return;
+        }
         await owner.pause();
         const paused = fs.readFileSync(heartbeat, 'utf8');
         const unrelatedBefore = unrelatedRun ? fs.readFileSync(unrelatedHeartbeat, 'utf8') : null;

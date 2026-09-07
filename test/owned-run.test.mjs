@@ -47,12 +47,19 @@ for line in sys.stdin:
       fs.writeFileSync(worker, `
 import { ArcBridgeClient } from ${moduleUrl('src/arc/bridge-client.mjs')};
 import { managedProcessGroup } from ${moduleUrl('src/local/process-group.mjs')};
+import fs from 'node:fs';
 const bridge = new ArcBridgeClient({ python: ${JSON.stringify(process.env.ARC_PYTHON || 'python3')}, script: ${JSON.stringify(bridgeFile)}, cwd: ${JSON.stringify(root)} });
 await bridge.ensureProcess();
 await bridge.request({ cmd: 'observe' });
 if (${JSON.stringify(termination)}.startsWith('SIGKILL')) process.on('SIGTERM', () => {});
 console.log(JSON.stringify({ worker: process.pid, bridge: bridge.child.pid, owner: managedProcessGroup() }));
-if (${JSON.stringify(termination)} === 'normal') setTimeout(async () => { await bridge.close(); }, 800);
+if (${JSON.stringify(termination)} === 'normal') {
+  const finish = setInterval(async () => {
+    if (!fs.existsSync(${JSON.stringify(path.join(root, 'finish'))})) return;
+    clearInterval(finish);
+    await bridge.close();
+  }, 10);
+}
 else setInterval(() => {}, 1000);
 `);
       const wrapper = path.join(root, 'wrapper.mjs');
@@ -100,9 +107,10 @@ try {
           await delay(100);
           assert.equal(fs.readFileSync(heartbeat, 'utf8'), paused);
           signalProcessTree({ pid: groupId }, 'SIGCONT');
-          await delay(60);
+          for (let i = 0; i < 100 && fs.readFileSync(heartbeat, 'utf8') === paused; i += 1) await delay(10);
           assert.notEqual(fs.readFileSync(heartbeat, 'utf8'), paused);
-          if (termination === 'abort') signalProcessTree({ pid: groupId }, 'SIGTERM');
+          if (termination === 'normal') fs.writeFileSync(path.join(root, 'finish'), 'finish');
+          else if (termination === 'abort') signalProcessTree({ pid: groupId }, 'SIGTERM');
           else if (termination !== 'normal') child.kill(termination.startsWith('SIGKILL') ? 'SIGKILL' : termination);
           if (termination.startsWith('SIGKILL')) {
             await exited;

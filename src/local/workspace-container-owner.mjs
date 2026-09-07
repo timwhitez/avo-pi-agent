@@ -63,16 +63,26 @@ export function createWorkspaceContainerOwner({ id = crypto.randomUUID(), direct
       };
       job.pause = async () => {
         await job.created?.catch(() => {});
-        if (!job.child || job.cancelled) return;
+        if (job.cancelled) { await remove(); return; }
+        if (!job.child || job.removedRecorded) return;
         // start --attach may still be awaiting daemon acknowledgement. It must
         // reach running or exit before a successful pause can be reported.
-        while (job.child.exitCode === null && job.child.signalCode === null) {
-          const state = await command(['inspect', '--format', '{{.State.Status}}', job.id]);
+        for (;;) {
+          if (job.cancelled || job.removedRecorded) { await remove(); return; }
+          let state;
+          try { state = await command(['inspect', '--format', '{{.State.Status}}', job.id]); }
+          catch (error) {
+            // Removal may have completed while inspect was dispatched. It is
+            // still necessary to confirm absence, not trust client exit.
+            await remove();
+            return;
+          }
           if (state.trim() === 'running') {
             await command(['pause', job.id]);
             return;
           }
           if (['paused', 'exited', 'dead'].includes(state.trim())) return;
+          if (job.child.exitCode !== null || job.child.signalCode !== null) { await remove(); return; }
           await delay(20);
         }
       };
