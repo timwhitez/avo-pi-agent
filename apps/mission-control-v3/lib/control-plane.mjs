@@ -158,6 +158,9 @@ function normalizeSubject(value) {
 
 function telemetrySummary(value) {
   return {
+    status: value.status,
+    totalsScope: value.totalsScope,
+    errorCount: value.errorCount,
     source: value.source,
     filesScanned: value.filesScanned,
     bytesScanned: value.bytesScanned,

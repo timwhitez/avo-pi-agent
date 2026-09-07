@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { managedProcessGroup } from '../local/process-group.mjs';
-import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
+import { acquireAuthorityDirectory } from '../local/authority-directory.mjs';
 
 const DEFAULT_TAIL_CHARS = 64 * 1024;
 
@@ -126,27 +126,13 @@ export async function runProcess(command, args, {
 }
 
 function createSink(file, { root, append = false }) {
-  if (process.platform !== 'linux' || !fs.constants.O_NOFOLLOW || !fs.constants.O_DIRECTORY) {
-    throw new Error('confined benchmark log sinks require Linux no-follow directory descriptors');
-  }
   const target = path.resolve(file);
   const parent = path.dirname(target);
-  root = path.resolve(root);
-  const rootIdentity = fs.lstatSync(root, { bigint: true });
-  ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
-  const parentIdentity = fs.lstatSync(parent, { bigint: true });
-  const directoryFd = fs.openSync(parent, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  const { fd: directoryFd, assertIdentity: assertDirectoryIdentity } = acquireAuthorityDirectory(parent, {
+    root, create: true, purpose: 'benchmark log',
+  });
   let fd;
   try {
-    const directory = fs.fstatSync(directoryFd, { bigint: true });
-    const assertDirectoryIdentity = () => {
-      ensureAuthorityDirectory(parent, { root, purpose: 'benchmark log' });
-      if (!sameInode(rootIdentity, fs.lstatSync(root, { bigint: true }))
-          || !sameInode(parentIdentity, directory)
-          || !sameInode(directory, fs.lstatSync(parent, { bigint: true }))) {
-        throw new Error('benchmark log directory changed during acquisition');
-      }
-    };
     // Establish descriptor authority before any writable basename acquisition.
     assertDirectoryIdentity();
     // Resolve the basename through the held directory, not replaceable parents.
@@ -175,8 +161,8 @@ function createSink(file, { root, append = false }) {
     fd = undefined;
     return stream;
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-    fs.closeSync(directoryFd);
+    try { if (fd !== undefined) fs.closeSync(fd); }
+    finally { fs.closeSync(directoryFd); }
   }
 }
 

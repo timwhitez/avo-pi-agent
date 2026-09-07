@@ -126,7 +126,7 @@ test('parent-directory symlinks cannot escape the evidence root', () => {
     fs.symlinkSync(outside, path.join(root, 'linked'));
     assert.throws(
       () => readJsonFileEvidence(path.join(root, 'linked', 'value.json'), { root }),
-      /parent must be a regular non-symlink directory/,
+      /rejects non-directory or symlink component/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

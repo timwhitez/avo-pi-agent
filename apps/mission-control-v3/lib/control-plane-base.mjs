@@ -21,6 +21,7 @@ import {
 import { readPrivateRunCapsuleEvidence } from '../../../src/benchmark/run-capsule-evidence.mjs';
 import { controlOwnedRun } from '../../../src/local/owned-run-control.mjs';
 import { sanitizeForClient, sanitizeClientText as safeText } from './client-sanitize.mjs';
+import { scanRunJsonl } from './run-jsonl.mjs';
 
 const REPO_ROOT = path.resolve(process.env.AVO_REPO_ROOT || path.join(process.cwd(), '..', '..'));
 const RUN_LIMIT = 50;
@@ -477,21 +478,20 @@ function summarizeVerifiedReport(report, mode) {
 }
 
 function loadTrajectorySnapshot(runId, games) {
-  const roots = [
-    path.join(REPO_ROOT, 'runs', 'private', 'trajectories', runId),
-    path.join(REPO_ROOT, 'runs', 'trajectories', runId),
-  ];
+  const limit = 2000;
   const events = [];
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    for (const file of walkBounded(root, 500).filter((entry) => entry.endsWith('.jsonl'))) {
-      const lines = readTailText(file, 4 * 1024 * 1024).split(/\r?\n/).filter(Boolean).slice(-5000);
-      for (const line of lines) {
-        try { events.push(deepSanitize(JSON.parse(line))); } catch {}
-      }
-    }
-  }
-  return { games, eventCount: events.length, events: events.slice(-2000) };
+  let cursor = 0;
+  let observed = 0;
+  const ingestion = scanRunJsonl({ repoRoot: REPO_ROOT, runId, onRecord(event) {
+    const projected = deepSanitize(event);
+    observed += 1;
+    if (events.length < limit) events.push(projected);
+    else { events[cursor] = projected; cursor = (cursor + 1) % limit; }
+  } });
+  const window = events.slice(cursor).concat(events.slice(0, cursor));
+  const truncated = ingestion.truncated || observed > limit;
+  return { ...ingestion, games, eventCount: window.length, eventsObserved: observed, events: window,
+    truncated, status: ingestion.status === 'complete' && truncated ? 'partial' : ingestion.status };
 }
 
 function normalizeGames(value) {
@@ -548,35 +548,6 @@ function constantEqual(left, right) {
 
 function deepSanitize(value) {
   return sanitizeForClient(value, { maxStringChars: 1000 });
-}
-
-function walkBounded(root, limit) {
-  const out = [];
-  const pending = [root];
-  while (pending.length && out.length < limit) {
-    const dir = pending.pop();
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (out.length >= limit) break;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) pending.push(full);
-      else if (entry.isFile()) out.push(full);
-    }
-  }
-  return out;
-}
-
-function readTailText(file, maxBytes) {
-  const stat = fs.lstatSync(file);
-  if (stat.isSymbolicLink() || !stat.isFile()) return '';
-  const length = Math.min(stat.size, maxBytes);
-  const descriptor = fs.openSync(file, 'r');
-  try {
-    const buffer = Buffer.alloc(length);
-    fs.readSync(descriptor, buffer, 0, length, Math.max(0, stat.size - length));
-    return buffer.toString('utf8');
-  } finally {
-    fs.closeSync(descriptor);
-  }
 }
 
 function metricDelta(left, right) {
