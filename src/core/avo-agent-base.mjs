@@ -370,7 +370,7 @@ export class AvoArcAgent {
           const text = result.ok
             ? `PYTHON_OK\nSTDOUT:\n${result.stdout || '<empty>'}\nSTDERR:\n${result.stderr || '<empty>'}`
             : `PYTHON_ERROR: ${result.error}\nSTDOUT:\n${result.stdout || '<empty>'}\nSTDERR:\n${result.stderr || '<empty>'}`;
-          return this.toolResult(text, result);
+          return this.toolResult(`${text}${result.stdoutTruncated ? '\nSTDOUT_TRUNCATED' : ''}${result.stderrTruncated ? '\nSTDERR_TRUNCATED' : ''}`, result);
         },
       },
       {
