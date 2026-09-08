@@ -1,17 +1,19 @@
-# Security
+# Security boundaries
 
-## Secrets
+Credentials belong in the operator's environment or private local configuration,
+not commits, client-side state, public logs, Issues or PRs. Do not print `.env` or
+raw provider payloads. Use `npm run security:scan` before publishing changes or
+artifacts that could contain private data.
 
-All credentials and provider endpoints are runtime-only environment values.
-The repository must never contain real API keys, private endpoint addresses,
-ARC credentials, scorecard tokens, or raw request/response logs carrying them.
+If a credential is exposed, inform the owner; do not silently rotate it or switch
+providers. The operator controls credential changes and any explicit plaintext
+transport opt-in.
 
-Run `npm run security:scan` before every commit and push. The scanner checks
-tracked project files for likely secrets, literal private provider settings,
-IPv4 endpoint literals, and accidental `.env` files.
+The shipped model tools do not expose a host shell, unrestricted filesystem or
+generic network access. Workspace Python runs in an isolated container, never as
+a host fallback. Reuse the existing path, file, process and container ownership
+helpers when modifying those boundaries.
 
-## Agent permissions
-
-The ARC agent exposes only narrow game and memory tools. It does not expose a
-shell, arbitrary filesystem access, browser access, or generic network tools to
-the model. Run it in a container when stronger isolation is required.
+Mission Control keeps provider configuration server-side and uses authenticated,
+same-origin controls. Raw runs and scorecard tokens stay private; missing evidence
+must not be replaced by invented values or another run's data.

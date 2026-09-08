@@ -43,14 +43,8 @@ test('historical result stays byte-identical and its correction fails closed', (
   assert.equal(Object.hasOwn(source, 'scorecardEvidence'), false);
 });
 
-test('active benchmark documentation links the hash-bound correction', () => {
-  for (const documentUrl of [
-    new URL('../README.md', import.meta.url),
-    new URL('../docs/VALIDATION_RESULTS.md', import.meta.url),
-  ]) {
-    assert.match(
-      fs.readFileSync(documentUrl, 'utf8'),
-      /real-public-20260828-high2\.correction-v1\.json/,
-    );
-  }
+test('archive index keeps the historical source and correction discoverable', () => {
+  const index = fs.readFileSync(new URL('../docs/archive/README.md', import.meta.url), 'utf8');
+  assert.match(index, /real-public-20260828-high2\.json/);
+  assert.match(index, /real-public-20260828-high2\.correction-v1\.json/);
 });

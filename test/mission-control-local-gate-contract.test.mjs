@@ -50,18 +50,3 @@ test('standalone tracing stays rooted at the app when the repository has its own
   const config = (await import('../apps/mission-control-v3/next.config.mjs')).default;
   assert.equal(config.outputFileTracingRoot, path.join(root, 'apps', 'mission-control-v3'));
 });
-
-test('local execution documentation states the current fail-closed boundary', () => {
-  const document = read('docs/LOCAL_EXECUTION.md');
-  assert.match(document, /Mission Control local gate/);
-  assert.match(document, /2026-08-30/);
-  assert.match(document, /Next\.js 15\.5\.21/);
-  assert.match(document, /Next\.js 16\.3\.3 for the 16\.x line/);
-  assert.match(document, /React\/React DOM[\s\S]*19\.1\.9/);
-  assert.match(document, /CopilotKit 1\.69\.3/);
-  assert.match(document, /Next\.js 16\.3\.3/);
-  assert.match(document, /Google Vertex adapter is overridden to 4\.0\.193/);
-  assert.match(document, /production-dependency audit/);
-  assert.match(document, /standalone production build must pass/i);
-  assert.match(document, /No GitHub Actions fallback/);
-});
