@@ -182,6 +182,7 @@ function extractOutputText(payload) {
   const blocks = Array.isArray(payload?.output) ? payload.output : [];
   return blocks
     .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+    .filter((content) => content?.type === 'output_text')
     .map((content) => content?.text || content?.value || '')
     .filter(Boolean)
     .join('\n');

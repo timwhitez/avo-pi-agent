@@ -8,7 +8,9 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| Next benchmark | Provider quota and context-configuration counterfactual remain unresolved | r13 is not capability evidence; do not mix it into a future run |
+| [#311](https://github.com/timwhitez/avo-pi-agent/issues/311): Responses preflight | One-line visible-output extraction fix; full verification/review pending | Focused 18/18 and real DeepSeek/high freshness preflight pass with unchanged default nonce and 128-token cap |
+| [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Required before the next benchmark | Upstream enforces each level's budget; our runtime currently enforces only the sum |
+| Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
 
@@ -48,7 +50,8 @@ Run artifacts were not deleted or resumed.
 
 Hard context compaction occurred during r13 and remains a configuration
 counterfactual to examine. The disjoint held-out games (`r11l`, `sc25`, `tn36`)
-remain unplayed. No new paid run has started since the failure.
+remain unplayed. No new game run has started; targeted DeepSeek provider preflight
+identified #311 and passed after its fix. This does not prove full-context capacity.
 
 Follow the active user's experiment requirements. Preserve distinctions between
 configured study budgets, official Competition rules, provider availability,

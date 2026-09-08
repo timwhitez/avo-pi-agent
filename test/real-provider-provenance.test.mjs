@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import { once } from 'node:events';
 
 import {
   buildProvenance,
@@ -83,6 +85,35 @@ test('Responses preflight verifies the exact current challenge and returns diges
   assert.equal(serialized.includes(challenge), false);
   assert.equal(serialized.includes('resp-real-fixture'), false);
   assert.equal(serialized.includes(config.apiKey), false);
+});
+
+test('Responses preflight checks visible output separately from reasoning over HTTP', async (t) => {
+  let visible = expected;
+  let reasoning = 'Synthetic reasoning, not the visible answer.';
+  const server = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const request = JSON.parse(body);
+    assert.equal(request.reasoning.effort, 'max');
+    assert.equal(request.max_output_tokens, 128);
+    res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });
+    res.end(JSON.stringify({ id: 'resp-http-fixture', status: 'completed', output: [
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: reasoning }] },
+      ...(visible === null ? [] : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: visible }] }]),
+    ] }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const local = { ...config, baseUrl: `http://127.0.0.1:${server.address().port}` };
+  const result = await preflightResponsesProvider(local, { nonce: challenge });
+  assert.equal(result.ok, true);
+  assert.equal(JSON.stringify(result).includes(reasoning), false);
+  reasoning = expected;
+  visible = 'wrong visible answer';
+  await assert.rejects(preflightResponsesProvider(local, { nonce: challenge }), /did not reproduce/);
+  visible = null;
+  await assert.rejects(preflightResponsesProvider(local, { nonce: challenge }), /lacks output text/);
 });
 
 test('Responses preflight omits unsupported reasoning instead of silently downgrading it', async () => {
