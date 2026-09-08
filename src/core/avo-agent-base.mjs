@@ -71,6 +71,7 @@ export class AvoArcAgent {
     }
     this.perLevelBudgets = levelBudgets.slice();
     this.levelActions = 0;
+    this.currentLevel = 0;
     this.policyProfile = normalizePolicyProfile(config.policyProfile);
     this.strategyEnabled = policyUsesStrategy(this.policyProfile);
     this.logger = logger;
@@ -131,6 +132,7 @@ export class AvoArcAgent {
 
   adoptFrame(raw) {
     const frame = normalizeFrame(raw);
+    this.currentLevel = frame.levelsCompleted;
     this.maxObservedLevelsCompleted = Math.max(
       this.maxObservedLevelsCompleted,
       frame.levelsCompleted,
@@ -159,7 +161,7 @@ export class AvoArcAgent {
   }
 
   levelBudgetExhausted() {
-    const budget = this.perLevelBudgets[this.frame?.levelsCompleted];
+    const budget = this.perLevelBudgets[this.currentLevel];
     return !isWin(this.frame) && budget !== undefined && this.levelActions >= budget;
   }
 
@@ -170,7 +172,7 @@ export class AvoArcAgent {
 
   runtimeStatus() {
     const state = episodeState(this.frame);
-    const levelBudget = this.perLevelBudgets[this.frame?.levelsCompleted];
+    const levelBudget = this.perLevelBudgets[this.currentLevel];
     if (this.finished) {
       return {
         state,
@@ -215,7 +217,7 @@ export class AvoArcAgent {
       allowedNext: (this.strategyEnabled
         ? 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful'
         : 'inspect evidence, take one currently legal gameplay action, use the scratch workspace, or finish')
-        + (levelBudget === undefined ? '' : `; current level action budget: ${this.levelActions}/${levelBudget}`),
+        + (levelBudget === undefined ? '' : `; current level ${this.currentLevel} action budget: ${this.levelActions}/${levelBudget}`),
     };
   }
 

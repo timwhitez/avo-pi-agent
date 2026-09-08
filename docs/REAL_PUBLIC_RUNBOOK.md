@@ -73,7 +73,8 @@ compaction and budget termination before interpreting a failed solve.
 The project defaults to 2x the human baseline for each level, matching the
 [developer benchmarking agent](https://github.com/arcprize/arc-agi-3-benchmarking/blob/main/benchmarking/agent.py).
 Each level is limited separately, with the sum also subject to the game's hard cap.
-RESET consumes the current level's budget; only level progress starts a new allowance.
+RESET consumes budget; only newly achieved progress starts a new allowance.
+Replaying earlier levels uses their actual budget index without clearing the counter.
 This developer-harness setting is not the official 5x-human per-level
 evaluation rule described in the [ARC technical report](https://arcprize.org/media/ARC_AGI_3_Technical_Report.pdf).
 The current bridge uses SDK `OperationMode.NORMAL`; do not equate the UI's

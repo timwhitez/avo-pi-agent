@@ -24,7 +24,7 @@ test('same-level RESET consumes budget; exhaustion blocks both action paths and 
   const { agent, calls } = fixture(t);
   await agent.initialize();
   await agent.act({ action: 'ACTION1' });
-  assert.match(agent.runtimeStatus().allowedNext, /current level action budget: 1\/2/);
+  assert.match(agent.runtimeStatus().allowedNext, /current level 0 action budget: 1\/2/);
   const reset = await agent.reset({ rationale: 'same-level reset' });
   assert.equal(reset.terminate, true);
   assert.equal(agent.levelActions, 2);
@@ -72,6 +72,28 @@ test('action sequence stops at the current level limit with exact durable prefix
   assert.equal(result.terminate, true);
   assert.equal(calls(), 2);
   for (const step of result.details.executed) assert.ok(agent.evidenceStore.get(step.evidenceRef));
+});
+
+test('full reset selects the actual earlier level budget without losing reported high-water progress', async (t) => {
+  const { agent, calls } = fixture(t, { perLevelBudgets: [2, 5], next: (kind, count) => count === 2
+    ? { levels_completed: 1 } : kind === 'reset' ? { levels_completed: 0, full_reset: true } : { full_reset: false } });
+  await agent.initialize();
+  await agent.act({ action: 'ACTION1' });
+  await agent.act({ action: 'ACTION1' });
+  assert.equal(agent.currentLevel, 1);
+  assert.equal(agent.levelActions, 0);
+  await agent.reset({ rationale: 'full reset to earlier level' });
+  assert.equal(agent.currentLevel, 0);
+  assert.equal(agent.frame.levelsCompleted, 1);
+  assert.equal(agent.levelActions, 1);
+  assert.match(agent.runtimeStatus().allowedNext, /current level 0 action budget: 1\/2/);
+  await agent.act({ action: 'ACTION1' });
+  await agent.act({ action: 'ACTION1' });
+  assert.equal(calls(), 4);
+  assert.equal(agent.runtimeStatus().terminalReason, 'level_action_budget_exhausted');
+  const report = await agent.run();
+  assert.equal(report.levelsCompleted, 1);
+  assert.equal(report.terminationReason, 'level-action-budget');
 });
 
 test('total cap still applies with or without per-level metadata', async (t) => {

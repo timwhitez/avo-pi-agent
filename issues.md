@@ -8,7 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Shared action/reset/sequence fix implemented; canonical/full tests and independent review pending | Focused29/29: RESET accounting, progress, sequence cancellation, total cap, WIN priority and report normalization |
+| [#312 / PR #314](https://github.com/timwhitez/avo-pi-agent/pull/314): per-level action budgets | Review found backward-level lookup using report high-water progress; repaired by tracking the actual level separately | Initial root607/607, UI103/build and canonical CLI pass; final backward-level regression and full recheck in progress |
 | Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
