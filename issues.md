@@ -8,10 +8,14 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [PR #310](https://github.com/timwhitez/avo-pi-agent/pull/310): documentation / AGENTS and historical prose-lock cleanup | Implemented; final independent review pending | Root 601/601, UI 103/103, build/install, audits, scan, offline and focused 9/9 passed. Review found the copied UI repository-path placeholder; setup instructions now explicitly replace/remove it |
+| Next benchmark | Provider quota and context-configuration counterfactual remain unresolved | r13 is not capability evidence; do not mix it into a future run |
 
 ## Latest verified repairs
 
+- [PR #310](https://github.com/timwhitez/avo-pi-agent/pull/310): concise docs/AGENTS,
+  archived history and removal of historical prose/SHA/version locks. Independent
+  APPROVE at `7f212e7`; root 601/601, UI 103/103, build/install, audits, scan,
+  offline and focused 9/9 passed. Review-found UI path-placeholder instructions fixed.
 - [#307 / PR #309](https://github.com/timwhitez/avo-pi-agent/pull/309): removed the
   redundant final report/cache gate; merged at `83542c54dd0119bee08e9cd77785fe717a4f1473`.
   Independent final-head APPROVE `6cd09b5`; root 602/602, UI 103/103 and canonical
