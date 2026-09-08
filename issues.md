@@ -8,7 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#311](https://github.com/timwhitez/avo-pi-agent/issues/311): Responses preflight | One-line visible-output extraction fix; full verification/review pending | Focused 18/18 and real DeepSeek/high freshness preflight pass with unchanged default nonce and 128-token cap |
+| [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): Responses preflight | One-line fix independently APPROVED at d1331c7; merge pending | Root602/602, UI103/103/build/install, audit0, scan, offline, focused18/18 and real DeepSeek/high preflight pass; original nonce/cap/effort unchanged |
 | [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Required before the next benchmark | Upstream enforces each level's budget; our runtime currently enforces only the sum |
 | Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
 
