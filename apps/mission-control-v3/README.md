@@ -29,7 +29,8 @@ Set a strong `AVO_MISSION_CONTROL_ACCESS_TOKEN` (at least 24 characters) locally
 The Basic-auth username defaults to `avo` and can be set with
 `AVO_MISSION_CONTROL_USER`. Provider/ARC configuration also stays in the server
 environment; see [the real-run guide](../../docs/REAL_PUBLIC_RUNBOOK.md).
-`AVO_REPO_ROOT` selects the repository when the default two-parent path is unsuitable.
+Replace the example's `AVO_REPO_ROOT` placeholder with the real repository path,
+or remove that setting to use the default two-parent path.
 
 After configuring the token, start development with `npm run dev`.
 

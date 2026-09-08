@@ -8,8 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| Hash-gate simplification | Remove duplicate authorities and historical SHA prose locks; retain actual run/scorecard, initial-state and file-safety checks | Runtime and documentation changes are reviewed separately |
-| Documentation / AGENTS cleanup | In progress | Focused documentation checks and independent review pending |
+| [PR #310](https://github.com/timwhitez/avo-pi-agent/pull/310): documentation / AGENTS and historical prose-lock cleanup | Implemented; final independent review pending | Root 601/601, UI 103/103, build/install, audits, scan, offline and focused 9/9 passed. Review found the copied UI repository-path placeholder; setup instructions now explicitly replace/remove it |
 
 ## Latest verified repairs
 
