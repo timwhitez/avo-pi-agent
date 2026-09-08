@@ -8,7 +8,7 @@ The failed run's two owned containers were verified absent. Exact bootstrap PID/
 
 | Current item | Work | Verification |
 | --- | --- | --- |
-| #306 | Native nonblocking upstream owner socket instead of a blocking filesystem read | Focused11/11, root602/602, UI103/103/build, local audit/scan and offline contract pass; independent review pending |
+| #306 | Reviewed fix in PR #308: native nonblocking upstream owner socket instead of a blocking filesystem read | Independent APPROVE `0826612376334928936ea0d9b04a3b1946be709c`, reviewer11/11; root602/602, UI103/103/build, local audit/scan and offline contract pass |
 | #307 | Remove final-publication dependence on resume-cache hashes/comparisons | Separate branch; actual canonical all-failed/mixed/no-cache fixture passes; full review pending |
 
 Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Issues (#259–#274), no open PRs before this repair. All 16 reports were read; none is closed as duplicate or unnecessary. The historical conclusions below remain historical, not the live completion ledger.
