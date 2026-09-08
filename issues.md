@@ -2,7 +2,7 @@
 
 ## Current continuation audit — 2026-09-08
 
-Current post-r13 state: the game CLI is terminal, not still reasoning. The raw run reports0 wins/0 of20 levels and50 actions; provider429 quota exhaustion prevented useful execution of the last two games. The outer report masked that cause with a completion-cache mismatch (#307). Separately, guardian cleanup wrote a valid receipt but its upstream filesystem read blocked exit (#306). Neither failure is model-capability evidence; no r13 resume or new paid run is authorized by this ledger.
+Current post-r13 state: the game CLI is terminal, not still reasoning. The raw run reports0 wins/0 of20 levels and50 actions; provider429 quota exhaustion prevented useful execution of the last two games. The outer report masked that cause with a completion-cache mismatch (#307). Separately, guardian cleanup wrote a valid receipt but its upstream filesystem read blocked exit (#306). Neither failure is model-capability evidence. No r13 resume or new paid run has been started.
 
 The failed run's two owned containers were verified absent. Exact bootstrap PID/start identity and the matching clean receipt were checked before closing that bootstrap; guardian/wrapper then exited and the original lock released without manual lock deletion. Original run artifacts remain intact. User-requested removal of redundant hash gates and documentation/AGENTS simplification are active follow-up work, not additional permanent workflow restrictions.
 
