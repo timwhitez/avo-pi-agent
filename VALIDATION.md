@@ -1,27 +1,35 @@
-# Validation record
+# Local validation
 
-This file records reproducible checks that are safe to commit. It contains no
-provider endpoint, model identifier, API key, ARC credential, raw model output,
-or scorecard token.
-
-## Required gates
+Match checks to the change. A user's explicitly requested release gates take
+precedence; this page is a command reference, not a requirement to run every
+expensive workflow for every edit.
 
 ```bash
-node --test
-node scripts/secret-scan.mjs
-node src/cli.mjs demo-offline --all
-python -m py_compile bridge/arc_bridge.py
+node --test test/evaluator.test.mjs   # replace with the relevant test files
+PATH="$PWD/.venv/bin:$PATH" npm test
+npm run security:scan
+npm run demo:offline
 ```
 
-## Interpretation
+Full tests include Python bridge and container cases. Install the ARC virtual
+environment first. If container coverage is required, use an already-local image
+and set `AVO_TEST_WORKSPACE_IMAGE` as appropriate; report skipped or unavailable
+coverage rather than calling it passed.
 
-A passing offline contract demo proves that the agent loop, exact observation,
-action protocol, persistent memory, optional hypothesis journal, supervisor, multi-level
-termination and reporting contracts work across 25 complete synthetic runs. It
-does not prove model endpoint reachability, Pi package installation, official
-ARC environment availability, public-game performance or an ARC score.
+For web changes:
 
-The official run command is `node src/cli.mjs run-public --all`; its output under
-`runs/` must be retained outside git as evidence.
+```bash
+npm run mission-control:validate
+npm --prefix apps/mission-control-v3 test
+```
 
-The latest machine-readable build evidence is `validation/build-evidence.json`.
+The first command performs locked installation, the UI test corpus, audit and
+production build. The second also exercises the installed dependency smoke.
+Current package/toolchain versions come from the manifests and locks, not copied
+version lists in this document.
+
+Provider smoke and real ARC runs are separate, externally billed checks described
+in [the real-run runbook](docs/REAL_PUBLIC_RUNBOOK.md). Record the tested revision,
+commands, results and any exclusions in the relevant PR or [issues.md](issues.md).
+Synthetic success is contract evidence only. Historical validation is indexed in
+[docs/archive](docs/archive/README.md), not treated as current exact-head evidence.
