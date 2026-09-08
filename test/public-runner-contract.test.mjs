@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import {
   buildRunCapsule,
   prepareRunState,
+  inspectRunState,
   productionProviderToolSchemaDigest,
   RUN_CAPSULE_COMPONENT_FILES,
   writeRunCapsule,
@@ -28,6 +29,7 @@ import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 import { buildRunLaunch, loadExactRunReport } from '../apps/mission-control-v3/lib/run-contract.mjs';
 import { verifyLiveObservation } from './support/live-observation.mjs';
 import { readRunObservation } from '../src/benchmark/run-observation.mjs';
+import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
@@ -39,6 +41,17 @@ test('full public-runner boundary completes 25 mocked games in one cumulative se
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.resolve(relative), target);
   }
+  const fixtureCliPath = path.join(root, 'src/cli.mjs');
+  const fixtureCliSource = fs.readFileSync(fixtureCliPath, 'utf8').replace('function writeReport(report) {', 'function writeFixtureReport(report) {');
+  fs.writeFileSync(fixtureCliPath, fixtureCliSource + `
+function writeReport(report) {
+  const file = writeFixtureReport(report);
+  if (process.env.AVO_REPAIR_ROUND === 'missing-completion-cache' && report.kind === 'official-public-environments') {
+    fs.unlinkSync(path.join(process.env.AVO_RESUME_DIR, 'g01.json'));
+  }
+  return file;
+}
+`);
   fs.copyFileSync(
     path.resolve('scripts/pi-provider-smoke.mjs'),
     path.join(root, 'scripts', 'pi-provider-smoke.mjs'),
@@ -210,6 +223,10 @@ export function createProgressStatusReporter(env = process.env) {
           }
         }
         let frame = (await call('observe')).details.frame;
+        if (process.env.AVO_REPAIR_ROUND === 'quota-failure') {
+          this.state.errorMessage = 'synthetic provider quota exhausted';
+          return;
+        }
         const attempt = (promptAttempts.get(frame.gameId) || 0) + 1;
         promptAttempts.set(frame.gameId, attempt);
         const progressMode = process.env.AVO_REPAIR_ROUND || '';
@@ -1402,11 +1419,43 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const recoveredId = 'diagnostic-recovery';
   const recoveryArgs = ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g25-v1'];
   const diagnosticRecoveryEnv = { ...diagnosticEnv, AVO_GAME_ATTEMPTS: '1', AVO_TRANSIENT_TURN_RECOVERIES: '1' };
+  const allFailedId = 'all-failed-execution';
+  const allFailed = spawnSync(process.execPath, ['scripts/run-real-public-locked.mjs'], {
+    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+    env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: allFailedId, AVO_REPAIR_ROUND: 'quota-failure' },
+  });
+  assert.equal(allFailed.status, 1, allFailed.stderr || allFailed.stdout);
+  const allFailedReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/public', `${allFailedId}.json`)));
+  assert.equal(allFailedReport.status, 'failed');
+  assert.equal(allFailedReport.failedStage, 'game-completeness');
+  assert.match(allFailedReport.error, /synthetic provider quota exhausted/);
+  assert.doesNotMatch(allFailedReport.error, /checkpoint set/);
+  assert.ok(fs.existsSync(path.join(root, 'runs/private', allFailedId, 'raw-run-report.json')));
+  assert.equal(fs.existsSync(path.join(root, 'runs/private', allFailedId, 'resume/g01.json')), false);
+
+  const cacheId = 'report-without-completion-cache';
+  const cacheRun = spawnSync(process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g02-v1'], {
+    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+    env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: cacheId, AVO_REPAIR_ROUND: 'missing-completion-cache' },
+  });
+  assert.equal(cacheRun.status, 0, cacheRun.stderr || cacheRun.stdout);
+  const cacheReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${cacheId}.json`)));
+  assert.equal(cacheReport.status, 'complete');
+  assert.equal(cacheReport.scorecardCoverage.exact, true);
+  const cacheObservation = readRunObservation({ root, runId: cacheId });
+  assert.equal(cacheObservation.status, 'available');
+  assert.throws(() => loadResumedRecords(path.join(root, 'runs/private', cacheId, 'resume'), {
+    capsuleHash: cacheObservation.capsuleHash,
+    stateBinding: inspectRunState(cacheObservation),
+  }), /resume state authority/);
   const partialDiagnostic = spawnSync(process.execPath, recoveryArgs, {
     cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_REPAIR_ROUND: 'partial-state' },
   });
   assert.equal(partialDiagnostic.status, 1, partialDiagnostic.stderr || partialDiagnostic.stdout);
+  const mixedFailedReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${recoveredId}.json`)));
+  assert.equal(mixedFailedReport.failedStage, 'game-completeness');
+  assert.match(mixedFailedReport.error, /synthetic provider unavailable after state mutation/);
   const partialObservation = readRunObservation({ root, runId: recoveredId, mode: 'diagnostic' });
   assert.equal(partialObservation.status, 'available');
   assert.equal(fs.readFileSync(path.join(partialObservation.workspaceDir, 'g25', 'partial.txt'), 'utf8'), 'saved before failure');

@@ -8,11 +8,16 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#307](https://github.com/timwhitez/avo-pi-agent/issues/307): redundant final-publication cache gates | Removal implemented on a separate branch; independent review/merge pending | Canonical all-failed, mixed-failure and missing-unused-cache paths pass; actual resume still rejects inconsistent cache state |
+307](https://github.com/timwhitez/avo-pi-agent/issues/307): redundant final-publication cache gates | Removal implemented on a separate branch; independent review/merge pending | Canonical all-failed, mixed-failure and missing-unused-cache paths pass; actual resume still rejects inconsistent cache state |
 | Hash-gate simplification | Remove duplicate authorities and historical SHA prose locks; retain actual run/scorecard, initial-state and file-safety checks | Runtime and documentation changes are reviewed separately |
 | Documentation / AGENTS cleanup | In progress | Focused documentation checks and independent review pending |
 
 ## Latest verified repairs
+
+- [#307 / PR #309](https://github.com/timwhitez/avo-pi-agent/pull/309): removed the
+  redundant final report/cache gate; merged at `83542c54dd0119bee08e9cd77785fe717a4f1473`.
+  Independent final-head APPROVE `6cd09b5`; root 602/602, UI 103/103 and canonical
+  failure/no-unused-cache paths passed. Actual resume still validates consumed cache state.
 
 - [#306 / PR #308](https://github.com/timwhitez/avo-pi-agent/pull/308): nonblocking
   upstream owner socket; merged at `fb6bc3e94cba66ffce3eb0816a50c22e5c4fdbf3`.
