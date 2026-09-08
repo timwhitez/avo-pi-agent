@@ -8,7 +8,6 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-307](https://github.com/timwhitez/avo-pi-agent/issues/307): redundant final-publication cache gates | Removal implemented on a separate branch; independent review/merge pending | Canonical all-failed, mixed-failure and missing-unused-cache paths pass; actual resume still rejects inconsistent cache state |
 | Hash-gate simplification | Remove duplicate authorities and historical SHA prose locks; retain actual run/scorecard, initial-state and file-safety checks | Runtime and documentation changes are reviewed separately |
 | Documentation / AGENTS cleanup | In progress | Focused documentation checks and independent review pending |
 
