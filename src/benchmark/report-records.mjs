@@ -14,9 +14,10 @@ const TRAJECTORY_EVIDENCE_SCHEMA = 'avo.trajectory-evidence.v1';
 const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
 const SAFE_EVIDENCE_REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 const MAX_SEQUENCE_ACTIONS = 20;
-const MODEL_TERMINATION_REASONS = new Set([
+const TERMINATION_REASONS = new Set([
   'assistant-no-tool',
   'outer-turn-budget',
+  'level-action-budget',
   'repeated-tool-outcome',
 ]);
 const SEQUENCE_TELEMETRY_FIELDS = Object.freeze([
@@ -747,7 +748,7 @@ function optionalString(value, field, sourcePath) {
 
 function normalizeTerminationReason(value, sourcePath) {
   if (value === null) return null;
-  if (typeof value !== 'string' || !MODEL_TERMINATION_REASONS.has(value)) {
+  if (typeof value !== 'string' || !TERMINATION_REASONS.has(value)) {
     invalidRecord(sourcePath, `terminationReason is unknown: ${JSON.stringify(value)}`);
   }
   return value;

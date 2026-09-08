@@ -8,12 +8,15 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): Responses preflight | One-line fix independently APPROVED at d1331c7; merge pending | Root602/602, UI103/103/build/install, audit0, scan, offline, focused18/18 and real DeepSeek/high preflight pass; original nonce/cap/effort unchanged |
-| [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Required before the next benchmark | Upstream enforces each level's budget; our runtime currently enforces only the sum |
+| [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Shared action/reset/sequence fix implemented; canonical/full tests and independent review pending | Focused29/29: RESET accounting, progress, sequence cancellation, total cap, WIN priority and report normalization |
 | Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
 
+- [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): visible-only
+  Responses extraction; merged at `52ac390d676dc0526fbe0de60a2c704efe199262`.
+  Final-head APPROVE `90590fa`; root602/602, UI103/103/build/install, audits,
+  scan, offline, focused18/18 and real DeepSeek/high preflight passed unchanged nonce/cap/effort.
 - [PR #310](https://github.com/timwhitez/avo-pi-agent/pull/310): concise docs/AGENTS,
   archived history and removal of historical prose/SHA/version locks. Independent
   APPROVE at `7f212e7`; root 601/601, UI 103/103, build/install, audits, scan,

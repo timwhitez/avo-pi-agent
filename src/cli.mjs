@@ -204,6 +204,7 @@ async function runPublic(args) {
       const gameConfig = {
         ...config,
         maxActions: actionBudget.total,
+        perLevelBudgets: actionBudget.perLevelBudgets,
         maxOuterTurns: frozenBudget?.outerTurnBudget
           ?? deriveOuterTurnBudget(actionBudget.total, config.maxOuterTurns),
       };
