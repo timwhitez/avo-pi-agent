@@ -28,7 +28,6 @@ import {
   copyRegularFileExclusive,
   findNewJsonReports,
   hashFile,
-  normalizeGameRecord,
   selectRunReport,
   snapshotJsonFiles,
   validateCompleteGameSet,
@@ -46,7 +45,6 @@ import {
   canonicalJson,
   classifyCapsuleResult,
   classifyResume,
-  inspectRunState,
   inspectGitCheckout,
   prepareRunState,
   publicRunCapsule,
@@ -337,38 +335,8 @@ try {
     config,
     workspaceAttestation,
   });
-  const finalState = inspectRunState({
-    memoryDir: runState.memoryDir,
-    workspaceDir: runState.workspaceDir,
-  });
-  const finalCheckpoints = loadResumedRecords(path.join(privateDir, 'resume'), {
-    capsuleHash: capsule.capsuleHash,
-    allowedCapsuleHashes: resumeDecision.comparable ? [] : [resumeDecision.sourceCapsuleHash],
-    stateBinding: finalState,
-    requireStateMatch: resumeDecision.comparable,
-  });
-  if (finalCheckpoints.size !== selected.records.length) {
-    throw new Error('production report game set differs from the final capsule-bound checkpoint set');
-  }
-  let checkpointTotalsEnriched = false;
-  for (const record of selected.records) {
-    const checkpoint = finalCheckpoints.get(record.gameId);
-    if (!checkpoint) {
-      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
-    }
-    const normalizedCheckpoint = normalizeCheckpointRecord(checkpoint);
-    const normalizedRecord = normalizeCheckpointRecord(record);
-    if (normalizedCheckpoint.totalLevels !== normalizedRecord.totalLevels) {
-      if (normalizedCheckpoint.totalLevels !== null) {
-        throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
-      }
-      checkpointTotalsEnriched = true;
-    }
-    if (canonicalJson(checkpointBinding(normalizedCheckpoint))
-        !== canonicalJson(checkpointBinding(normalizedRecord))) {
-      throw new Error(`production report differs from capsule-bound checkpoint ${record.gameId}`);
-    }
-  }
+  // Completion checkpoints are a resume cache, not another report authority.
+  // Validate them when resuming; publish from the executed report and scorecard.
   const activeCapsuleSha256 = hashFile(activeCapsuleFile, { root: privateDir });
   if (activeCapsuleSha256 !== provenance.runCapsule.capsuleEvidenceSha256) {
     throw new Error('public capsule commitment differs from the private capsule artifact');
@@ -398,9 +366,6 @@ try {
     selected.report?.scorecardEvidence,
     selected.records,
   );
-  if (checkpointTotalsEnriched && !scorecardAuthority.coverage.exact) {
-    throw new Error('production report enriches checkpoint level metadata without exact scorecard evidence');
-  }
   if (scorecardAuthority.coverage.exact) {
     stage.value = 'scorecard-progress-reconciliation';
     const reconciled = reconcileExactScorecardProgress(
@@ -527,20 +492,6 @@ function benchmarkTimeout() {
     throw new Error('AVO_BENCHMARK_TIMEOUT_MS must be between 60000 and 172800000');
   }
   return Math.trunc(value);
-}
-
-function normalizeCheckpointRecord(value) {
-  return normalizeGameRecord(value, 'checkpoint comparison');
-}
-
-function checkpointBinding(record) {
-  const {
-    totalLevels: _totalLevels,
-    legacyLevelMetadata: _legacyLevelMetadata,
-    levelMetadata: _levelMetadata,
-    ...bound
-  } = record;
-  return bound;
 }
 
 function safeRunId(value) {
