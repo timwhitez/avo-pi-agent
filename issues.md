@@ -2,6 +2,15 @@
 
 ## Current continuation audit — 2026-09-08
 
+Current post-r13 state: the game CLI is terminal, not still reasoning. The raw run reports0 wins/0 of20 levels and50 actions; provider429 quota exhaustion prevented useful execution of the last two games. The outer report masked that cause with a completion-cache mismatch (#307). Separately, guardian cleanup wrote a valid receipt but its upstream filesystem read blocked exit (#306). Neither failure is model-capability evidence; no r13 resume or new paid run is authorized by this ledger.
+
+The failed run's two owned containers were verified absent. Exact bootstrap PID/start identity and the matching clean receipt were checked before closing that bootstrap; guardian/wrapper then exited and the original lock released without manual lock deletion. Original run artifacts remain intact. User-requested removal of redundant hash gates and documentation/AGENTS simplification are active follow-up work, not additional permanent workflow restrictions.
+
+| Current item | Work | Verification |
+| --- | --- | --- |
+| #306 | Native nonblocking upstream owner socket instead of a blocking filesystem read | Focused11/11, root602/602, UI103/103/build, local audit/scan and offline contract pass; independent review pending |
+| #307 | Remove final-publication dependence on resume-cache hashes/comparisons | Separate branch; actual canonical all-failed/mixed/no-cache fixture passes; full review pending |
+
 Live GitHub inventory at `e58946112437948ef553655df7d08a877a5fdd9a`: 16 open Issues (#259–#274), no open PRs before this repair. All 16 reports were read; none is closed as duplicate or unnecessary. The historical conclusions below remain historical, not the live completion ledger.
 
 After PR #275: #262 closed by merge `5270e6443e9bbd5ba47a7ed85c02b415e12c34ea`; new validity Issue #276 opened from retained r12 evidence. Live inventory is again 16 open Issues, 0 open PRs. #276 is the next repair, before any new benchmark.

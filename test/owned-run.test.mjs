@@ -12,11 +12,11 @@ import { signalProcessTree } from '../apps/mission-control-v3/lib/run-contract.m
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
 
-test('actual locked benchmark entry releases its scope on configuration failure', { skip: process.platform !== 'linux' }, () => {
+for (const detached of [true, false]) test(`actual locked benchmark entry releases its scope on configuration failure (detached=${detached})`, { skip: process.platform !== 'linux' }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-owned-entry-'));
   try {
     const result = spawnSync(process.execPath, [path.resolve('scripts/run-real-public-locked.mjs')], {
-      cwd: root, detached: true, encoding: 'utf8', timeout: 10_000,
+      cwd: root, detached, encoding: 'utf8', timeout: 10_000,
       env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1', AVO_REAL_RUN_ID: 'entry-fixture' },
     });
     assert.equal(result.status, 1, result.stderr);
@@ -26,7 +26,7 @@ test('actual locked benchmark entry releases its scope on configuration failure'
 });
 
 test('owned wrapper pauses and cleans its real runner and ARC descendants', { skip: process.platform !== 'linux' }, async (t) => {
-  for (const termination of ['normal', 'SIGINT', 'SIGTERM', 'abort', 'SIGKILL', 'SIGKILL-bootstrap', 'timeout']) {
+  for (const termination of ['normal', 'normal-bootstrap', 'SIGINT', 'SIGTERM', 'abort', 'SIGKILL', 'SIGKILL-bootstrap', 'timeout']) {
     await t.test(termination, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-owned-run-'));
       const heartbeat = path.join(root, 'heartbeat');
@@ -53,7 +53,7 @@ await bridge.ensureProcess();
 await bridge.request({ cmd: 'observe' });
 if (${JSON.stringify(termination)}.startsWith('SIGKILL')) process.on('SIGTERM', () => {});
 console.log(JSON.stringify({ worker: process.pid, bridge: bridge.child.pid, owner: managedProcessGroup() }));
-if (${JSON.stringify(termination)} === 'normal') {
+if (${JSON.stringify(termination)}.startsWith('normal')) {
   const finish = setInterval(async () => {
     if (!fs.existsSync(${JSON.stringify(path.join(root, 'finish'))})) return;
     clearInterval(finish);
@@ -82,7 +82,7 @@ try {
 } finally { await scope.close(); lock.release(); }
 `);
       const child = spawn(process.execPath, [wrapper], {
-        cwd: root, detached: termination !== 'SIGKILL-bootstrap', stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: root, detached: !termination.endsWith('bootstrap'), stdio: ['ignore', 'pipe', 'pipe'],
         env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1' },
       });
       let output = '';
@@ -109,7 +109,7 @@ try {
           signalProcessTree({ pid: groupId }, 'SIGCONT');
           for (let i = 0; i < 100 && fs.readFileSync(heartbeat, 'utf8') === paused; i += 1) await delay(10);
           assert.notEqual(fs.readFileSync(heartbeat, 'utf8'), paused);
-          if (termination === 'normal') fs.writeFileSync(path.join(root, 'finish'), 'finish');
+          if (termination.startsWith('normal')) fs.writeFileSync(path.join(root, 'finish'), 'finish');
           else if (termination === 'abort') signalProcessTree({ pid: groupId }, 'SIGTERM');
           else if (termination !== 'normal') child.kill(termination.startsWith('SIGKILL') ? 'SIGKILL' : termination);
           if (termination.startsWith('SIGKILL')) {
@@ -119,7 +119,7 @@ try {
         }
         const result = await Promise.race([closed, delay(8000).then(() => null)]);
         assert.ok(result, `wrapper did not settle: ${errors}`);
-        if (termination === 'normal') assert.equal(result.code, 0, errors);
+        if (termination.startsWith('normal')) assert.equal(result.code, 0, errors);
         for (let i = 0; i < 300 && liveGroupMembers(groupId).length; i += 1) await delay(10);
         assert.deepEqual(liveGroupMembers(groupId), [], 'no running owned descendants may remain');
         const replacement = acquireLocalExecutionLock({ root, runId: 'next', kind: 'fixture', inheritedToken: '' });
