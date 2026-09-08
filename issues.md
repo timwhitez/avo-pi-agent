@@ -8,11 +8,15 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#312 / PR #314](https://github.com/timwhitez/avo-pi-agent/pull/314): per-level action budgets | Review found backward-level lookup using report high-water progress; repaired by tracking the actual level separately | Initial root607/607, UI103/build and canonical CLI pass; final backward-level regression and full recheck in progress |
-| Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
+| Next benchmark | Final target confirmed: deepseek-v4-flash/high; awaiting fresh admission after PR #314 | Expanded existing context limits and system-role configuration prepared; one game attempt per selected game; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
 
+- [#312 / PR #314](https://github.com/timwhitez/avo-pi-agent/pull/314): shared per-level
+  action/reset/sequence budgets, separate actual-level index and report high-water progress.
+  Review-found backward-level lookup fixed; independent APPROVE at `0099951`,
+  reviewer11/11, focused33/33, final root608/608(no skips), UI103/103/build/install,
+  audits, scan, offline and canonical CLI/scorecard paths passed. No new game run.
 - [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): visible-only
   Responses extraction; merged at `52ac390d676dc0526fbe0de60a2c704efe199262`.
   Final-head APPROVE `90590fa`; root602/602, UI103/103/build/install, audits,
