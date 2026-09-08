@@ -2,6 +2,7 @@
 // EOF means the owning wrapper died: its entire execution group must stop.
 import { liveGroupMembers } from './process-group.mjs';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { serveWorkspaceOwner } from './workspace-owner-server.mjs';
 
@@ -50,7 +51,7 @@ process.stdin.on('data', (data) => {
 process.stdin.once('end', terminate);
 process.stdin.once('error', terminate);
 if (process.argv[3] === 'owner-pipe') {
-  const upstream = fs.createReadStream(null, { fd: 3 });
+  const upstream = new net.Socket({ fd: 3, readable: true, writable: false });
   upstream.resume();
   upstream.once('end', terminate);
   upstream.once('error', terminate);
