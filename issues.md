@@ -8,12 +8,19 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): Responses preflight | One-line fix independently APPROVED at d1331c7; merge pending | Root602/602, UI103/103/build/install, audit0, scan, offline, focused18/18 and real DeepSeek/high preflight pass; original nonce/cap/effort unchanged |
-| [#312](https://github.com/timwhitez/avo-pi-agent/issues/312): per-level action budgets | Required before the next benchmark | Upstream enforces each level's budget; our runtime currently enforces only the sum |
-| Next benchmark | Final target confirmed: deepseek-v4-flash/high; blocked on #311/#312 | Expanded existing context limits and system-role configuration prepared; r13 remains separate, not capability evidence |
+| Next benchmark | Final target confirmed: deepseek-v4-flash/high; awaiting fresh admission after PR #314 | Expanded existing context limits and system-role configuration prepared; one game attempt per selected game; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
 
+- [#312 / PR #314](https://github.com/timwhitez/avo-pi-agent/pull/314): shared per-level
+  action/reset/sequence budgets, separate actual-level index and report high-water progress.
+  Review-found backward-level lookup fixed; independent APPROVE at `0099951`,
+  reviewer11/11, focused33/33, final root608/608(no skips), UI103/103/build/install,
+  audits, scan, offline and canonical CLI/scorecard paths passed. No new game run.
+- [#311 / PR #313](https://github.com/timwhitez/avo-pi-agent/pull/313): visible-only
+  Responses extraction; merged at `52ac390d676dc0526fbe0de60a2c704efe199262`.
+  Final-head APPROVE `90590fa`; root602/602, UI103/103/build/install, audits,
+  scan, offline, focused18/18 and real DeepSeek/high preflight passed unchanged nonce/cap/effort.
 - [PR #310](https://github.com/timwhitez/avo-pi-agent/pull/310): concise docs/AGENTS,
   archived history and removal of historical prose/SHA/version locks. Independent
   APPROVE at `7f212e7`; root 601/601, UI 103/103, build/install, audits, scan,

@@ -223,6 +223,11 @@ export function createProgressStatusReporter(env = process.env) {
           }
         }
         let frame = (await call('observe')).details.frame;
+        if (process.env.AVO_REPAIR_ROUND === 'level-budget') {
+          await call('act_sequence', { steps: Array.from({ length: 3 }, () => ({ action: 'ACTION1' })) });
+          await call('reset', { rationale: 'must not replenish an exhausted level budget' });
+          return;
+        }
         if (process.env.AVO_REPAIR_ROUND === 'quota-failure') {
           this.state.errorMessage = 'synthetic provider quota exhausted';
           return;
@@ -493,6 +498,7 @@ class Info:
     def __init__(self, game_id):
         self.game_id = game_id
         self.title = f"Mock {game_id}"
+        self.baseline_actions = [1, 50] if os.environ.get("AVO_REPAIR_ROUND") == "level-budget" else []
 
 class Frame:
     def __init__(self, env):
@@ -1420,6 +1426,23 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const recoveryArgs = ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g25-v1'];
   const diagnosticRecoveryEnv = { ...diagnosticEnv, AVO_GAME_ATTEMPTS: '1', AVO_TRANSIENT_TURN_RECOVERIES: '1' };
   const allFailedId = 'all-failed-execution';
+  const levelBudgetId = 'per-level-budget';
+  const levelBudgetRun = spawnSync(process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g02-v1'], {
+    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+    env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: levelBudgetId, AVO_REPAIR_ROUND: 'level-budget' },
+  });
+  assert.equal(levelBudgetRun.status, 0, levelBudgetRun.stderr || levelBudgetRun.stdout);
+  const levelBudgetReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${levelBudgetId}.json`)));
+  assert.equal(levelBudgetReport.status, 'complete');
+  assert.equal(levelBudgetReport.scorecardCoverage.exact, true);
+  const budgetGame = levelBudgetReport.games[0];
+  assert.equal(budgetGame.actions, 2);
+  assert.equal(budgetGame.resets, 0);
+  assert.equal(budgetGame.levelsCompleted, 0);
+  assert.equal(budgetGame.terminationReason, 'level-action-budget');
+  assert.equal(budgetGame.mechanismMetrics.actionBudgetExhaustions, 1);
+  assert.deepEqual(budgetGame.actionBudget.perLevelBudgets, [2, 100]);
+
   const allFailed = spawnSync(process.execPath, ['scripts/run-real-public-locked.mjs'], {
     cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: allFailedId, AVO_REPAIR_ROUND: 'quota-failure' },

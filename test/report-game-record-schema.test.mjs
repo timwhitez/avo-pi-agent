@@ -43,7 +43,8 @@ test('normalizes explicit finite integer metrics and preserves genuine zero', ()
   });
 });
 
-test('preserves only consistent model termination reasons', () => {
+test('preserves only consistent termination reasons', () => {
+  assert.equal(normalizeGameRecord(valid({ terminationReason: 'level-action-budget' })).terminationReason, 'level-action-budget');
   assert.equal(normalizeGameRecord(valid({
     termination_reason: 'repeated-tool-outcome',
   })).terminationReason, 'repeated-tool-outcome');

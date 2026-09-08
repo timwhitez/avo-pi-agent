@@ -65,6 +65,13 @@ export class AvoArcAgent {
     this.environment = environment;
     this.loop = loop;
     this.config = config;
+    const levelBudgets = config.perLevelBudgets ?? [];
+    if (!Array.isArray(levelBudgets) || levelBudgets.some((budget) => !Number.isSafeInteger(budget) || budget < 1)) {
+      throw new Error('perLevelBudgets must be an array of positive integers');
+    }
+    this.perLevelBudgets = levelBudgets.slice();
+    this.levelActions = 0;
+    this.currentLevel = 0;
     this.policyProfile = normalizePolicyProfile(config.policyProfile);
     this.strategyEnabled = policyUsesStrategy(this.policyProfile);
     this.logger = logger;
@@ -125,6 +132,7 @@ export class AvoArcAgent {
 
   adoptFrame(raw) {
     const frame = normalizeFrame(raw);
+    this.currentLevel = frame.levelsCompleted;
     this.maxObservedLevelsCompleted = Math.max(
       this.maxObservedLevelsCompleted,
       frame.levelsCompleted,
@@ -149,11 +157,22 @@ export class AvoArcAgent {
   }
 
   isDone() {
-    return this.finished || this.actions >= this.config.maxActions || isWin(this.frame);
+    return this.finished || this.actionBudgetExhausted() || isWin(this.frame);
+  }
+
+  levelBudgetExhausted() {
+    const budget = this.perLevelBudgets[this.currentLevel];
+    return !isWin(this.frame) && budget !== undefined && this.levelActions >= budget;
+  }
+
+  actionBudgetExhausted() {
+    return !isWin(this.frame)
+      && (this.actions >= this.config.maxActions || this.levelBudgetExhausted());
   }
 
   runtimeStatus() {
     const state = episodeState(this.frame);
+    const levelBudget = this.perLevelBudgets[this.currentLevel];
     if (this.finished) {
       return {
         state,
@@ -163,12 +182,12 @@ export class AvoArcAgent {
         allowedNext: 'none; run is terminal',
       };
     }
-    if (this.actions >= this.config.maxActions) {
+    if (this.actionBudgetExhausted()) {
       return {
         state,
         environmentActions: this.actions,
         maxActions: this.config.maxActions,
-        terminalReason: 'action_budget_exhausted',
+        terminalReason: this.levelBudgetExhausted() ? 'level_action_budget_exhausted' : 'action_budget_exhausted',
         allowedNext: 'none; run is terminal',
       };
     }
@@ -195,9 +214,10 @@ export class AvoArcAgent {
       environmentActions: this.actions,
       maxActions: this.config.maxActions,
       terminalReason: 'none',
-      allowedNext: this.strategyEnabled
+      allowedNext: (this.strategyEnabled
         ? 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful'
-        : 'inspect evidence, take one currently legal gameplay action, use the scratch workspace, or finish',
+        : 'inspect evidence, take one currently legal gameplay action, use the scratch workspace, or finish')
+        + (levelBudget === undefined ? '' : `; current level ${this.currentLevel} action budget: ${this.levelActions}/${levelBudget}`),
     };
   }
 
@@ -508,7 +528,7 @@ export class AvoArcAgent {
   }
 
   async act({ action, x, y, reasoning = '' } = {}, trace = null) {
-    if (this.finished || this.actions >= this.config.maxActions) {
+    if (this.finished || this.actionBudgetExhausted()) {
       return this.toolResult('No action taken: run is already complete.', { frame: this.frame }, true);
     }
     const lifecycle = episodeState(this.frame);
@@ -609,7 +629,7 @@ export class AvoArcAgent {
       else if (lifecycle === 'GAME_OVER') stopReason = 'GAME_OVER';
       else if (lifecycle === 'ERROR') stopReason = 'ERROR';
       else if (entry.levelDelta > 0) stopReason = 'LEVEL_PROGRESS';
-      else if (this.actions >= this.config.maxActions) stopReason = 'ACTION_BUDGET_EXHAUSTED';
+      else if (this.actionBudgetExhausted()) stopReason = 'ACTION_BUDGET_EXHAUSTED';
       else if (entry.expectationMismatches.length) stopReason = 'EXPECTATION_MISMATCH';
       else continue;
 
@@ -671,6 +691,7 @@ export class AvoArcAgent {
     this.frame = this.adoptFrame(raw);
     if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
+    this.levelActions = this.frame.levelsCompleted > previousFrame.levelsCompleted ? 0 : this.levelActions + 1;
     if (kind === 'reset') {
       this.resets += 1;
       this.episodeSequence += 1;
@@ -729,7 +750,7 @@ export class AvoArcAgent {
         episodeId: this.episodeId(),
         telemetry: this.commandTelemetry(),
       },
-      isWin(this.frame),
+      this.isDone(),
     );
   }
 
@@ -1139,7 +1160,7 @@ export class AvoArcAgent {
       ? {
           ...this.lastResult.mechanismMetrics,
           supervisorInterventions: this.strategyEnabled ? this.supervisor.interventionSequence : 0,
-          actionBudgetExhaustions: this.actions >= this.config.maxActions
+          actionBudgetExhaustions: this.actionBudgetExhausted()
             && !this.finished
             && !isWin(this.frame) ? 1 : 0,
         }
@@ -1172,7 +1193,8 @@ export class AvoArcAgent {
       won: isWin(this.frame),
       loop: this.loop.kind,
       error: this.executionError ?? this.lastResult?.error ?? null,
-      terminationReason: this.lastResult?.terminationReason ?? null,
+      terminationReason: !this.executionError && !this.lastResult?.error && this.levelBudgetExhausted()
+        ? 'level-action-budget' : this.lastResult?.terminationReason ?? null,
       outerTurns: this.lastResult?.outerTurns ?? null,
       mechanismMetrics,
       hypothesisJournal: {
