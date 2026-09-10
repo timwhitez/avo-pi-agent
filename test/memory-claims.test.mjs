@@ -11,6 +11,29 @@ import { getRuntimeConfig } from '../src/config.mjs';
 const FIRST_REF = 'evidence-000001-aaaaaaaaaaaa';
 const SECOND_REF = 'evidence-000002-bbbbbbbbbbbb';
 
+test('successive corrections remain reloadable and retain their evidence chain', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-claim-chain-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const evidence = [{ id: FIRST_REF }, { id: SECOND_REF }];
+  let memory = new PersistentMemory(root, 'game').load();
+  let current = memory.applyClaim({ operation: 'propose', subject: 'action1',
+    type: 'hypothesis', content: 'First explanation' }, evidence).claim;
+  const ids = [current.id];
+  for (const operation of ['contradict', 'supersede', 'contradict', 'supersede']) {
+    current = memory.applyClaim({ operation, claimId: current.id,
+      content: `Revised explanation ${ids.length}`, evidenceRefs: [SECOND_REF] }, evidence).claim;
+    ids.push(current.id);
+    memory = new PersistentMemory(root, 'game').load();
+    memory.assertClaimEvidence(evidence);
+    assert.deepEqual(memory.data.claims.map((claim) => claim.id), ids);
+    assert.deepEqual(memory.relevantClaims({}, 8).map((claim) => claim.id), [current.id]);
+  }
+  const saved = JSON.parse(fs.readFileSync(memory.file, 'utf8'));
+  saved.claims.at(-1).evidenceRefs = [];
+  fs.writeFileSync(memory.file, JSON.stringify(saved));
+  assert.throws(() => new PersistentMemory(root, 'game').load(), /requires evidence/);
+});
+
 function frame(cell = 0) {
   return {
     game_id: 'memory-game',

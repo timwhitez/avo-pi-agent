@@ -110,6 +110,9 @@ test('secure reader rejects path replacement and in-place mutation during the ac
       hooks: {
         afterOpen() {
           fs.writeFileSync(mutated, '{"value":2}');
+          // Some filesystems coalesce back-to-back write timestamps. Make the
+          // identity change deterministic without depending on elapsed time.
+          fs.utimesSync(mutated, new Date(0), new Date(0));
         },
       },
     }), /changed while being read/);

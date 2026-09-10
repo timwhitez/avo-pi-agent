@@ -680,7 +680,9 @@ test('runner rejects provider condition drift before the provider preflight', ()
     assert.doesNotMatch(result.stdout, /validating a non-mock Responses request/);
 
     const budgetFile = path.join(root, 'budget-plan.json');
-    fs.writeFileSync(budgetFile, JSON.stringify(sealExperimentPlan(planDefinition())));
+    const budgetDefinition = planDefinition();
+    budgetDefinition.conditions.runtime.nodeVersion = process.version;
+    fs.writeFileSync(budgetFile, JSON.stringify(sealExperimentPlan(budgetDefinition)));
     const budgetDrift = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
       cwd: process.cwd(),
       encoding: 'utf8',

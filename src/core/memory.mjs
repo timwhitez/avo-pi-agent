@@ -642,8 +642,11 @@ function validateClaims(data) {
     const relation = claim.status === 'contradicted'
       ? 'contradicts'
       : claim.status === 'superseded' ? 'derivedFrom' : null;
+    // A correction can itself be corrected later. Every terminal successor
+    // is checked by this same loop; increasing sequences rule out cycles and
+    // require the chain to end at an evidence-backed confirmed claim.
     if (relation && !data.claims.some((entry) => entry.sequence > claim.sequence
-        && entry.status === 'confirmed'
+        && entry.status !== 'proposed'
         && entry.evidenceRefs.length > 0
         && entry.relations[relation].includes(claim.id))) {
       throw new Error(`memory ${claim.status} claim has no later evidence-backed correction`);

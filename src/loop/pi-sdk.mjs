@@ -1218,6 +1218,9 @@ function isReducedToolResult(message) {
 function toolRecoveryHint(toolName, details) {
   const ref = String(details?.evidenceRef || '');
   if (ref) return `exact environment evidence remains available via trajectory_read ref=${ref}`;
+  if (toolName === 'workspace_read') {
+    return 'use workspace_read with the same path and a smaller limit; resume at the returned nextOffset';
+  }
   if (RECALL_SAFE_TOOLS.has(toolName)) {
     return 're-call this read-only tool with narrower bounds if its result is needed';
   }

@@ -355,9 +355,16 @@ test('state hashing rejects links and Git inspection detects untracked files', (
 });
 
 test('dependency inspection records the exact installed Node and Python versions', () => {
-  const dependencies = inspectDependencyClosure({ root: process.cwd(), python: process.env.ARC_PYTHON || 'python' });
-  assert.equal(dependencies.nodeTree.dependencies['@earendil-works/pi-agent-core'].version, '0.84.2');
-  assert.ok(dependencies.pythonPackages.some((entry) => entry.name === 'arc-agi' && entry.version === '0.9.9'));
+  const python = process.env.ARC_PYTHON || 'python';
+  const dependencies = inspectDependencyClosure({ root: process.cwd(), python });
+  const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+  assert.equal(dependencies.nodeTree.dependencies['@earendil-works/pi-agent-core'].version,
+    lock.packages['node_modules/@earendil-works/pi-agent-core'].version);
+  const installed = spawnSync(python, ['-c',
+    'import importlib.metadata; print(importlib.metadata.version("arc-agi"))'], { encoding: 'utf8' });
+  assert.equal(installed.status, 0, 'install the official ARC runtime before running dependency inspection');
+  assert.equal(dependencies.pythonPackages.find((entry) => entry.name === 'arc-agi')?.version,
+    installed.stdout.trim());
   assert.equal(dependencies.nodePackageCount > 1, true);
   assert.equal(dependencies.pythonPackageCount > 1, true);
 });

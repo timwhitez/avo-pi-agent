@@ -3,7 +3,7 @@ const ENTRIES = [
     id: 'avo-reference-boundary',
     kind: 'method',
     source: 'https://arxiv.org/abs/2603.24517',
-    text: 'The public AVO architecture evaluates and installs behavior-changing candidates. This harness does not implement that mechanism; direct environment interaction remains the policy.',
+    text: 'The AVO paper demonstrates CUDA candidate editing, evaluation, and a committed improvement lineage. This ARC harness does not implement that code-evolution experiment. Do not infer that ARC direct interaction requires a policy-candidate installer; the ARC adaptation has a different task interface and feedback channel.',
   },
   {
     id: 'hypothesis-journal-boundary',

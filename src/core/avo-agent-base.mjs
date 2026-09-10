@@ -173,6 +173,15 @@ export class AvoArcAgent {
   runtimeStatus() {
     const state = episodeState(this.frame);
     const levelBudget = this.perLevelBudgets[this.currentLevel];
+    if (this.executionError) {
+      return {
+        state,
+        environmentActions: this.actions,
+        maxActions: this.config.maxActions,
+        terminalReason: 'execution_error',
+        allowedNext: 'none; environment or durable state is uncertain; run is terminal',
+      };
+    }
     if (this.finished) {
       return {
         state,
@@ -354,15 +363,16 @@ export class AvoArcAgent {
       {
         name: 'workspace_read',
         label: 'Read an analysis workspace file',
-        description: 'Read a UTF-8 .py, .json, .md, .txt, or .csv file from the confined per-game workspace.',
+        description: 'Read a bounded page of a UTF-8 .py, .json, .md, .txt, or .csv scratch file. For longer files, repeat with the returned nextOffset. Offsets and limits count UTF-16 code units; pages never split a Unicode character.',
         parameters: {
           type: 'object', required: ['path'],
-          properties: { path: { type: 'string' } }, additionalProperties: false,
+          properties: {
+            path: { type: 'string' },
+            offset: { type: 'integer', minimum: 0 },
+            limit: { type: 'integer', minimum: 1, maximum: 24_000 },
+          }, additionalProperties: false,
         },
-        execute: async ({ path }) => {
-          const content = this.workspace.read(path);
-          return this.toolResult(content, { path, bytes: Buffer.byteLength(content, 'utf8') });
-        },
+        execute: async (input) => this.readWorkspace(input),
       },
       {
         name: 'workspace_write',
@@ -557,12 +567,20 @@ export class AvoArcAgent {
     }
 
     const previousFrame = this.frame;
-    if (trace) trace.phase = 'environment';
-    const raw = await this.environment.step(action, data, { text: reasoning });
-    if (trace) trace.phase = 'transition';
-    const result = this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
-    if (trace) trace.phase = 'complete';
-    return result;
+    let phase = 'environment';
+    try {
+      if (trace) trace.phase = phase;
+      const raw = await this.environment.step(action, data, { text: reasoning });
+      phase = 'transition';
+      if (trace) trace.phase = phase;
+      const result = this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
+      if (trace) trace.phase = 'complete';
+      return result;
+    } catch (error) {
+      this.finished = true;
+      this.executionError = `action ${phase} failure`;
+      throw new Error(this.executionError, { cause: error });
+    }
   }
 
   async actSequence(input = {}) {
@@ -579,9 +597,11 @@ export class AvoArcAgent {
     let stopReason = 'SEQUENCE_COMPLETE';
     let rejectionCode = null;
     let terminate = false;
+    let stall = null;
 
     for (const [index, step] of requested.entries()) {
       const before = this.frame;
+      const beforeLevel = this.currentLevel;
       const beforeActions = this.actions;
       const beforeEvidenceSequence = this.evidenceSequence;
       const trace = { phase: 'guard' };
@@ -597,7 +617,8 @@ export class AvoArcAgent {
           && evidence.action === step.action
           && evidence.actionIndex === this.actions;
         if (durableTransition) {
-          executed.push(sequenceExecutedEntry(index, step, before, this.frame, evidence.id));
+          executed.push(sequenceExecutedEntry(index, step, before, this.frame, evidence.id,
+            this.currentLevel - beforeLevel));
           stopReason = 'INTERNAL_ERROR';
           appendSkipped(skipped, requested, index + 1, stopReason);
           this.executionError = 'action sequence post-transition failure';
@@ -621,16 +642,19 @@ export class AvoArcAgent {
         break;
       }
 
-      const entry = sequenceExecutedEntry(index, step, before, this.frame, result.details.evidenceRef);
+      const entry = sequenceExecutedEntry(index, step, before, this.frame, result.details.evidenceRef,
+        result.details.currentLevelDelta);
       executed.push(entry);
+      if (result.details.stall?.stalled) stall = result.details.stall;
 
       const lifecycle = episodeState(this.frame);
       if (lifecycle === 'WIN') stopReason = 'WIN';
       else if (lifecycle === 'GAME_OVER') stopReason = 'GAME_OVER';
       else if (lifecycle === 'ERROR') stopReason = 'ERROR';
-      else if (entry.levelDelta > 0) stopReason = 'LEVEL_PROGRESS';
+      else if (entry.currentLevelDelta > 0) stopReason = 'LEVEL_PROGRESS';
       else if (this.actionBudgetExhausted()) stopReason = 'ACTION_BUDGET_EXHAUSTED';
       else if (entry.expectationMismatches.length) stopReason = 'EXPECTATION_MISMATCH';
+      else if (stall) stopReason = 'SUPERVISOR_INTERVENTION';
       else continue;
 
       appendSkipped(skipped, requested, index + 1, stopReason);
@@ -652,6 +676,7 @@ export class AvoArcAgent {
       skipped,
       stopReason,
       rejectionCode,
+      ...(stall ? { stall } : {}),
       evidenceRef: executed.at(-1)?.evidenceRef
         ?? skipped.find((entry) => entry.evidenceRef)?.evidenceRef
         ?? this.currentObservationRef,
@@ -675,23 +700,37 @@ export class AvoArcAgent {
     }
 
     const previousFrame = this.frame;
-    const raw = await this.environment.reset({ text: rationale });
-    return this.acceptEnvironmentTransition({
-      raw,
-      previousFrame,
-      action: 'RESET',
-      data: {},
-      reasoning: rationale,
-      kind: 'reset',
-    });
+    let phase = 'environment';
+    try {
+      const raw = await this.environment.reset({ text: rationale });
+      phase = 'transition';
+      return this.acceptEnvironmentTransition({
+        raw,
+        previousFrame,
+        action: 'RESET',
+        data: {},
+        reasoning: rationale,
+        kind: 'reset',
+      });
+    } catch (error) {
+      this.finished = true;
+      this.executionError = `reset ${phase} failure`;
+      throw new Error(this.executionError, { cause: error });
+    }
   }
 
   acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind }) {
+    const previousLevel = this.currentLevel;
     this.previousFrame = previousFrame;
     this.frame = this.adoptFrame(raw);
+    const currentLevelDelta = this.currentLevel - previousLevel;
     if (this.frame.fullReset) this.executionGuids.push(this.frame.guid);
     this.actions += 1;
-    this.levelActions = this.frame.levelsCompleted > previousFrame.levelsCompleted ? 0 : this.levelActions + 1;
+    // A full reset starts a fresh level budget; charge the reset itself to
+    // that budget. Ordinary same-level resets retain their accumulated cost.
+    this.levelActions = this.frame.fullReset
+      ? 1
+      : currentLevelDelta > 0 ? 0 : this.levelActions + 1;
     if (kind === 'reset') {
       this.resets += 1;
       this.episodeSequence += 1;
@@ -699,7 +738,8 @@ export class AvoArcAgent {
     } else {
       this.gameplayActions += 1;
     }
-    const progressed = this.frame.levelsCompleted > this.previousFrame.levelsCompleted || isWin(this.frame);
+    const objectiveLevelDelta = this.frame.levelsCompleted - previousFrame.levelsCompleted;
+    const progressed = objectiveLevelDelta > 0 || isWin(this.frame);
     const evidence = this.recordEvidence({
       type: kind === 'reset' ? 'environment-reset' : 'environment-action',
       action,
@@ -707,7 +747,7 @@ export class AvoArcAgent {
       reasoning,
       beforeFrame: previousFrame,
       frame: this.frame,
-      levelDelta: this.frame.levelsCompleted - this.previousFrame.levelsCompleted,
+      levelDelta: objectiveLevelDelta,
     });
     const wasNew = !this.uniqueStates.has(evidence.observationContentHash);
     this.uniqueStates.add(evidence.observationContentHash);
@@ -743,6 +783,7 @@ export class AvoArcAgent {
         evidenceRef: evidence.id,
         contextExactEvidence: false,
         progressed,
+        currentLevelDelta,
         novelState: wasNew,
         objective: this.objectiveState(),
         ...(stall ? { stall } : {}),
@@ -883,6 +924,31 @@ export class AvoArcAgent {
 
   claimEvidenceLedger() {
     return this.evidenceLedger;
+  }
+
+  readWorkspace({ path, offset = 0, limit = 16_000 }) {
+    if (!Number.isSafeInteger(offset) || offset < 0
+        || !Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
+      throw new Error('workspace_read requires a non-negative offset and limit from 1 through 24000');
+    }
+    const content = this.workspace.read(path);
+    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    if (!Number.isSafeInteger(maxChars) || maxChars <= 256) {
+      throw new Error('workspace_read requires a tool result bound greater than 256 characters');
+    }
+    if (offset > content.length || (offset > 0 && isSurrogateBoundary(content, offset))) {
+      throw new Error('workspace_read offset must be within the file and on a Unicode character boundary');
+    }
+    let end = Math.min(content.length, offset + Math.min(limit, maxChars - 256));
+    if (isSurrogateBoundary(content, end)) end -= 1;
+    if (end === offset && offset < content.length) {
+      throw new Error('workspace_read limit is too small for the next Unicode character');
+    }
+    const page = content.slice(offset, end);
+    const pagination = { offset, nextOffset: end < content.length ? end : null, totalChars: content.length };
+    const text = offset > 0 || end < content.length
+      ? `${page}\nWORKSPACE_PAGE ${JSON.stringify(pagination)}` : page;
+    return this.toolResult(text, { path, bytes: Buffer.byteLength(page, 'utf8'), ...pagination });
   }
 
   recordEvidence({
@@ -1299,7 +1365,7 @@ function expectationMismatches(expected, before, after) {
   return mismatches;
 }
 
-function sequenceExecutedEntry(index, step, before, after, evidenceRef) {
+function sequenceExecutedEntry(index, step, before, after, evidenceRef, currentLevelDelta = 0) {
   return {
     index,
     action: step.action,
@@ -1308,6 +1374,7 @@ function sequenceExecutedEntry(index, step, before, after, evidenceRef) {
     state: after.state,
     levelsCompleted: after.levelsCompleted,
     levelDelta: after.levelsCompleted - before.levelsCompleted,
+    currentLevelDelta,
     afterHash: frameHash(after),
     expectationMismatches: expectationMismatches(step.expected, before, after),
   };
@@ -1315,6 +1382,12 @@ function sequenceExecutedEntry(index, step, before, after, evidenceRef) {
 
 function actionData(step) {
   return step.action === 'ACTION6' ? { x: step.x ?? null, y: step.y ?? null } : {};
+}
+
+function isSurrogateBoundary(text, offset) {
+  return offset > 0 && offset < text.length
+    && /[\uD800-\uDBFF]/.test(text[offset - 1])
+    && /[\uDC00-\uDFFF]/.test(text[offset]);
 }
 
 function appendSkipped(output, requested, start, reason, evidenceRef = null) {

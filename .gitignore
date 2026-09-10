@@ -18,3 +18,5 @@ runs/*
 .DS_Store
 coverage/
 state/
+flux/.local
+flux/changes
