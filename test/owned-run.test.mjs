@@ -33,6 +33,7 @@ test('owned wrapper pauses and cleans its real runner and ARC descendants', { sk
       const bridgeFile = path.join(root, 'bridge.py');
       fs.writeFileSync(bridgeFile, `import json, pathlib, threading, time, sys
 p = pathlib.Path(${JSON.stringify(heartbeat)})
+p.write_text("0")
 def tick():
     count = 0
     while True:
@@ -49,6 +50,8 @@ import { ArcBridgeClient } from ${moduleUrl('src/arc/bridge-client.mjs')};
 import { managedProcessGroup } from ${moduleUrl('src/local/process-group.mjs')};
 import fs from 'node:fs';
 const bridge = new ArcBridgeClient({ python: ${JSON.stringify(process.env.ARC_PYTHON || 'python3')}, script: ${JSON.stringify(bridgeFile)}, cwd: ${JSON.stringify(root)} });
+// Exercise startup slower than the virtual 400ms deadline without a race.
+if (${JSON.stringify(termination)} === 'timeout') await new Promise((resolve) => setTimeout(resolve, 600));
 await bridge.ensureProcess();
 await bridge.request({ cmd: 'observe' });
 if (${JSON.stringify(termination)}.startsWith('SIGKILL')) process.on('SIGTERM', () => {});
@@ -67,9 +70,16 @@ else setInterval(() => {}, 1000);
 import { enterOwnedRun } from ${moduleUrl('src/local/owned-run.mjs')};
 import { acquireLocalExecutionLock } from ${moduleUrl('src/local/run-lock.mjs')};
 import { runProcess } from ${moduleUrl('src/benchmark/process-runner.mjs')};
+import { mock } from 'node:test';
+import fs from 'node:fs';
 const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId: 'fixture', kind: 'fixture' });
 process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
+const timeoutCase = ${JSON.stringify(termination)} === 'timeout';
+if (timeoutCase) mock.timers.enable({ apis: ['setTimeout'] });
+const expire = timeoutCase ? setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(path.join(root, 'expire'))})) mock.timers.tick(400);
+}, 10) : null;
 try {
   const active = runProcess(process.execPath, [${JSON.stringify(worker)}], {
     env: { PATH: process.env.PATH }, timeoutMs: ${termination === 'timeout' ? 400 : 5000},
@@ -78,8 +88,13 @@ try {
   let protectedLock = false;
   try { lock.release(); } catch { protectedLock = true; }
   if (!protectedLock) throw new Error('lock released while runner was alive');
-  await active;
-} finally { await scope.close(); lock.release(); }
+  const result = await active;
+  if (timeoutCase && !result.timedOut) throw new Error('timeout callback did not execute');
+} finally {
+  if (expire) clearInterval(expire);
+  if (timeoutCase) mock.timers.reset();
+  await scope.close(); lock.release();
+}
 `);
       const child = spawn(process.execPath, [wrapper], {
         cwd: root, detached: !termination.endsWith('bootstrap'), stdio: ['ignore', 'pipe', 'pipe'],
@@ -100,6 +115,7 @@ try {
         const group = liveGroupMembers(groupId);
         assert.ok(group.includes(ids.worker), 'runner must share the wrapper group');
         assert.ok(group.includes(ids.bridge), 'ARC must share the wrapper group');
+        if (termination === 'timeout') fs.writeFileSync(path.join(root, 'expire'), 'expire');
         if (termination !== 'timeout') {
           signalProcessTree({ pid: groupId }, 'SIGSTOP');
           await delay(60);
@@ -119,7 +135,7 @@ try {
         }
         const result = await Promise.race([closed, delay(8000).then(() => null)]);
         assert.ok(result, `wrapper did not settle: ${errors}`);
-        if (termination.startsWith('normal')) assert.equal(result.code, 0, errors);
+        if (termination.startsWith('normal') || termination === 'timeout') assert.equal(result.code, 0, errors);
         for (let i = 0; i < 300 && liveGroupMembers(groupId).length; i += 1) await delay(10);
         assert.deepEqual(liveGroupMembers(groupId), [], 'no running owned descendants may remain');
         const replacement = acquireLocalExecutionLock({ root, runId: 'next', kind: 'fixture', inheritedToken: '' });
