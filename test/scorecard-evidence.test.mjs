@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import {
   evaluateScorecardCoverage,
@@ -172,6 +173,45 @@ test('exact execution coverage also requires per-game action and reset totals', 
     assert.equal(result.scoreStatus, 'rejected');
     assert.match(result.rejectionReason, /action or reset totals differ/);
   }
+});
+
+test('full RESET converts controller totals without accepting missing executions or unrelated counter drift', () => {
+  const raw = snapshot(['g1-v1']);
+  raw.scorecard.environments[0].runs.push({ ...raw.scorecard.environments[0].runs[0], actions: 0 });
+  const evidence = normalizeScorecardSnapshot(raw);
+  const published = records(['g1-v1']);
+  published[0].executions.push({ ...published[0].executions[0], executionOccurrence: 1 });
+  Object.assign(published[0], { actions: 4, resets: 1, fullResets: 1 });
+  const before = JSON.stringify(published);
+  assert.equal(evaluateScorecardCoverage([evidence], published).scoreStatus, 'official');
+  assert.equal(JSON.stringify(published), before);
+  for (const changes of [
+    { fullResets: 2 }, { fullResets: -1 }, { fullResets: 1.5 },
+    { resets: 0 }, { actions: 5 }, { resets: 2 },
+    { executions: published[0].executions.slice(0, 1) },
+  ]) {
+    assert.equal(evaluateScorecardCoverage([evidence], [{ ...published[0], ...changes }]).scoreStatus, 'rejected');
+  }
+});
+
+test('installed official SDK excludes full RESET from both counter domains', () => {
+  const result = spawnSync(process.env.ARC_PYTHON || 'python', ['-c', `
+import json
+from types import SimpleNamespace as N
+from arc_agi.scorecard import Scorecard
+from arcengine import GameState
+s = Scorecard()
+def frame(action):
+    return N(game_id="fixture", action_input=N(id=N(value=action)), state=GameState.NOT_FINISHED, levels_completed=0)
+s.update_scorecard("same-guid", frame(0), True)
+s.update_scorecard("same-guid", frame(1), False)
+s.update_scorecard("same-guid", frame(0), False)
+s.update_scorecard("same-guid", frame(0), True)
+c = s.cards["fixture"]
+print(json.dumps({"actions": c.actions, "resets": c.resets, "executions": c.total_plays}))
+`], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.status, 0, result.stderr || String(result.error));
+  assert.deepEqual(JSON.parse(result.stdout.trim()), { actions: [2, 0], resets: [1, 0], executions: 2 });
 });
 
 test('published score extraction requires exact shared authority without coercion', () => {

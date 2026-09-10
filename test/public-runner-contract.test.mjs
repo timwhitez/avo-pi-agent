@@ -558,11 +558,12 @@ class Env:
         if action is GameAction.RESET:
             self.full_reset = self.steps == 0
             self.steps += 1
-            self.run_steps[-1] += 1
-            self.run_resets[-1] += 1
             if self.full_reset:
                 self.run_steps.append(0)
                 self.run_resets.append(0)
+            else:
+                self.run_steps[-1] += 1
+                self.run_resets[-1] += 1
             self.reset_level()
             return Frame(self)
         self.full_reset = False
