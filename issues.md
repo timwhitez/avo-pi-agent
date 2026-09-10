@@ -8,7 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#317](https://github.com/timwhitez/avo-pi-agent/issues/317): timeout test readiness race | Separate fixture repair required | 400ms timeout includes startup but test assumes readiness first; isolated11/11 passed after concurrent failure. Do not skip or change production timeouts |
+| [#317](https://github.com/timwhitez/avo-pi-agent/issues/317): timeout test readiness race | Native test clock waits for actual descendant readiness before triggering timeout; full validation/review pending | Deliberate600ms worker startup exceeds400ms virtual timeout; installed-dependency focused11/11 passed. Production timers unchanged; no skipped cases |
 | [#315 / PR #316](https://github.com/timwhitez/avo-pi-agent/pull/316): full RESET scorecard counter domain | Code-head APPROVE at3f32a8c; serial full root621/621 passed with zero skips | Reviewer12/12 incl. SDK; canonical CLI, UI103/build/install/audit, root audit0/scan/offline passed. Concurrent root619/621 startup race is separately tracked by #317; isolated lifecycle11/11 passed. Both logs retained |
 | Next benchmark | DeepSeek/high; pending #315 and current-main validation | r14 is terminal, zero wins; no new paid run until repairs are reviewed and live Issues/PRs are0/0 |
 
