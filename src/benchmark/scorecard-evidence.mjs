@@ -359,12 +359,17 @@ function normalizeRecordCoverage(records) {
     if (counters.has(versionedGameId)) {
       throw new Error(`published game records contain duplicate ${versionedGameId}`);
     }
-    counters.set(versionedGameId, {
-      actions: strictCount(value.actions, `published game record ${recordIndex} actions`),
-      resets: strictCount(value.resets, `published game record ${recordIndex} resets`),
-    });
     const executions = requireArray(value.executions, `published game record ${recordIndex} executions`);
     if (executions.length === 0) throw new Error(`published game record ${recordIndex} has no execution IDs`);
+    const actions = strictCount(value.actions, `published game record ${recordIndex} actions`);
+    const resets = strictCount(value.resets, `published game record ${recordIndex} resets`);
+    const fullResets = strictCount(value.fullResets ?? 0, `published game record ${recordIndex} fullResets`);
+    if (fullResets > resets || resets > actions || fullResets >= executions.length) {
+      throw new Error(`published game record ${recordIndex} full-reset accounting is inconsistent`);
+    }
+    // SDK new_play records a full RESET as a new execution, not as an action
+    // or ordinary reset. Keep raw controller totals unchanged in the report.
+    counters.set(versionedGameId, { actions: actions - fullResets, resets: resets - fullResets });
     return executions.map((execution, executionIndex) => {
       const item = requireRecord(execution, `published game record ${recordIndex} execution ${executionIndex}`);
       if (item.versionedGameId !== versionedGameId) {

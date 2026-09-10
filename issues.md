@@ -8,6 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
+| [#315](https://github.com/timwhitez/avo-pi-agent/issues/315): full RESET scorecard counter domain | Reconciliation fix and counter-drift negatives implemented; full tests and review pending | r14 ended with zero wins; local323/23 includes3 fullResets, official320/20 excludes them. Preserve original artifacts and rejected score |
 | Next benchmark | Final target confirmed: deepseek-v4-flash/high; awaiting fresh admission after PR #314 | Expanded existing context limits and system-role configuration prepared; one game attempt per selected game; r13 remains separate, not capability evidence |
 
 ## Latest verified repairs
