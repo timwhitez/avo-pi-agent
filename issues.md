@@ -8,8 +8,9 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#315](https://github.com/timwhitez/avo-pi-agent/issues/315): full RESET scorecard counter domain | Reconciliation fix and counter-drift negatives implemented; full tests and review pending | r14 ended with zero wins; local323/23 includes3 fullResets, official320/20 excludes them. Preserve original artifacts and rejected score |
-| Next benchmark | Final target confirmed: deepseek-v4-flash/high; awaiting fresh admission after PR #314 | Expanded existing context limits and system-role configuration prepared; one game attempt per selected game; r13 remains separate, not capability evidence |
+| [#317](https://github.com/timwhitez/avo-pi-agent/issues/317): timeout test readiness race | Separate fixture repair required | 400ms timeout includes startup but test assumes readiness first; isolated11/11 passed after concurrent failure. Do not skip or change production timeouts |
+| [#315 / PR #316](https://github.com/timwhitez/avo-pi-agent/pull/316): full RESET scorecard counter domain | Code-head APPROVE at3f32a8c; serial full root621/621 passed with zero skips | Reviewer12/12 incl. SDK; canonical CLI, UI103/build/install/audit, root audit0/scan/offline passed. Concurrent root619/621 startup race is separately tracked by #317; isolated lifecycle11/11 passed. Both logs retained |
+| Next benchmark | DeepSeek/high; pending #315 and current-main validation | r14 is terminal, zero wins; no new paid run until repairs are reviewed and live Issues/PRs are0/0 |
 
 ## Latest verified repairs
 
@@ -42,7 +43,21 @@ carry current merge/closure status. Detailed past audits are in
   fixed by merged [PR #185](https://github.com/timwhitez/avo-pi-agent/pull/185),
   not deleted merely to reduce the count.
 
-## Latest benchmark: r13 failed, not a capability result
+## Latest benchmark: r14 terminal, score rejected
+
+`arc-deepseek-tuning-minimal-r14-20260908` finished on 2026-09-08 at19:50:38Z,
+on frozen commit `3d6a2f5`, after admission with Issues/PRs0/0. DeepSeek/high,
+cold state, one attempt per game: ft09 4/6 at152 commands, sb26 1/8 at61,
+cd82 0/6 at110. No whole-game WIN. Full RESET caused six execution occurrences
+within one scorecard; local323 actions/23 resets includes3 fullResets, SDK320/20
+excludes them. #315 fixes that reconciliation domain mismatch; the original
+diagnostic-recovered/rejected report and private artifacts remain unchanged.
+
+The model-capability boundary is not established. The disjoint held-out set is
+unplayed. Current main additionally contains remote recovery changes at `00ab6f7`,
+which were not part of r14 and must not be credited retroactively to that run.
+
+## Previous benchmark: r13 failed, not a capability result
 
 `arc-terra-tuning-minimal-r13-20260908` used a clean cold start on the single
 commit above, Terra/high, and three tuning games (`cd82`, `ft09`, `sb26`).
