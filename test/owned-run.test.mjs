@@ -33,6 +33,7 @@ test('owned wrapper pauses and cleans its real runner and ARC descendants', { sk
       const bridgeFile = path.join(root, 'bridge.py');
       fs.writeFileSync(bridgeFile, `import json, pathlib, threading, time, sys
 p = pathlib.Path(${JSON.stringify(heartbeat)})
+p.write_text("0")
 def tick():
     count = 0
     while True:
