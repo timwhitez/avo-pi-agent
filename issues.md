@@ -9,7 +9,7 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Superseding-head APPROVE41bf168; canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Next benchmark | DeepSeek/high; awaiting PR #320 validation/merge and fresh0/0 admission | r15 is terminal, zero wins; new run must use a frozen current commit and independent cold state |
+| Next benchmark | DeepSeek/high; context-retention experiment pending review and fresh 0/0 admission | Existing recent-tool-results setting 64 → 2048; token/message bounds retained. No new paid run started |
 
 ## Latest verified repairs
 
@@ -50,7 +50,40 @@ carry current merge/closure status. Detailed past audits are in
   fixed by merged [PR #185](https://github.com/timwhitez/avo-pi-agent/pull/185),
   not deleted merely to reduce the count.
 
-## Latest benchmark: r15 complete, zero whole-game wins
+## Latest benchmark: r16 complete, zero whole-game wins
+
+`arc-deepseek-tuning-minimal-r16-20260912` admitted at2026-09-12T08:43:44Z with
+live Issues/PRs0/0. Frozen commit `af73532a34b558db84c6ba0c88e28940ba0f97a7`,
+plan `f2c119aead0acc1b7aaa2701478fee4aebf387892aefbc840a9b650b12fac3dc`,
+capsule `4b2ddcb66c74107c16760a46d67e1731d8bf90afab2bc244538f28e3eae5cc8d`.
+DeepSeek/high, original provider/key, independent cold state, minimal-v1 and
+same tuning cd82/ft09/sb26 and configured budgets as r15. The new loop permits
+one bounded ACTIVE text-only continuation; benefit remains unproven.
+Real provider/Pi/workspace/ARC preflights passed; cd82 started at08:44:01Z.
+The process exited 0; last game finished at 2026-09-12T11:33:49Z. Report status
+complete, scoreStatus official, score 9.615187344779182; exact three games / three
+executions / one session, no missing or unexpected coverage. cd82: 0/6 at 110
+actions; ft09: 3/6 at 108; sb26: 1/8 at 72. All ended level-action-budget,
+error=null, won=false. Total 290 commands, 288 gameplay, two RESET; no full
+resets, rejected commands or post-terminal gameplay.
+
+341 model calls; one provider error/retry, four trajectory tool failures and one
+Python execution failure. Trajectory failures were three invalid regions and one
+incorrect evidence hash suffix (the requested sequence 24 exists with a different
+ID). Python root cause is not retained by the categorical diagnostic. These
+incidents and exhausted study budgets do not establish a model-capability boundary.
+Held-out r11l/sc25/tn36 remain unplayed; prior artifacts are unchanged.
+
+Next hypothesis: retaining more tool outputs may reduce repeated evidence reads.
+r16 made 517 trajectory reads; soft compaction removes old results even below
+the token ceiling. Reuse AVO_TRANSCRIPT_RECENT_TOOL_RESULTS=2048 instead of 64;
+do not add code or claim causality from the incorrect reference. Local production
+boundTranscript checks retain 100 paired results below budget and still enforce
+token/message ceilings; existing transcript tests passed 13/13, zero skips
+(`/tmp/avo-r17-context-check.log`). This is synthetic configuration evidence,
+not paid-run improvement. A new run requires reviewed conditions and cold state.
+
+## Previous benchmark: r15 complete, zero whole-game wins
 
 `arc-deepseek-tuning-minimal-r15-20260911` finished at2026-09-10T18:07:41Z on
 frozen commit `ff75e4c`. Complete report, exact3/3 execution/game coverage in one
