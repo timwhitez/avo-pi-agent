@@ -78,7 +78,7 @@ test('installed Pi adapter proves the full production schema and 16K tail over l
   }
 });
 
-test('installed Pi stops after a nonterminal text-only Responses turn', async () => {
+test('installed Pi stops after one bounded nonterminal text-only continuation', async () => {
   const requests = [];
   const server = http.createServer(async (request, response) => {
     const chunks = [];
@@ -118,8 +118,9 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
         terminalReason: 'none', allowedNext: 'take a legal action',
       }),
     });
-    assert.equal(requests.length, 1, String(result.error));
-    assert.equal(result.outerTurns, 1);
+    assert.equal(requests.length, 2, String(result.error));
+    assert.equal(result.outerTurns, 2);
+    assert.equal(result.noToolContinuations, 1);
     assert.equal(result.exhaustedOuterTurns, false);
     assert.equal(result.error, null);
     assert.equal(result.terminationReason, 'assistant-no-tool');
@@ -129,6 +130,54 @@ test('installed Pi stops after a nonterminal text-only Responses turn', async ()
     server.close();
   }
 });
+
+for (const scenario of ['text-then-tool', 'budget', 'terminal', 'explicit-finish', 'provider-error']) {
+  test(`installed Pi bounded no-tool continuation: ${scenario}`, async (t) => {
+    const requests = [];
+    let stopped = false;
+    let calls = 0;
+    const server = http.createServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      if (scenario === 'provider-error' && requests.length === 2) {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'local nontransient rejection' } }));
+      } else if (scenario === 'explicit-finish' || (scenario === 'text-then-tool' && requests.length === 2)) {
+        sendToolCall(response, { responseId: `resp_${requests.length}`, itemId: `fc_${requests.length}`,
+          callId: `call_${requests.length}`, name: 'finish', argumentsJson: '{}' });
+      } else {
+        sendTextResponse(response, { responseId: `resp_${requests.length}`, itemId: `msg_${requests.length}`, text: 'Planning without a tool.' });
+      }
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'x'.repeat(32);
+    t.after(() => { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; });
+    const loop = await createPiSdkLoop({ provider: {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+      model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+    }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: scenario === 'budget' ? 1 : 8 });
+    const result = await loop.run({ systemPrompt: 'Local continuation fixture.', initialPrompt: 'Begin.',
+      tools: [{ name: 'finish', label: 'Finish', description: 'End the local fixture.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => { calls += 1; stopped = true; return { text: 'Ended.', details: {}, terminate: true }; },
+      }],
+      shouldStop: () => stopped,
+      runtimeStatus: () => ({ state: scenario === 'terminal' ? 'GAME_OVER' : 'ACTIVE',
+        environmentActions: 0, maxActions: 2, terminalReason: stopped ? 'explicit_finish' : 'none', allowedNext: 'use a tool or finish' }),
+    });
+    const continued = ['text-then-tool', 'provider-error'].includes(scenario);
+    assert.equal(requests.length, continued ? 2 : 1, String(result.error));
+    assert.equal(result.noToolContinuations, continued ? 1 : 0);
+    assert.equal(calls, ['text-then-tool', 'explicit-finish'].includes(scenario) ? 1 : 0);
+    if (continued) assert.match(JSON.stringify(requests[1].input), /AVO_RUNTIME_STATUS/);
+    if (scenario === 'provider-error') { assert.ok(result.error); assert.equal(result.terminationReason, null); }
+    else assert.equal(result.error, null);
+  });
+}
 
 test('installed Pi keeps provider failures distinct from model termination', async () => {
   const events = [];

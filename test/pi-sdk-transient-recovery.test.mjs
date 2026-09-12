@@ -154,9 +154,10 @@ test('non-transient session errors still end the run with the error preserved', 
   assert.equal(result.terminationReason, null);
 });
 
-test('assistant turns without a tool call fail closed instead of consuming the outer-turn budget', async () => {
+test('assistant turns without a tool call get one continuation rather than consuming the outer-turn budget', async () => {
   const { result, continues } = await runLoop(['__NO_TOOL__'], 20);
-  assert.equal(continues, 1);
+  assert.equal(continues, 2);
+  assert.equal(result.noToolContinuations, 1);
   assert.equal(result.error, null);
   assert.equal(result.terminationReason, 'assistant-no-tool');
   assert.equal(result.exhaustedOuterTurns, false);

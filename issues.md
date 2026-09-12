@@ -8,7 +8,8 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| Next benchmark | DeepSeek/high; awaiting PR #318 merge and fresh0/0 admission | r14 is terminal, zero wins; new run must use a frozen current commit and independent cold state |
+| [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Superseding-head APPROVE41bf168; canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
+| Next benchmark | DeepSeek/high; awaiting PR #320 validation/merge and fresh0/0 admission | r15 is terminal, zero wins; new run must use a frozen current commit and independent cold state |
 
 ## Latest verified repairs
 
@@ -49,7 +50,22 @@ carry current merge/closure status. Detailed past audits are in
   fixed by merged [PR #185](https://github.com/timwhitez/avo-pi-agent/pull/185),
   not deleted merely to reduce the count.
 
-## Latest benchmark: r14 terminal, score rejected
+## Latest benchmark: r15 complete, zero whole-game wins
+
+`arc-deepseek-tuning-minimal-r15-20260911` finished at2026-09-10T18:07:41Z on
+frozen commit `ff75e4c`. Complete report, exact3/3 execution/game coverage in one
+scorecard, accepted score16.704040803763792. No whole-game WIN: ft09 4/6 at106
+actions (assistant-no-tool); sb26 1/8 at75 and cd82 0/6 at110 (level-action-budget).
+Total291 actions,287 gameplay,4 RESET; zero full resets/rejected/post-terminal actions.
+No provider errors/retries, hard compaction or tool-result truncation; there were
+3 trajectory-tool errors and2 Python execution errors. These are not capability proof.
+
+ft09 stopped without calling finish despite remaining budget; last output14293
+tokens was below65536 cap. #319 tests one bounded continuation rather than declaring
+this a model limit. Historical artifacts are unchanged; held-out r11l/sc25/tn36
+remain unplayed. A new run must keep its own frozen conditions and state.
+
+## Previous benchmark: r14 terminal, score rejected
 
 `arc-deepseek-tuning-minimal-r14-20260908` finished on 2026-09-08 at19:50:38Z,
 on frozen commit `3d6a2f5`, after admission with Issues/PRs0/0. DeepSeek/high,
