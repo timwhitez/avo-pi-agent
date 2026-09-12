@@ -374,6 +374,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
       const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|server_is_overloaded|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
+      let noToolContinuations = 0;
       for (;;) {
         const sessionError = agent.state.errorMessage;
         if (sessionError) {
@@ -386,7 +387,11 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           if (cooldownMs > 0) await sleep(cooldownMs);
           agent.state.errorMessage = undefined;
         }
-        if (shouldStop() || noToolTurn || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
+        if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
+        if (noToolTurn) {
+          if (noToolContinuations >= 1 || runtimeStatus()?.state !== 'ACTIVE') break;
+          noToolContinuations += 1;
+        }
         agent.state.messages = injectRuntimeStatus(agent.state.messages, {
           runtimeStatus,
           outerTurns,
@@ -420,6 +425,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,
+        noToolContinuations,
         mechanismMetrics: finishRunTelemetry(runTelemetry, messages, {
           transientRecoveries,
           exhaustedOuterTurns,

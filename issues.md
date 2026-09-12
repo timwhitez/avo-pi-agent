@@ -8,6 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
+| [#319](https://github.com/timwhitez/avo-pi-agent/issues/319): bounded no-tool continuation experiment | Implemented one ACTIVE continuation per loop run; full validation/review pending | Installed Pi/local Responses and transient tests22/22 pass; no claim of improved ARC performance |
 | Next benchmark | DeepSeek/high; awaiting PR #318 merge and fresh0/0 admission | r14 is terminal, zero wins; new run must use a frozen current commit and independent cold state |
 
 ## Latest verified repairs
