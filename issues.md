@@ -8,7 +8,7 @@ carry current merge/closure status. Detailed past audits are in
 
 | Item | State / dependency | Verification |
 | --- | --- | --- |
-| [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Superseding-head APPROVE41bf168; canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
+| [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
 | Next benchmark | DeepSeek/high; context-retention experiment pending review and fresh 0/0 admission | Existing recent-tool-results setting 64 → 2048; token/message bounds retained. No new paid run started |
 
 ## Latest verified repairs
@@ -128,8 +128,8 @@ Run artifacts were not deleted or resumed.
 
 Hard context compaction occurred during r13 and remains a configuration
 counterfactual to examine. The disjoint held-out games (`r11l`, `sc25`, `tn36`)
-remain unplayed. No new game run has started; targeted DeepSeek provider preflight
-identified #311 and passed after its fix. This does not prove full-context capacity.
+remain unplayed. The subsequent DeepSeek provider preflight identified #311 and
+passed after its fix; later runs are recorded above. This does not prove full-context capacity.
 
 Follow the active user's experiment requirements. Preserve distinctions between
 configured study budgets, official Competition rules, provider availability,
