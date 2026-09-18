@@ -9,10 +9,36 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Current benchmark | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins; fresh Issues/PRs 0/0 | Cold cd82/ft09/sb26, `deepseek-flash`/high, minimal-v1, retention 2048. All three games ended level-action-budget; 4/20 levels |
-| Next benchmark | r18 with official 5x-human per-level evaluation budgets plus a reset-allowance prompt clarification; same requested provider/model and tuning games | Plan to be sealed at launch after tests pass; explicitly not comparable with 2x runs |
+| Current benchmark | r18 running on frozen `e727b15`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Preflights passed; ft09 started 2026-09-18T15:45:13Z. No outcome yet |
+| r17b (previous) | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
 
-## Current benchmark: r17b complete, zero whole-game wins
+## Current benchmark: r18 running
+
+`arc-deepseek-tuning-minimal-r18-20260919` admitted 2026-09-18T15:44:56Z with
+live Issues/PRs 0/0, on frozen `e727b15` with the requested `deepseek-flash`/high
+over the Responses endpoint. Plan
+`48d0c64520d19e69761ff7c9bd0f86dc4a0d0c7eb6410488c52a4455fb517a82`, capsule
+`57b05902ac0245927a5189af6195b4cc4b8802c7fc5508f2335c5ba315897cd3`. Private
+evidence is under `/root/avo-pi-agent-worktrees/checkout-r18/runs/` (the frozen
+checkout now lives outside the repository tree). Do not restart while its
+process chain is live.
+
+Changed conditions versus r17b, both declared in the sealed hypothesis: (1) the
+per-level budget multiplier is 5 — the official ARC-AGI-3 technical-report
+evaluation rule — with hard caps raised to 2000 actions/turns (cd82 total 855,
+ft09 1040, sb26 1065); (2) both policy prompts now state that RESET never
+restores the level allowance (r17b cd82 acted on the false belief that it does
+and spent four resets). Held-out evaluation r11l/sc25/tn36 stays sealed and
+reserved in the same plan. This is explicitly not comparable with 2x runs.
+
+Two harness repairs shipped on the way to this launch: root test discovery is
+scoped to the canonical `test/` directory (the nested r17 checkout had made the
+bare root gate re-run a foreign copy of the suite, 5 spurious failures), and the
+reset/allowance prompt clarification above with updated pinned prompt hashes.
+Local gates at `e727b15`: root 519/519 with container coverage, zero skips,
+secret scan, offline demo allWon.
+
+## Previous benchmark: r17b complete, zero whole-game wins
 
 `arc-deepseek-tuning-minimal-r17b-20260917` completed at 2026-09-17T06:52:52Z
 on frozen `bd9d449` with the requested `deepseek-flash`/high over the Responses
