@@ -9,34 +9,51 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Current benchmark | r18 running on frozen `e727b15`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Preflights passed; ft09 started 2026-09-18T15:45:13Z. No outcome yet |
-| r17b (previous) | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
+| Current benchmark | r19 launching on frozen `543e00b`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission 2026-09-18T19:39:31Z | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Single changed variable versus r18: state-changing results inline GRID_EXACT. Sealed plan `2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a` |
+| r18 (previous) | r18 complete on frozen `e727b15`, official score 3.85, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets. ft09 2/6, cd82 0/6, sb26 1/8; all level-action-budget; 3/20 levels |
+| r17b | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
 
-## Current benchmark: r18 running
+## Current benchmark: r19 launching
 
-`arc-deepseek-tuning-minimal-r18-20260919` admitted 2026-09-18T15:44:56Z with
-live Issues/PRs 0/0, on frozen `e727b15` with the requested `deepseek-flash`/high
-over the Responses endpoint. Plan
-`48d0c64520d19e69761ff7c9bd0f86dc4a0d0c7eb6410488c52a4455fb517a82`, capsule
-`57b05902ac0245927a5189af6195b4cc4b8802c7fc5508f2335c5ba315897cd3`. Private
-evidence is under `/root/avo-pi-agent-worktrees/checkout-r18/runs/` (the frozen
-checkout now lives outside the repository tree). Do not restart while its
-process chain is live.
+`arc-deepseek-tuning-minimal-r19-20260919` admitted 2026-09-18T19:39:31Z with
+live Issues/PRs 0/0, on frozen `543e00b` (the GRID_EXACT inline repair) with the
+requested `deepseek-flash`/high over the Responses endpoint. Sealed plan
+`2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a`. Private
+evidence is under `/root/avo-pi-agent-worktrees/checkout-r19/runs/`. Do not
+restart while its process chain is live.
 
-Changed conditions versus r17b, both declared in the sealed hypothesis: (1) the
-per-level budget multiplier is 5 — the official ARC-AGI-3 technical-report
-evaluation rule — with hard caps raised to 2000 actions/turns (cd82 total 855,
-ft09 1040, sb26 1065); (2) both policy prompts now state that RESET never
-restores the level allowance (r17b cd82 acted on the false belief that it does
-and spent four resets). Held-out evaluation r11l/sc25/tn36 stays sealed and
-reserved in the same plan. This is explicitly not comparable with 2x runs.
+Single changed variable versus r18, declared in the sealed hypothesis: the
+harness observation-channel repair that inlines GRID_EXACT in every
+state-changing act/act_sequence/reset result (r18 measured 566 trajectory_read
+calls against 177 action-tool calls, turn inflation from unavoidable
+post-action read-backs). Budgets (5x per level, hard caps 2000), prompts,
+games, provider, and minimal-v1 are identical to r18. Held-out evaluation
+r11l/sc25/tn36 stays sealed and reserved in the same plan.
 
-Two harness repairs shipped on the way to this launch: root test discovery is
-scoped to the canonical `test/` directory (the nested r17 checkout had made the
-bare root gate re-run a foreign copy of the suite, 5 spurious failures), and the
-reset/allowance prompt clarification above with updated pinned prompt hashes.
-Local gates at `e727b15`: root 519/519 with container coverage, zero skips,
-secret scan, offline demo allWon.
+## Previous benchmark: r18 complete, zero whole-game wins
+
+`arc-deepseek-tuning-minimal-r18-20260919` completed at 2026-09-18T19:35:48Z
+on frozen `e727b15` with the requested `deepseek-flash`/high over the Responses
+endpoint. Plan `48d0c64520d19e69761ff7c9bd0f86dc4a0d0c7eb6410488c52a4455fb517a82`,
+capsule `57b05902ac0245927a5189af6195b4cc4b8802c7fc5508f2335c5ba315897cd3`.
+Official scoreStatus, accepted score 3.8532157304391537, complete report with
+exact 3 games / 4 executions / 1 session and no missing or unexpected coverage.
+ft09 2/6 at 185 actions; cd82 0/6 at 428 (19 resets, 1 full reset, 20 episodes);
+sb26 1/8 at 175. All ended level-action-budget, error=null, won=false. 484
+model calls: zero provider errors, 4 tool failures total, zero hard elisions
+at retention 2048. Private evidence under
+`/root/avo-pi-agent-worktrees/checkout-r18/runs/`.
+
+Trajectory analysis: the 5x per-level allowance still bound everywhere (ft09
+level 3 budget 115 exhausted, cd82 level 0 budget 275 exhausted before its full
+reset, sb26 level budget exhausted at 175). The read-back pattern was confirmed
+as harness friction: 238/277/51 trajectory_read calls per game against
+41/94/42 action-tool calls, each post-action exact-grid read costing an extra
+model turn because the new evidence ref only exists after execution. cd82's 19
+resets were model-chosen episode escapes, not allowance confusion (the r18
+prompt already stated RESET never restores the allowance). The GRID_EXACT
+inline repair shipped in `543e00b` targets the measured friction; r19 tests it
+as a single-variable change under otherwise identical r18 conditions.
 
 ## Previous benchmark: r17b complete, zero whole-game wins
 
