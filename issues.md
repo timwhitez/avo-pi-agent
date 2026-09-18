@@ -9,7 +9,36 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Next benchmark | DeepSeek/high; context-retention experiment pending review and fresh 0/0 admission | Existing recent-tool-results setting 64 → 2048; token/message bounds retained. No new paid run started |
+| Current benchmark | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins; fresh Issues/PRs 0/0 | Cold cd82/ft09/sb26, `deepseek-flash`/high, minimal-v1, retention 2048. All three games ended level-action-budget; 4/20 levels |
+| Next benchmark | r18 with official 5x-human per-level evaluation budgets plus a reset-allowance prompt clarification; same requested provider/model and tuning games | Plan to be sealed at launch after tests pass; explicitly not comparable with 2x runs |
+
+## Current benchmark: r17b complete, zero whole-game wins
+
+`arc-deepseek-tuning-minimal-r17b-20260917` completed at 2026-09-17T06:52:52Z
+on frozen `bd9d449` with the requested `deepseek-flash`/high over the Responses
+endpoint. Plan `3cdf4dfceda1ec133a2bc895c27f1d8401d48b28da6648a187aa4b05cb3aa8b1`,
+capsule `2e8f518f24b93395b670494eb6ec01cb26784f8be6340f409939e9b32c83e566`.
+Official scoreStatus, accepted score 11.111111111111109, complete report with
+exact 3 games / 3 executions / 1 session and no missing or unexpected coverage.
+ft09 3/6 at 99 actions; cd82 1/6 at 44 (4 resets); sb26 0/8 at 36. All ended
+level-action-budget, error=null, won=false. 167 model calls: zero provider
+errors or retries, zero tool failures, zero hard elisions at retention 2048.
+Private evidence under `runs/private/checkout-r17/runs/`.
+
+Trajectory analysis: the binding constraint everywhere is the per-level 2x-human
+action allowance. Workspace notes show the model deriving complete general
+mechanics (ft09 tile-cycle solve rule, cd82 pour model, sb26 socket model), yet
+cd82's level-1 allowance is 16 actions and sb26's level 0 is 36. cd82 additionally
+recorded the false belief "reset refreshes" the allowance and spent 4 resets that
+did not. The 2x multiplier is the developer benchmarking agent default; the
+official ARC-AGI-3 technical report evaluation rule is 5x human per level, and
+the ledger already recorded that the 2x study limit is not proof of model inability.
+
+Next: r18 keeps the requested provider/model, tuning games, minimal-v1 and cold
+state; adds one truthful reset/allowance sentence to both policy prompts; and
+configures the official 5x per-level evaluation budgets with raised hard caps.
+This is a study-condition change, explicitly not comparable with 2x runs, and
+makes no causal claim. Held-out r11l/sc25/tn36 remain reserved.
 
 ## Latest verified repairs
 
@@ -50,7 +79,7 @@ carry current merge/closure status. Detailed past audits are in
   fixed by merged [PR #185](https://github.com/timwhitez/avo-pi-agent/pull/185),
   not deleted merely to reduce the count.
 
-## Latest benchmark: r16 complete, zero whole-game wins
+## Previous benchmark: r16 complete, zero whole-game wins
 
 `arc-deepseek-tuning-minimal-r16-20260912` admitted at2026-09-12T08:43:44Z with
 live Issues/PRs0/0. Frozen commit `af73532a34b558db84c6ba0c88e28940ba0f97a7`,
