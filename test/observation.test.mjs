@@ -126,3 +126,46 @@ test('separates grid content, observation content, episode identity, and transit
   });
   assert.notEqual(noOp, reset);
 });
+
+test('includeExactGrid inlines the resulting grid and retires the read hint', () => {
+  const before = normalizeFrame({
+    game_id: 'inline-grid-v1', frame: [[0, 0], [0, 0]], state: 'PLAYING',
+    levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'],
+  });
+  const after = normalizeFrame({
+    game_id: 'inline-grid-v1', frame: [[1, 0], [0, 0]], state: 'PLAYING',
+    levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'],
+  });
+  const ref = 'evidence-000003-123456789abc';
+  const text = describeFrame(after, before, ref, { includeExactGrid: true });
+  assert.match(text, /GRID_EXACT:\n1 0\n0 0/);
+  const header = JSON.parse(text.slice(0, text.indexOf('\nGRID_EXACT:')));
+  assert.equal(header.exact_grid_included, true);
+  assert.equal(header.exact_read, null);
+  assert.equal(header.view, 'delta');
+  assert.equal(header.changed_cell_count, 1);
+  assert.deepEqual(header.changed_cells, [], 'the inlined grid supersedes the changed-cell preview');
+
+  const initial = describeFrame(after, null, ref);
+  assert.match(initial, /GRID_EXACT:\n1 0\n0 0/);
+  const initialHeader = JSON.parse(initial.slice(0, initial.indexOf('\nGRID_EXACT:')));
+  assert.equal(initialHeader.view, 'exact_initial');
+  assert.equal(initialHeader.exact_grid_included, true, 'the initial frame reports its inlined grid truthfully');
+  assert.equal(initialHeader.exact_read, null);
+
+  const unchanged = describeFrame(after, after, ref, { includeExactGrid: true });
+  assert.doesNotMatch(unchanged, /GRID_EXACT/);
+  const unchangedHeader = JSON.parse(unchanged);
+  assert.equal(unchangedHeader.view, 'no_change');
+  assert.equal(unchangedHeader.exact_grid_included, false);
+  assert.deepEqual(unchangedHeader.exact_read, { tool: 'trajectory_read', ref, part: 'after' });
+
+  const oversized = describeFrame(after, before, ref, { includeExactGrid: true, maxExactGridChars: 4 });
+  assert.doesNotMatch(oversized, /GRID_EXACT/);
+  assert.equal(JSON.parse(oversized).exact_grid_included, false);
+  assert.deepEqual(JSON.parse(oversized).exact_read, { tool: 'trajectory_read', ref, part: 'after' });
+
+  const compact = describeFrame(after, before, ref);
+  assert.doesNotMatch(compact, /GRID_EXACT/);
+  assert.equal(JSON.parse(compact).exact_grid_included, false);
+});

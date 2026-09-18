@@ -243,7 +243,7 @@ export class AvoArcAgent {
       {
         name: 'observe',
         label: 'Observe current ARC state',
-        description: 'Read a compact current-state preview without spending an environment action. Unchanged state reuses its exact evidence ref; retrieve the full grid through trajectory_read.',
+        description: 'Read a compact current-state header without spending an environment action. The exact current grid (GRID_EXACT) ships with every state-changing act, act_sequence, or reset result. Unchanged state reuses its exact evidence ref; use trajectory_read for prior states, diffs, and regions.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         execute: async () => {
           const evidenceRef = this.currentObservationRef;
@@ -257,7 +257,7 @@ export class AvoArcAgent {
       {
         name: 'trajectory_read',
         label: 'Read exact durable trajectory evidence',
-        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid. When ref is present it selects exact-ref mode and startSequence/limit are ignored.',
+        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid of a prior state; the current grid ships with every state-changing act, act_sequence, and reset result. When ref is present it selects exact-ref mode and startSequence/limit are ignored.',
         parameters: {
           type: 'object',
           properties: {
@@ -598,6 +598,7 @@ export class AvoArcAgent {
     let rejectionCode = null;
     let terminate = false;
     let stall = null;
+    let lastExecutedBeforeFrame = null;
 
     for (const [index, step] of requested.entries()) {
       const before = this.frame;
@@ -619,6 +620,7 @@ export class AvoArcAgent {
         if (durableTransition) {
           executed.push(sequenceExecutedEntry(index, step, before, this.frame, evidence.id,
             this.currentLevel - beforeLevel));
+          lastExecutedBeforeFrame ??= before;
           stopReason = 'INTERNAL_ERROR';
           appendSkipped(skipped, requested, index + 1, stopReason);
           this.executionError = 'action sequence post-transition failure';
@@ -645,6 +647,9 @@ export class AvoArcAgent {
       const entry = sequenceExecutedEntry(index, step, before, this.frame, result.details.evidenceRef,
         result.details.currentLevelDelta);
       executed.push(entry);
+      // Diff the final frame against the last model-visible grid (the frame
+      // before the first executed step), so a trailing no-op stays honest.
+      lastExecutedBeforeFrame ??= before;
       if (result.details.stall?.stalled) stall = result.details.stall;
 
       const lifecycle = episodeState(this.frame);
@@ -681,6 +686,9 @@ export class AvoArcAgent {
         ?? skipped.find((entry) => entry.evidenceRef)?.evidenceRef
         ?? this.currentObservationRef,
       contextExactEvidence: false,
+      ...(lastExecutedBeforeFrame
+        ? { finalFrameText: this.describe(lastExecutedBeforeFrame, this.currentObservationRef, { includeExactGrid: true }) }
+        : {}),
       telemetry: this.commandTelemetry(),
     };
     return this.withRelevantMemory(
@@ -776,7 +784,7 @@ export class AvoArcAgent {
         : '';
     }
     return this.toolResult(
-      `${this.describe(previousFrame, this.currentObservationRef)}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
+      `${this.describe(previousFrame, this.currentObservationRef, { includeExactGrid: true })}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
       {
         ok: true,
         frame: this.frame,
@@ -1124,8 +1132,9 @@ export class AvoArcAgent {
   describe(
     previousFrame = this.previousFrame,
     evidenceRef = this.currentObservationRef,
+    options = {},
   ) {
-    return describeFrame(this.frame, previousFrame, evidenceRef);
+    return describeFrame(this.frame, previousFrame, evidenceRef, options);
   }
 
   withRelevantMemory(result, query = '', jsonType = null) {

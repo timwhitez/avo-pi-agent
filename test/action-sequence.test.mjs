@@ -65,6 +65,8 @@ test('act_sequence persists every prefix transition and cancels its tail on leve
     assert.deepEqual(modelVisible.executed, result.details.executed);
     assert.deepEqual(modelVisible.skipped, result.details.skipped);
     assert.equal(modelVisible.evidenceRef, result.details.executed.at(-1).evidenceRef);
+    assert.match(modelVisible.finalFrameText, /GRID_EXACT:/, 'the final executed frame ships its exact grid');
+    assert.match(modelVisible.finalFrameText, /"exact_grid_included": true/);
     assert.deepEqual(agent.commandTelemetry(), {
       environmentActions: 2,
       gameplayActions: 2,
@@ -380,6 +382,56 @@ test('act_sequence schema and direct guard reject malformed or oversized batches
     assert.equal(complete.details.stopReason, 'RUN_COMPLETE');
     assert.equal(complete.details.skipped.length, 2);
     assert.equal(calls, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('act_sequence ships the final exact grid even when the last executed step is a no-op', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-action-sequence-'));
+  const returned = [frame({ cell: 1 }), frame({ cell: 1 })];
+  const environment = {
+    async start() { return frame(); },
+    async step() { return returned.shift(); },
+  };
+  try {
+    const agent = makeAgent(root, environment);
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const result = await tools.act_sequence.execute({
+      steps: [
+        { action: 'ACTION1', expected: { changed: true } },
+        { action: 'ACTION2' },
+      ],
+    });
+    assert.equal(result.details.stopReason, 'SEQUENCE_COMPLETE');
+    assert.equal(result.details.executed.length, 2);
+    const modelVisible = JSON.parse(result.text);
+    assert.match(modelVisible.finalFrameText, /GRID_EXACT:\n1/, 'the trailing no-op must not hide the changed final grid');
+    assert.match(modelVisible.finalFrameText, /"view": "delta"/, 'the delta is measured against the last model-visible grid');
+    assert.match(modelVisible.finalFrameText, /"exact_grid_included": true/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('act_sequence omits finalFrameText when every step is rejected', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-action-sequence-'));
+  const environment = {
+    async start() { return frame(); },
+    async step() { throw new Error('must not step: every command is rejected'); },
+  };
+  try {
+    const agent = makeAgent(root, environment);
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const result = await tools.act_sequence.execute({
+      steps: [{ action: 'ACTION9' }],
+    });
+    assert.equal(result.details.stopReason, 'ACTION_REJECTED');
+    assert.equal(result.details.executed.length, 0);
+    assert.equal('finalFrameText' in result.details, false);
+    assert.equal('finalFrameText' in JSON.parse(result.text), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

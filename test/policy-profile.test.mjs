@@ -52,11 +52,11 @@ test('exactly two versioned profiles derive the prompt and tool surface', () => 
   assert.notEqual(policySystemPrompt('minimal-v1'), policySystemPrompt('current-v1'));
   assert.equal(
     crypto.createHash('sha256').update(policySystemPrompt('minimal-v1')).digest('hex'),
-    'ae3e190127943d9945d3d0faafae0cea92f865f1c737f6e81e1af3c8cb1dd77f',
+    'e81f405bcdf89d2a495881f82ff68d0a1b8dd315ef2a5c6aa47dd37d67ce7f4f',
   );
   assert.equal(
     crypto.createHash('sha256').update(policySystemPrompt('current-v1')).digest('hex'),
-    'a2f14f256c8fb7bb3d26bf88e2fc0ff08d624e6c1600498653cd5aec6762d03c',
+    'a7c871b008c7a51e666494884275e2f4cb2fcd4525db7b6fd0940e85390ab6c9',
   );
   assert.doesNotMatch(
     policySystemPrompt('minimal-v1'),

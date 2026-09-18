@@ -8,6 +8,7 @@ export const EPISODE_OBSERVATION_SCHEMA = 'avo.episode-observation.v1';
 export const TRANSITION_SCHEMA = 'avo.transition.v1';
 const MAX_CHANGED_CELL_PREVIEW = 128;
 const MAX_PALETTE_PREVIEW = 32;
+const MAX_INLINE_GRID_CHARS = 12_000;
 
 export function normalizeFrame(raw) {
   const frame = raw?.frame ?? [];
@@ -170,7 +171,12 @@ export function gridDelta(previous, current) {
   return { changed: changes, exact: gridToExactText(current) };
 }
 
-export function describeFrame(frame, previousFrame = null, observationRef = null) {
+export function describeFrame(
+  frame,
+  previousFrame = null,
+  observationRef = null,
+  { includeExactGrid = false, maxExactGridChars = MAX_INLINE_GRID_CHARS } = {},
+) {
   const delta = gridDelta(previousFrame?.frame, frame.frame);
   const identity = observationIdentity(frame);
   const changed = delta.changed;
@@ -180,6 +186,10 @@ export function describeFrame(frame, previousFrame = null, observationRef = null
     : changed === null
       ? 'shape_changed'
       : changed.length === 0 ? 'no_change' : 'delta';
+  const inlineGrid = includeExactGrid
+    && view !== 'no_change'
+    && delta.exact.length <= maxExactGridChars;
+  const gridShown = inlineGrid || view === 'exact_initial';
   const header = {
     game_id: frame.gameId,
     state: frame.state,
@@ -198,13 +208,20 @@ export function describeFrame(frame, previousFrame = null, observationRef = null
     palette_counts_truncated: palette.truncated,
     changed_cell_count: changed?.length ?? null,
     changed_cell_format: ['x', 'y', 'before', 'after'],
-    changed_cells: view === 'delta' ? changed.slice(0, MAX_CHANGED_CELL_PREVIEW) : [],
-    changed_cells_truncated: view === 'delta' && changed.length > MAX_CHANGED_CELL_PREVIEW,
+    changed_cells: gridShown || view !== 'delta'
+      ? []
+      : changed.slice(0, MAX_CHANGED_CELL_PREVIEW),
+    changed_cells_truncated: !gridShown && view === 'delta' && changed.length > MAX_CHANGED_CELL_PREVIEW,
     changed_bounds: changedBounds(changed),
-    exact_read: observationRef ? { tool: 'trajectory_read', ref: observationRef, part: 'after' } : null,
+    exact_read: observationRef && !gridShown
+      ? { tool: 'trajectory_read', ref: observationRef, part: 'after' }
+      : null,
+    exact_grid_included: gridShown,
   };
   const preview = JSON.stringify(header, null, 2);
-  return view === 'exact_initial' ? `${preview}\nGRID_EXACT:\n${delta.exact}` : preview;
+  return inlineGrid || view === 'exact_initial'
+    ? `${preview}\nGRID_EXACT:\n${delta.exact}`
+    : preview;
 }
 
 function paletteSummary(grid) {

@@ -83,8 +83,9 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     const actionRef = results[0].details.evidenceRef;
     assert.equal(results[0].details.contextExactEvidence, false);
     assert.equal(stepped, true);
-    assert.doesNotMatch(results[0].text, /GRID_EXACT/);
-    assert.match(results[0].text, /\[\s*0,\s*0,\s*0,\s*1\s*\]/);
+    assert.match(results[0].text, /GRID_EXACT:\n1 0\n0 0/, 'a state-changing act ships the exact resulting grid');
+    assert.match(results[0].text, /"exact_grid_included": true/);
+    assert.match(results[0].text, /"exact_read": null/);
     results.push(await tools.act.execute({ action: 'ACTION1', reasoning: 'record a newer rejected command' }));
     const rejectionRef = results[1].details.evidenceRef;
     assert.notEqual(rejectionRef, actionRef, 'the rejected transition keeps its own evidence ref');

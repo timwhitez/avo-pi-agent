@@ -68,6 +68,21 @@ makes no causal claim. Held-out r11l/sc25/tn36 remain reserved.
 
 ## Latest verified repairs
 
+- Inline exact grids in gameplay results (2026-09-19, direct to main): r18
+  evidence showed the model could not see a post-action exact grid without an
+  extra model turn — the new evidence ref only exists after execution and
+  `describeFrame` printed GRID_EXACT only on the initial frame, so ft09 burned
+  238 trajectory_read calls against 41 action calls while retention 2048 kept
+  every read verbatim. State-changing act/act_sequence/reset results now inline
+  GRID_EXACT (12k-char guard, changed-cell preview suppressed when the grid
+  ships), act_sequence adds a cumulative-delta `finalFrameText`, `exact_read`
+  hints remain for no-change/oversized frames and history, prompts and tool
+  descriptions state the truthful contract, and prompt hashes were re-pinned.
+  Two independent reviewer APPROVEs after a REQUEST_CHANGES round (trailing
+  no-op grid blind spot, prompt overclaim, exact_initial flag, guard-vs-cap).
+  Root 500/500 zero failures (3 environmental skips), secret scan, offline
+  allWon, mission-control build passed. Qualified for the next admitted run.
+
 - [#317 / PR #318](https://github.com/timwhitez/avo-pi-agent/pull/318): native test
   clock plus real descendant readiness and synchronous heartbeat initialization.
   Code-head APPROVE `0bf66bf`; concurrent root621/621 zero skips, reviewer11/11,
