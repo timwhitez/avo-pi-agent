@@ -8,7 +8,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs",
     "demo:offline": "node src/cli.mjs demo-offline --all",
     "demo:public": "node src/cli.mjs run-public --all",
     "provider:check": "node src/cli.mjs provider-check",
