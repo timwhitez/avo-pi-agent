@@ -18,7 +18,9 @@ carry current merge/closure status. Detailed past audits are in
 `arc-deepseek-tuning-minimal-r19-20260919` admitted 2026-09-18T19:39:31Z with
 live Issues/PRs 0/0, on frozen `543e00b` (the GRID_EXACT inline repair) with the
 requested `deepseek-flash`/high over the Responses endpoint. Sealed plan
-`2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a`. Private
+`2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a`, capsule
+`b6b97c169a67e3c779bc81929154b5f8f32947c39d1d014b13f2278fb4748732`. Preflights
+passed; ft09 started 2026-09-18T19:41:41Z. Private
 evidence is under `/root/avo-pi-agent-worktrees/checkout-r19/runs/`. Do not
 restart while its process chain is live.
 
