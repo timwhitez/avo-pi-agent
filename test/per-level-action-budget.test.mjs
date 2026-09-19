@@ -97,10 +97,10 @@ test('full reset selects the actual earlier level budget without losing reported
 });
 
 test('replaying a level advances the current level while the historical best stays distinct', async (t) => {
-  const { agent } = fixture(t, { perLevelBudgets: [2, 5], next: (kind, count) => count === 2
+  const { agent } = fixture(t, { perLevelBudgets: [3, 5], next: (kind, count) => count === 2
     ? { levels_completed: 1 }
     : kind === 'reset' ? { levels_completed: 0, full_reset: true }
-    : count === 5 ? { levels_completed: 1 } : {} });
+    : count === 5 ? { levels_completed: 1, full_reset: false } : { full_reset: false } });
   await agent.initialize();
   await agent.act({ action: 'ACTION1' });
   await agent.act({ action: 'ACTION1' });
@@ -123,6 +123,26 @@ test('replaying a level advances the current level while the historical best sta
   assert.equal(replayEvent.levelDelta, 0);
   assert.equal(replayEvent.observation.currentLevelsCompleted, 1);
   assert.equal(replayEvent.observation.levelsCompleted, 1);
+});
+
+test('a terminal frame with unreliable level metadata is preserved without corrupting totals', async (t) => {
+  const { agent } = fixture(t, { perLevelBudgets: [3, 5], next: (kind, count) => count === 2
+    ? { levels_completed: 1 }
+    : kind === 'reset' ? { levels_completed: 0, full_reset: true }
+    : count === 3 ? { levels_completed: 0, state: 'GAME_OVER' } : { full_reset: false } });
+  await agent.initialize();
+  await agent.act({ action: 'ACTION1' });
+  await agent.act({ action: 'ACTION1' });
+  assert.equal(agent.currentLevel, 1);
+  const terminal = await agent.act({ action: 'ACTION1' });
+  assert.equal(agent.frame.state, 'GAME_OVER');
+  assert.equal(agent.frame.currentLevelsCompleted, 0, 'the observed terminal level is kept honestly');
+  assert.equal(agent.frame.levelsCompleted, 1, 'the terminal zero does not become the high-water mark');
+  assert.equal(agent.frame.totalLevels, 2, 'stable total-level metadata is not discarded');
+  const terminalEvent = [...agent.evidenceLedger].reverse().find((event) => event.type === 'environment-action');
+  assert.equal(terminalEvent.observation.currentLevelsCompleted, 0);
+  assert.equal(terminalEvent.observation.levelsCompleted, 1);
+  assert.equal(terminalEvent.observation.totalLevels, 2);
 });
 
 test('total cap still applies with or without per-level metadata', async (t) => {
