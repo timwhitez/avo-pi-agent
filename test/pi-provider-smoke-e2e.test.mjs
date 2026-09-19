@@ -232,6 +232,37 @@ test('installed Pi keeps provider failures distinct from model termination', asy
   }
 });
 
+test('installed Pi preserves a transient error on the final allowed turn without a phantom recovery', async (t) => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    requests.push(1);
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: { message: 'stream disconnected before completion' } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const previous = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  t.after(() => { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; });
+  const loop = await createPiSdkLoop({ provider: {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+    model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+  }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: 1 });
+  const result = await loop.run({ systemPrompt: 'Local final-turn fixture.', initialPrompt: 'Begin.',
+    tools: [{ name: 'act', label: 'Act', description: 'Take one action.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => ({ text: 'unused', details: {} }) }],
+    shouldStop: () => false,
+    runtimeStatus: () => ({ state: 'ACTIVE', environmentActions: 0, maxActions: 2, terminalReason: 'none', allowedNext: 'act' }) });
+  assert.equal(requests.length, 1, String(result.error));
+  assert.match(String(result.error), /stream disconnected/);
+  assert.equal(result.transientRecoveries, 0);
+  assert.equal(result.terminationReason, null);
+  assert.equal(result.exhaustedOuterTurns, false);
+});
+
 test('installed Pi records unsuccessful workspace Python without private payloads', async () => {
   const requests = [];
   const events = [];

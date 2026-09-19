@@ -30,7 +30,10 @@ async function loadLoopWith(script) {
       }
       subscribe() { return () => {}; }
       followUp() {}
-      async prompt() {}
+      async prompt() {
+        const plan = globalThis.__avoPlan;
+        if (plan.promptError) this.state.errorMessage = plan.promptError;
+      }
       async continue() {
         const plan = globalThis.__avoPlan;
         const step = plan.steps[Math.min(plan.continues, plan.steps.length - 1)];
@@ -106,16 +109,21 @@ const baseConfig = {
   maxOuterTurns: 40,
 };
 
-async function runLoop(steps, stopAfterContinues) {
-  const { mod, cleanup } = await loadLoopWith({ steps, continues: 0, stopAfter: stopAfterContinues });
+async function runLoop(steps, stopAfterContinues, { maxOuterTurns, promptError, shouldStop } = {}) {
+  const { mod, cleanup } = await loadLoopWith({
+    steps, continues: 0, stopAfter: stopAfterContinues, promptError,
+  });
   try {
-    const loop = await mod.createPiSdkLoop(baseConfig, {});
+    const loop = await mod.createPiSdkLoop(
+      maxOuterTurns ? { ...baseConfig, maxOuterTurns } : baseConfig,
+      {},
+    );
     let guard = 0;
     const result = await loop.run({
       systemPrompt: 'sys',
       tools: [],
       initialPrompt: 'go',
-      shouldStop: () => (globalThis.__avoPlan.continues >= globalThis.__avoPlan.stopAfter) || ++guard > 200,
+      shouldStop: shouldStop ?? (() => (globalThis.__avoPlan.continues >= globalThis.__avoPlan.stopAfter) || ++guard > 200),
       runtimeStatus: () => ({
         state: 'ACTIVE',
         environmentActions: globalThis.__avoPlan.continues,
@@ -177,6 +185,37 @@ test('recovery budget is bounded by AVO_TRANSIENT_TURN_RECOVERIES', async () => 
   } finally {
     delete process.env.AVO_TRANSIENT_TURN_RECOVERIES;
   }
+});
+
+test('a transient error on the final allowed turn is preserved without a phantom recovery', async () => {
+  const { result, continues } = await runLoop([], 0, {
+    maxOuterTurns: 1,
+    promptError: 'Error Code request_timeout: stream disconnected before completion',
+    shouldStop: () => false,
+  });
+  assert.match(String(result.error), /stream disconnected/);
+  assert.equal(result.transientRecoveries, 0);
+  assert.equal(result.terminationReason, null);
+  assert.equal(result.exhaustedOuterTurns, false);
+  assert.equal(continues, 0);
+});
+
+test('a stop that becomes effective during the cooldown preserves the unresolved error', async () => {
+  let shouldStopCalls = 0;
+  const { result, continues } = await runLoop([], 0, {
+    maxOuterTurns: 5,
+    promptError: 'model cooling down, "reset_seconds":1',
+    shouldStop: () => {
+      shouldStopCalls += 1;
+      return shouldStopCalls >= 3;
+    },
+  });
+  assert.match(String(result.error), /cooling down/);
+  assert.equal(result.transientRecoveries, 0);
+  assert.equal(result.terminationReason, null);
+  assert.equal(result.exhaustedOuterTurns, false);
+  assert.equal(continues, 0);
+  assert.ok(shouldStopCalls >= 3, `shouldStopCalls=${shouldStopCalls}`);
 });
 
 test('cooldownWaitMs parses provider reset_seconds and caps the wait', async () => {
