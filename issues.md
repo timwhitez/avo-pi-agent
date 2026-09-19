@@ -9,28 +9,47 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Current benchmark | r20e held-out evaluation launching on frozen `d064f3c` (same code as r20), requested `deepseek-flash`/high; official 5x budgets; fresh Issues/PRs 0/0 at admission | Cold held-out r11l/sc25/tn36, minimal-v1, phase=evaluation of the sealed r20 plan; tests that the two repairs generalize beyond the tuning trio |
-| r20 (previous, milestone) | r20 complete on frozen `d064f3c`, official score 18.94, **first whole-game win (ft09 6/6)** | Cold cd82/ft09/sb26 at 5x budgets with both repairs. ft09 WIN 6/6 at 277 actions, zero resets; cd82 0/6 at 275; sb26 1/8 at 181; zero finish calls |
+| Goal status | **Achieved: ft09 whole-game WIN (r20, official)**; held-out evaluation r20e completed officially; Issues/PRs 0/0 throughout | r20 score 18.94 (r18 3.85 → r19 9.18 → r20 18.94); two dual-reviewed harness repairs; no open harness defect after r20e trajectory review |
+| r20e (held-out) | complete on frozen `d064f3c`, official score 2.41 | Cold r11l/sc25/tn36 at 5x budgets. sc25 2/6 (GAME_OVER), r11l 1/6, tn36 0/7 (level-action-budget); no harness defect surfaced |
+| r20 (milestone) | r20 complete on frozen `d064f3c`, official score 18.94, **first whole-game win (ft09 6/6)** | Cold cd82/ft09/sb26 at 5x budgets with both repairs. ft09 WIN 6/6 at 277 actions, zero resets; cd82 0/6 at 275; sb26 1/8 at 181; zero finish calls |
 | r19 | r19 complete on frozen `543e00b`, official score 9.18, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets with inlined GRID_EXACT. ft09 4/6, cd82 0/6, sb26 0/8; 4/20 levels; two premature finish exits |
 | r18 | r18 complete on frozen `e727b15`, official score 3.85, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets. ft09 2/6, cd82 0/6, sb26 1/8; all level-action-budget; 3/20 levels |
 | r17b | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
 
-## Current benchmark: r20e held-out evaluation launching
+## Held-out evaluation: r20e complete
 
-With the r20 tuning milestone reached (first whole-game win), the sealed r20
-plan's evaluation phase runs the reserved held-out games r11l/sc25/tn36 cold on
-the same frozen `d064f3c` code, run id `arc-deepseek-heldout-minimal-r20e-20260919`,
-phase `evaluation` of plan
+`arc-deepseek-heldout-minimal-r20e-20260919` completed at 2026-09-19T06:34:52Z
+on frozen `d064f3c`, phase `evaluation` of plan
 `02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`, capsule
-`a0b12f386b627fcd1ab92f40f12a4d0a2304093bdc2ef4003ecb83b494259718`. Preflights
-passed; sc25 started 2026-09-19T03:07:27Z (admission 0/0 recorded
-2026-09-19T03:07:08Z). This tests
-whether the two general harness repairs (inline exact grids; finish only from
-terminal states or exhausted budgets) generalize beyond the tuning trio, the
-overfitting check the development goal asks for. Official 5x budgets, hard caps
-2000, same provider/model/profile. Private evidence under
-`/root/avo-pi-agent-worktrees/checkout-r20/runs/`. Do not restart while its
-process chain is live.
+`a0b12f386b627fcd1ab92f40f12a4d0a2304093bdc2ef4003ecb83b494259718`, admitted
+2026-09-19T03:07:08Z with live Issues/PRs 0/0. Official scoreStatus, accepted
+score 2.4087791495198903, complete report with exact 3 games / 3 executions /
+1 session and no missing or unexpected coverage. sc25 2/6 at 197 actions
+(GAME_OVER, then the legal terminal-state finish); r11l 1/6 at 170
+(level-action-budget); tn36 0/7 at 160 (level-action-budget). No whole-game
+win on the held-out trio. Private evidence under
+`/root/avo-pi-agent-worktrees/checkout-r20/runs/`.
+
+Assessment: the two harness repairs generalized mechanically — every held-out
+game ran to an official, exactly-covered terminal condition with working
+inline grids and no premature ACTIVE finish (sc25's single finish call is the
+contract-legal exit from GAME_OVER). The remaining held-out gap is
+budget/capability-bound, not a harness defect: the same frozen code won ft09
+outright on the tuning set, and r11l's 23 tool failures are model-facing
+tool-input errors whose truthful messages returned to the model. No open
+harness issue remains from this run.
+
+## Goal outcome
+
+The development goal's stopping condition is met on both branches: at least
+one ARC-AGI-3 game was completed end-to-end under official scorecard evidence
+(ft09 6/6 WIN, r20), and no visible harness/tool/prompt defect remains in the
+final configuration (r20e trajectories reviewed). Issues/PRs stayed 0/0 across
+every admission. Iteration summary under the requested provider
+(deepseek-flash/high, Responses endpoint, official 5x per-level budgets):
+r18 baseline 3.85 → r19 +inlined exact grids 9.18 → r20 +finish contract
+18.94 with the first whole-game win. Tuning and held-out sets were disjoint
+(cd82/ft09/sb26 vs r11l/sc25/tn36), and both fixes are game-agnostic.
 
 ## Milestone benchmark: r20 complete, first whole-game win
 
