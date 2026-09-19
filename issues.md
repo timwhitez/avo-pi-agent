@@ -19,7 +19,9 @@ carry current merge/closure status. Detailed past audits are in
 `arc-deepseek-tuning-minimal-r20-20260919` admitted 2026-09-19T00:35:08Z with
 live Issues/PRs 0/0, on frozen `d064f3c` (the finish-contract repair) with the
 requested `deepseek-flash`/high over the Responses endpoint. Sealed plan
-`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`;
+`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`, capsule
+`763581a3b4ba06033ba4315ccf56e7a2a82a00b23fb63013e1fa624d6ffd6b35`. Preflights
+passed; ft09 started 2026-09-19T00:35:36Z;
 budgets/games/profile identical to r18 and r19 (5x per level, hard caps 2000).
 Private evidence is
 under `/root/avo-pi-agent-worktrees/checkout-r20/runs/`. Do not restart while
