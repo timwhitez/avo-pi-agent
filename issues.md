@@ -9,28 +9,56 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Current benchmark | r19 launching on frozen `543e00b`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission 2026-09-18T19:39:31Z | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Single changed variable versus r18: state-changing results inline GRID_EXACT. Sealed plan `2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a` |
-| r18 (previous) | r18 complete on frozen `e727b15`, official score 3.85, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets. ft09 2/6, cd82 0/6, sb26 1/8; all level-action-budget; 3/20 levels |
+| Current benchmark | r20 launching on frozen `d064f3c`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Single changed variable versus r19: finish unavailable while ACTIVE with budget remaining |
+| r19 (previous) | r19 complete on frozen `543e00b`, official score 9.18, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets with inlined GRID_EXACT. ft09 4/6, cd82 0/6, sb26 0/8; 4/20 levels; two premature finish exits |
+| r18 | r18 complete on frozen `e727b15`, official score 3.85, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets. ft09 2/6, cd82 0/6, sb26 1/8; all level-action-budget; 3/20 levels |
 | r17b | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
 
-## Current benchmark: r19 launching
+## Current benchmark: r20 launching
 
-`arc-deepseek-tuning-minimal-r19-20260919` admitted 2026-09-18T19:39:31Z with
-live Issues/PRs 0/0, on frozen `543e00b` (the GRID_EXACT inline repair) with the
+`arc-deepseek-tuning-minimal-r20-20260919` admitted 2026-09-19T00:35:08Z with
+live Issues/PRs 0/0, on frozen `d064f3c` (the finish-contract repair) with the
 requested `deepseek-flash`/high over the Responses endpoint. Sealed plan
-`2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a`, capsule
-`b6b97c169a67e3c779bc81929154b5f8f32947c39d1d014b13f2278fb4748732`. Preflights
-passed; ft09 started 2026-09-18T19:41:41Z. Private
-evidence is under `/root/avo-pi-agent-worktrees/checkout-r19/runs/`. Do not
-restart while its process chain is live.
+`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`;
+budgets/games/profile identical to r18 and r19 (5x per level, hard caps 2000).
+Private evidence is
+under `/root/avo-pi-agent-worktrees/checkout-r20/runs/`. Do not restart while
+its process chain is live.
 
-Single changed variable versus r18, declared in the sealed hypothesis: the
-harness observation-channel repair that inlines GRID_EXACT in every
-state-changing act/act_sequence/reset result (r18 measured 566 trajectory_read
-calls against 177 action-tool calls, turn inflation from unavoidable
-post-action read-backs). Budgets (5x per level, hard caps 2000), prompts,
-games, provider, and minimal-v1 are identical to r18. Held-out evaluation
-r11l/sc25/tn36 stays sealed and reserved in the same plan.
+Single changed variable versus r19, declared in the sealed hypothesis: finish
+is unavailable while the episode is ACTIVE with action budget remaining
+(r19 lost whole-game progress to two structured finish exits: ft09 quit at 4/6
+with 900 of 1040 actions unused during productive level-4 work, and cd82 quit
+at 0/6 after a 13-full-reset churn spiral). The runtime status no longer
+advertises finish. Held-out evaluation r11l/sc25/tn36 stays sealed and
+reserved in the same plan.
+
+## Previous benchmark: r19 complete, zero whole-game wins
+
+`arc-deepseek-tuning-minimal-r19-20260919` completed at 2026-09-18T23:48:06Z
+on frozen `543e00b` with the requested `deepseek-flash`/high over the Responses
+endpoint. Plan `2274b81e83017e5efb55e0f4c6792869d2805a994e9f007158fdab3e664d783a`,
+capsule `b6b97c169a67e3c779bc81929154b5f8f32947c39d1d014b13f2278fb4748732`.
+Official scoreStatus, accepted score 9.183525875833567, complete report with
+exact 3 games / 16 executions / 1 session and no missing or unexpected
+coverage. ft09 4/6 at 140 actions (finished via structured finish with 900
+actions unused); cd82 0/6 at 410 (37 resets, 13 full resets, finished via
+structured finish); sb26 0/8 at 90 (level-action-budget). won=false
+everywhere, zero provider errors, 3 tool failures. Private evidence under
+`/root/avo-pi-agent-worktrees/checkout-r19/runs/`.
+
+Trajectory analysis: the GRID_EXACT inline repair improved the observation
+channel as designed — trajectory_read calls fell (ft09 238→127, cd82 277→184,
+sb26 51→49) and ft09 reached 4/6 at 140 actions versus r18's 2/6 at 185, with
+levels 0-3 solved in 125 actions. cd82's wide 65-column grid made every
+state-changing act ship ~7.3KB of grid (139M cumulative input tokens at the
+800K-token transcript bound) without changing its 0/6 outcome, and its
+reset-churn plus finish exit is model behavior, not a budget-accounting
+artifact. The measured harness-side defect in this run is the structured
+finish exit: ft09 ended during productive level-4 constraint propagation with
+900 actions unused. The finish-contract repair shipped in `d064f3c` removes
+that exit; r20 tests it as a single-variable change under otherwise identical
+r19 conditions.
 
 ## Previous benchmark: r18 complete, zero whole-game wins
 
