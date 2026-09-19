@@ -76,8 +76,11 @@ test('ARC bridge stdin stream errors settle the request instead of crashing the 
   const script = path.join(root, 'fixture.mjs');
   fs.writeFileSync(script, `
     import fs from 'node:fs';
-    process.stderr.write('READY\\n');
+    // READY is written strictly after the child closes its own stdin, so
+    // observing it proves the read end is already gone even if the child is
+    // preempted between the two calls.
     fs.closeSync(0);
+    process.stderr.write('READY\\n');
     setInterval(() => {}, 1000);
   `);
   const client = new ArcBridgeClient({ python: process.execPath, script, cwd: root, requestTimeoutMs: 3000 });
@@ -116,8 +119,11 @@ test('prequeued ARC bridge requests settle once when stdin errors after a passin
     for await (const line of readline.createInterface({ input: process.stdin })) {
       seen += 1;
       if (seen === 1) { process.stdout.write(JSON.stringify({ ok: true }) + '\\n'); continue; }
-      process.stderr.write('READY\\n');
+      // Consume both prequeued payloads before closing, so neither prequeued
+      // write can race against the closure.
+      if (seen < 3) continue;
       fs.closeSync(0);
+      process.stderr.write('READY\\n');
       break;
     }
     setInterval(() => {}, 1000);
@@ -127,8 +133,8 @@ test('prequeued ARC bridge requests settle once when stdin errors after a passin
     await client.start();
     const child = client.child;
     const closed = once(child, 'close', { signal: AbortSignal.timeout(5000) });
-    // READY is written synchronously before the child closes its own stdin,
-    // so observing it proves the read end is already gone.
+    // READY is written strictly after the child closes its own stdin, so
+    // observing it proves the read end is already gone.
     const ready = once(child.stderr, 'data');
     assert.deepEqual(await client.request({ command: 'first' }), { ok: true });
     // Both writes reach the child while its stdin read end is still open, so
