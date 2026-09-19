@@ -29,6 +29,13 @@ export function normalizeFrame(raw) {
     frame: Array.isArray(frame) ? frame : [],
     state: String(raw?.state ?? 'UNKNOWN'),
     levelsCompleted,
+    // The level observed in this environment execution. At the raw boundary
+    // it equals levelsCompleted; the agent's adopted frames keep it distinct
+    // from the high-water mark that replaces levelsCompleted there.
+    currentLevelsCompleted: nonNegativeInteger(
+      raw?.current_levels_completed ?? raw?.currentLevelsCompleted ?? levelsCompleted,
+      'currentLevelsCompleted',
+    ),
     totalLevels,
     guid: raw?.guid ?? null,
     fullReset: Boolean(raw?.full_reset ?? raw?.fullReset ?? false),
@@ -127,6 +134,11 @@ export function exactObservation(frame) {
     frame: structuredClone(Array.isArray(value.frame) ? value.frame : []),
     state: String(value.state ?? 'UNKNOWN'),
     levelsCompleted: nonNegativeInteger(value.levelsCompleted ?? 0, 'levelsCompleted'),
+    // Omitted when absent so legacy persisted observations round-trip
+    // byte-identically; never derive it from the high-water levelsCompleted.
+    ...(value.currentLevelsCompleted == null ? {} : {
+      currentLevelsCompleted: nonNegativeInteger(value.currentLevelsCompleted, 'currentLevelsCompleted'),
+    }),
     totalLevels: positiveIntegerOrNull(value.totalLevels ?? null, 'totalLevels'),
     availableActions: normalizeActions(value.availableActions ?? []).sort(),
     fullReset: Boolean(value.fullReset),
@@ -194,6 +206,7 @@ export function describeFrame(
     game_id: frame.gameId,
     state: frame.state,
     levels_completed: frame.levelsCompleted,
+    current_levels_completed: frame.currentLevelsCompleted ?? null,
     total_levels: frame.totalLevels,
     available_actions: frame.availableActions,
     grid_shape: [frame.frame.length, frame.frame[0]?.length ?? 0],

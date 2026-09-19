@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { canonicalJson } from '../src/local/canonical-json.mjs';
 import {
   describeFrame,
+  exactObservation,
   frameHash,
   gridDelta,
   normalizeFrame,
@@ -168,4 +170,54 @@ test('includeExactGrid inlines the resulting grid and retires the read hint', ()
   const compact = describeFrame(after, before, ref);
   assert.doesNotMatch(compact, /GRID_EXACT/);
   assert.equal(JSON.parse(compact).exact_grid_included, false);
+});
+
+test('current execution level is retained beside the high-water mark without changing identities', () => {
+  const raw = normalizeFrame({
+    game_id: 'current-level-v1', frame: [[0, 0], [0, 0]], state: 'PLAYING',
+    levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'],
+  });
+  // adoptFrame keeps the raw level under currentLevelsCompleted while
+  // levelsCompleted becomes the run high-water mark.
+  const adopted = { ...raw, levelsCompleted: 1 };
+  const adoptedText = describeFrame(adopted);
+  const header = JSON.parse(adoptedText.slice(0, adoptedText.indexOf('\nGRID_EXACT:')));
+  assert.equal(header.levels_completed, 1);
+  assert.equal(header.current_levels_completed, 0);
+
+  const bare = { ...normalizeFrame({
+    game_id: 'current-level-v2', frame: [[1]], state: 'PLAYING', levels_completed: 2,
+  }) };
+  delete bare.currentLevelsCompleted;
+  const tagged = { ...bare, currentLevelsCompleted: 2 };
+  const bareIdentity = observationIdentity(bare, { attemptId: 'a', episodeId: 'e' });
+  const taggedIdentity = observationIdentity(tagged, { attemptId: 'a', episodeId: 'e' });
+  assert.equal(bareIdentity.observationContentHash, taggedIdentity.observationContentHash);
+  assert.equal(bareIdentity.episodeObservationId, taggedIdentity.episodeObservationId);
+  assert.equal('currentLevelsCompleted' in bareIdentity.observation, false);
+  assert.equal(taggedIdentity.observation.currentLevelsCompleted, 2);
+  assert.deepEqual(
+    observationIdentity(bareIdentity.observation, { attemptId: 'a', episodeId: 'e' }),
+    bareIdentity,
+  );
+  assert.throws(
+    () => normalizeFrame({ levels_completed: 0, current_levels_completed: -1 }),
+    /currentLevelsCompleted/,
+  );
+});
+
+test('legacy observations without the current-level field re-verify without fabrication', () => {
+  const current = exactObservation(normalizeFrame({
+    game_id: 'legacy-v1', frame: [[0]], state: 'PLAYING', levels_completed: 1,
+  }));
+  const { currentLevelsCompleted, ...legacy } = current;
+  assert.equal(currentLevelsCompleted, 1);
+  // This byte-identity is the invariant the trajectory audit re-checks on
+  // persisted observations: the omitted field must not reappear, least of
+  // all derived from the high-water levelsCompleted.
+  const identity = observationIdentity(legacy, { attemptId: 'a', episodeId: 'e' });
+  assert.equal('currentLevelsCompleted' in identity.observation, false);
+  const rehydrated = observationIdentity(identity.observation, { attemptId: 'a', episodeId: 'e' });
+  assert.deepEqual(rehydrated, identity);
+  assert.equal(canonicalJson(identity.observation), canonicalJson(rehydrated.observation));
 });
