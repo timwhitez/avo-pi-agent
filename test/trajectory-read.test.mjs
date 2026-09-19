@@ -179,6 +179,7 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     const exact = JSON.parse(exactResult.text);
     assert.deepEqual(exact.beforeObservation.frame, [[0, 0], [0, 0]]);
     assert.deepEqual(exact.observation.frame, [[1, 0], [0, 0]]);
+    assert.equal(exact.observation.currentLevelsCompleted, 0, 'durable reload retains the current-level fact');
     assert.match(exact.beforeObservationId, /^[a-f0-9]{64}$/);
     assert.match(exact.episodeObservationId, /^[a-f0-9]{64}$/);
     assert.match(exact.transitionId, /^[a-f0-9]{64}$/);

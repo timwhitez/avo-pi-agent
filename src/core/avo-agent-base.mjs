@@ -37,6 +37,10 @@ const ACTION_EXPECTATION_SCHEMA = {
   additionalProperties: false,
   properties: {
     changed: { type: 'boolean' },
+    // levelDeltaAtLeast is a historical-best levelsCompleted delta between
+    // adopted frames (frame.levelsCompleted is the run high-water mark), not
+    // current-execution progress; replaying a level legitimately yields 0.
+    // Current-execution level lives in frame.currentLevelsCompleted.
     levelDeltaAtLeast: { type: 'integer', minimum: 0, maximum: 10_000 },
     state: { type: 'string', minLength: 1, maxLength: 64 },
     afterHash: { type: 'string', pattern: '^[a-f0-9]{16}$' },
@@ -1357,6 +1361,8 @@ function normalizeActionExpectation(value, index) {
 function expectationMismatches(expected, before, after) {
   const actual = {
     changed: frameHash(before) !== frameHash(after),
+    // Historical-best delta between adopted frames, not current-execution
+    // progress: replaying a level legitimately yields 0.
     levelDeltaAtLeast: after.levelsCompleted - before.levelsCompleted,
     state: after.state,
     afterHash: frameHash(after),
