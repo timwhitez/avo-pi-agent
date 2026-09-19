@@ -379,12 +379,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         const sessionError = agent.state.errorMessage;
         if (sessionError) {
           const recoverable = !shouldStop()
+            && !innerTurnNoActionLimitReached
+            && outerTurns < config.maxOuterTurns
             && transientRecoveries < maxTransientRecoveries
             && TRANSIENT_SESSION_ERROR.test(String(sessionError));
           if (!recoverable) break;
-          transientRecoveries += 1;
           const cooldownMs = cooldownWaitMs(sessionError);
           if (cooldownMs > 0) await sleep(cooldownMs);
+          // Recheck after the wait: a stop that became effective during the
+          // cooldown must not clear the unresolved provider error or count a
+          // continuation that was never attempted.
+          if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
+          transientRecoveries += 1;
           agent.state.errorMessage = undefined;
         }
         if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
