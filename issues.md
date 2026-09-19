@@ -21,7 +21,10 @@ With the r20 tuning milestone reached (first whole-game win), the sealed r20
 plan's evaluation phase runs the reserved held-out games r11l/sc25/tn36 cold on
 the same frozen `d064f3c` code, run id `arc-deepseek-heldout-minimal-r20e-20260919`,
 phase `evaluation` of plan
-`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`. This tests
+`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`, capsule
+`a0b12f386b627fcd1ab92f40f12a4d0a2304093bdc2ef4003ecb83b494259718`. Preflights
+passed; sc25 started 2026-09-19T03:07:27Z (admission 0/0 recorded
+2026-09-19T03:07:08Z). This tests
 whether the two general harness repairs (inline exact grids; finish only from
 terminal states or exhausted budgets) generalize beyond the tuning trio, the
 overfitting check the development goal asks for. Official 5x budgets, hard caps
