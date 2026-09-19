@@ -93,7 +93,7 @@ function directiveFor(finding, round) {
     'periodic-action-cycle': 'Treat the recorded action pattern as a failed opening for this state cluster. Prohibit the cycle, use an untried legal action or a planned reset, and record exact state deltas.',
     'ineffective-action': 'Mark the cited action/state combinations ineffective. Change action family or complex-action coordinates instead of issuing another equivalent action.',
     'invalid-action': 'Re-read the current available-actions list immediately before acting. Validate action payload and coordinates against the current frame; never reuse a stale action object.',
-    'premature-finish': 'A natural model stop is not completion. While useful valid experiments remain, continue; otherwise call finish explicitly with the reason no useful experiment remains.',
+    'premature-finish': 'A natural model stop is not completion. finish is unavailable while the episode is ACTIVE with action budget remaining; continue with useful valid experiments until WIN, GAME_OVER, ERROR, or budget exhaustion.',
     'reset-abuse': 'A reset now requires a falsifiable reset hypothesis and a new post-reset opening. Never repeat an identical failed opening without additional evidence.',
     'low-information-exploration': 'Use a coverage-oriented opening: safely probe each uncharacterized legal action, compare exact frame hashes and level deltas, then exploit learned semantics.',
     'contradictory-memory': 'Demote or remove stale action semantics and cite the newer contradictory transitions. Re-test only under controlled state conditions.',

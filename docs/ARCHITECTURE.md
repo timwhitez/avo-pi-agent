@@ -28,8 +28,9 @@ them. Both share the same environment, accounting, workspace and transport paths
 Gameplay is authorized by the current frame. RESET is a separate controller.
 Sequences go through the single-step path and stop their remaining tail on
 progress, terminal state, rejection, failed expectation or exhausted budget.
-Explicit finish, provider errors and budget termination are not substitutes for
-an environment WIN.
+Finish is available only from terminal states or exhausted budgets; finish,
+provider errors and budget termination are not substitutes for an
+environment WIN.
 
 Hypothesis proposals record a baseline before experimentation. Evaluation resolves
 that baseline in the durable ledger and requires later evidence from the same

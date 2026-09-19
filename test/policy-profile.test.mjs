@@ -52,11 +52,11 @@ test('exactly two versioned profiles derive the prompt and tool surface', () => 
   assert.notEqual(policySystemPrompt('minimal-v1'), policySystemPrompt('current-v1'));
   assert.equal(
     crypto.createHash('sha256').update(policySystemPrompt('minimal-v1')).digest('hex'),
-    'e81f405bcdf89d2a495881f82ff68d0a1b8dd315ef2a5c6aa47dd37d67ce7f4f',
+    'fe0fc991ea7c3b0aea3513400ddf31374eccf803f483f1ec09de061f9c5560cc',
   );
   assert.equal(
     crypto.createHash('sha256').update(policySystemPrompt('current-v1')).digest('hex'),
-    'a7c871b008c7a51e666494884275e2f4cb2fcd4525db7b6fd0940e85390ab6c9',
+    '9568855cf7098fb1258bb3de8c5a905d3400eafbaace15ce420c2d3b25a97fc5',
   );
   assert.doesNotMatch(
     policySystemPrompt('minimal-v1'),
@@ -126,7 +126,8 @@ test('minimal production agent injects no memory or supervisor strategy', async 
         });
         assert.equal(JSON.parse(sequenced.text).type, 'ACTION_SEQUENCE');
         assert.doesNotMatch(sequenced.text, /RELEVANT_MEMORY/);
-        await tools.get('finish').execute({ summary: 'boundary verified' });
+        const boundaryFinish = await tools.get('finish').execute({ summary: 'boundary verified' });
+        assert.equal(boundaryFinish.details.code, 'FINISH_UNAVAILABLE_ACTIVE');
         return { error: null };
       },
     },

@@ -115,7 +115,7 @@ test('tool results are capped before entering the model context', async () => {
 
     const status = mod.runtimeStatusMessage({
       state: 'ACTIVE', environmentActions: 1, maxActions: 5,
-      terminalReason: 'none', allowedNext: 'inspect evidence or finish',
+      terminalReason: 'none', allowedNext: 'inspect evidence or use the scratch workspace',
     }, { outerTurns: 1, maxOuterTurns: 5 });
     const compactions = [];
     const bounded = mod.boundTranscript(mod.replaceRuntimeStatus([

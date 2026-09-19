@@ -224,8 +224,8 @@ export class AvoArcAgent {
       maxActions: this.config.maxActions,
       terminalReason: 'none',
       allowedNext: (this.strategyEnabled
-        ? 'inspect evidence, take one currently legal gameplay action, or finish when no useful valid experiment remains; use memory and scratch tools only when useful'
-        : 'inspect evidence, take one currently legal gameplay action, use the scratch workspace, or finish')
+        ? 'inspect evidence, take one currently legal gameplay action; use memory and scratch tools only when useful'
+        : 'inspect evidence, take one currently legal gameplay action, or use the scratch workspace')
         + (levelBudget === undefined ? '' : `; current level ${this.currentLevel} action budget: ${this.levelActions}/${levelBudget}`),
     };
   }
@@ -524,12 +524,19 @@ export class AvoArcAgent {
       {
         name: 'finish',
         label: 'Finish the current run',
-        description: 'Explicitly end the run after WIN, GAME_OVER, ERROR, action-budget exhaustion, or from ACTIVE. GAME_OVER and ERROR also permit the separate reset controller.',
+        description: 'End the run from WIN, GAME_OVER, ERROR, or action-budget exhaustion. While the episode is ACTIVE with action budget remaining, finish is rejected and gameplay continues; the run ends on WIN, GAME_OVER, ERROR, or budget exhaustion.',
         parameters: {
           type: 'object', required: ['summary'],
           properties: { summary: { type: 'string' } }, additionalProperties: false,
         },
         execute: async ({ summary }) => {
+          if (episodeState(this.frame) === 'ACTIVE' && !this.actionBudgetExhausted()) {
+            return this.rejectCommand(
+              'FINISH_UNAVAILABLE_ACTIVE',
+              'finish is unavailable while the episode is ACTIVE with action budget remaining; continue taking useful gameplay actions until WIN, GAME_OVER, ERROR, or budget exhaustion',
+              { action: 'FINISH', reasoning: summary },
+            );
+          }
           this.finished = true;
           return this.toolResult('Run finished.', { summary }, true);
         },

@@ -236,7 +236,7 @@ test('GAME_OVER is episode-terminal but still permits finish without spending th
   }
 });
 
-test('ACTIVE permits structured finish without forcing budget exhaustion', async () => {
+test('ACTIVE rejects structured finish until budget exhaustion ends the run', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-active-finish-'));
   let environmentSteps = 0;
   const agent = new AvoArcAgent({
@@ -256,12 +256,22 @@ test('ACTIVE permits structured finish without forcing budget exhaustion', async
   });
   try {
     await agent.initialize();
-    assert.match(agent.runtimeStatus().allowedNext, /finish when no useful valid experiment remains/);
+    assert.doesNotMatch(agent.runtimeStatus().allowedNext, /finish/);
     const finish = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool])).finish;
-    const result = await finish.execute({ summary: 'no useful valid experiment remains' });
-    assert.equal(result.terminate, true);
-    assert.equal(agent.isDone(), true);
+    const rejected = await finish.execute({ summary: 'no useful valid experiment remains' });
+    assert.equal(rejected.details.code, 'FINISH_UNAVAILABLE_ACTIVE');
+    assert.equal(rejected.terminate, false);
+    assert.equal(agent.isDone(), false);
     assert.equal(agent.actions, 0);
+    assert.equal(environmentSteps, 0);
+    assert.match(agent.runtimeStatus().allowedNext, /take one currently legal gameplay action/);
+
+    // Once the budget is exhausted the run is terminal and finish is reachable.
+    agent.actions = agent.config.maxActions;
+    assert.equal(agent.actionBudgetExhausted(), true);
+    const finished = await finish.execute({ summary: 'budget exhausted; stopping' });
+    assert.equal(finished.terminate, true);
+    assert.equal(agent.isDone(), true);
     assert.equal(environmentSteps, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

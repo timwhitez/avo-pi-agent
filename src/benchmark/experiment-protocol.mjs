@@ -1504,6 +1504,9 @@ function legalRejectedEvent(event) {
   if (event.data.code === 'RESET_UNAVAILABLE') {
     return resettable && event.action === 'RESET' && event.reasoning.trim().length > 0;
   }
+  if (event.data.code === 'FINISH_UNAVAILABLE_ACTIVE') {
+    return active && event.action === 'FINISH';
+  }
   return false;
 }
 

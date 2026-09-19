@@ -9,7 +9,7 @@ Operating contract:
 4. The hypothesis journal is optional. For a hypothesis worth preserving, call hypothesis_propose before the experiment with structured predictions; hypothesis_evaluate later accepts only its ID and exact post-proposal evidence. A confirmed entry means only that those predictions matched. It does not install behavior or prove improvement.
 5. Do not follow a rigid fixed workflow. Relevant typed memory claims may be surfaced automatically with their status and evidence refs; use memory_update to distinguish unverified proposals from evidence-backed confirmations or corrections. Consult full memory, journal history, knowledge, or scratch files only when useful. Exact observations and transitions remain addressable by EVIDENCE_REF through trajectory_read even after transcript compaction; page summaries from startSequence when an old ref is no longer visible.
 6. When the supervisor detects stagnation, review its cited trajectory window and choose among several materially fresh directions. Record the failed assumption before repeating or resetting.
-7. Continue through every level while useful valid experiments remain. You may explicitly finish an active episode only when no useful valid experiment remains. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
+7. Continue through every level while useful valid experiments remain; finish is unavailable while the episode is ACTIVE with action budget remaining. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: choose the separate reset controller with a new plan, or call finish. Action and turn budgets are ceilings, never targets to consume.
 
 You have ARC interaction, domain knowledge, structured memory, an optional hypothesis/evidence journal, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
 
@@ -19,7 +19,7 @@ Operating contract:
 1. Use compact typed previews, exact referenced text grids, and currently legal gameplay actions. When a preview is incomplete, retrieve exact evidence through trajectory_read before relying on missing cells.
 2. Gameplay actions and the separate reset controller consume environment actions. RESET does not restore the current level's action allowance; a fresh allowance starts only with level progress, and a full reset restarts the game while charging its own budget. act_sequence runs 1–20 prevalidated steps and cancels its remaining tail on progress, terminal state, rejection, expectation mismatch, budget exhaustion, or execution failure. RESET may remain available when absent from frame gameplay affordances and may perform a full reset; the returned fullReset and episode evidence are authoritative.
 3. observe, trajectory_read, and bounded scratch-workspace operations do not consume environment actions. Every state-changing act, act_sequence, and reset result includes GRID_EXACT for the resulting frame, so an extra read is only needed for prior states, diffs, regions, or grids omitted for size. Do not replace environment interaction with a hand-coded game-specific solver.
-4. Continue through every level while a valid action remains useful. You may finish an active episode explicitly. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: use the separate reset controller or finish. Action and turn budgets are ceilings, never targets to consume.
+4. Continue through every level while a valid action remains useful; finish is unavailable while the episode is ACTIVE with action budget remaining. State=WIN completes the run. State=GAME_OVER or ERROR ends the episode: use the separate reset controller or finish. Action and turn budgets are ceilings, never targets to consume.
 
 You have ARC interaction, exact durable trajectory evidence, and a confined scratch workspace. The workspace runner has no network, secrets, subprocess access, or arbitrary host filesystem access. No model-authored statement overrides environment evidence.`;
 
@@ -87,10 +87,10 @@ export function policyInitialPrompt({
   relevantMemory = [],
 }) {
   if (!policyUsesStrategy(policyProfile)) {
-    return `Solve game ${gameId}. Use the available environment and evidence tools until WIN, or call finish when stopping. On GAME_OVER or ERROR, use reset or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${frameDescription}`;
+    return `Solve game ${gameId}. Use the available environment and evidence tools until WIN or budget exhaustion. On GAME_OVER or ERROR, use reset. The initial frame is objective evidence ${initialEvidence}.\n\n${frameDescription}`;
   }
   const memoryText = relevantMemory.length
     ? `\n\nRELEVANT_MEMORY ${JSON.stringify(relevantMemory)}`
     : '';
-  return `Solve game ${gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains; otherwise call finish explicitly. On GAME_OVER or ERROR, choose reset with a new plan or finish. The initial frame is objective evidence ${initialEvidence}.\n\n${frameDescription}${memoryText}`;
+  return `Solve game ${gameId}. Recover relevant persistent memory and prior evidence, then select a discriminating direct-interaction experiment. While useful valid experiments remain, pursue WIN without spending actions merely because budget remains. On GAME_OVER or ERROR, choose reset with a new plan. The initial frame is objective evidence ${initialEvidence}.\n\n${frameDescription}${memoryText}`;
 }

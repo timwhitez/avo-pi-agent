@@ -165,7 +165,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
       shouldStop: () => true,
       runtimeStatus: () => ({
         state: 'ACTIVE', environmentActions: 0, maxActions: 1,
-        terminalReason: 'none', allowedNext: 'finish',
+        terminalReason: 'none', allowedNext: 'take one currently legal gameplay action',
       }),
       workspaceMode: 'files-only',
       policyProfile: 'current-v1',
@@ -409,7 +409,7 @@ test('real Responses adapter does not count one terminal HTTP failure twice', as
       shouldStop: () => false,
       runtimeStatus: () => ({
         state: 'ACTIVE', environmentActions: 0, maxActions: 1,
-        terminalReason: 'none', allowedNext: 'finish',
+        terminalReason: 'none', allowedNext: 'take one currently legal gameplay action',
       }),
       workspaceMode: 'disabled',
       policyProfile: 'minimal-v1',

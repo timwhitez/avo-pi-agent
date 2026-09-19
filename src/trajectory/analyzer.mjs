@@ -277,7 +277,10 @@ function detectInvalidActions(context) {
   return context.events.flatMap((event) => {
     const response = event.response;
     const text = JSON.stringify(response || {});
-    const invalid = response?.ok === false || response?.error || /invalid action|illegal action|not available|validation error/i.test(text);
+    const legalRejection = response?.ok === false && response?.rejected === true
+      && response?.recoverable === true && response?.code === 'FINISH_UNAVAILABLE_ACTIVE';
+    const invalid = !legalRejection
+      && (response?.ok === false || response?.error || /invalid action|illegal action|not available|validation error/i.test(text));
     if (!invalid) return [];
     return [{
       severity: 'high', confidence: 0.99,

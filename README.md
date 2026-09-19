@@ -74,7 +74,9 @@ workspace mount; there is no host-Python fallback.
 <!-- effective-tool-inventory:end -->
 
 Both profiles use frame-authorized gameplay, a separate RESET controller,
-cancellable action sequences and explicit finish. Hypothesis confirmation means
+cancellable action sequences, and finish from terminal states or exhausted
+budgets only (finish is unavailable while an episode is ACTIVE with action
+budget remaining). Hypothesis confirmation means
 prediction agreement with later evidence, not policy improvement. See
 [claim boundaries](docs/AVO_CONFORMANCE.md).
 
