@@ -9,31 +9,44 @@ carry current merge/closure status. Detailed past audits are in
 | Item | State / dependency | Verification |
 | --- | --- | --- |
 | [#319 / PR #320](https://github.com/timwhitez/avo-pi-agent/pull/320): bounded no-tool continuation experiment | Merged at af73532; final-head review recorded at e592964. Canonical integration and serial full root626/626 passed, zero skips | Reviewer22/22, UI103/build/install/audit/smoke, root scan/audit/offline pass. Initial full623/626: old status count plus container heartbeat readiness miss/parent; isolated container5/5 passed. Logs retained; no ARC improvement claim |
-| Current benchmark | r20 launching on frozen `d064f3c`, requested `deepseek-flash`/high; official 5x per-level evaluation budgets; fresh Issues/PRs 0/0 at admission | Cold cd82/ft09/sb26, minimal-v1, retention 2048; hard caps 2000 actions/turns. Single changed variable versus r19: finish unavailable while ACTIVE with budget remaining |
-| r19 (previous) | r19 complete on frozen `543e00b`, official score 9.18, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets with inlined GRID_EXACT. ft09 4/6, cd82 0/6, sb26 0/8; 4/20 levels; two premature finish exits |
+| Current benchmark | r20e held-out evaluation launching on frozen `d064f3c` (same code as r20), requested `deepseek-flash`/high; official 5x budgets; fresh Issues/PRs 0/0 at admission | Cold held-out r11l/sc25/tn36, minimal-v1, phase=evaluation of the sealed r20 plan; tests that the two repairs generalize beyond the tuning trio |
+| r20 (previous, milestone) | r20 complete on frozen `d064f3c`, official score 18.94, **first whole-game win (ft09 6/6)** | Cold cd82/ft09/sb26 at 5x budgets with both repairs. ft09 WIN 6/6 at 277 actions, zero resets; cd82 0/6 at 275; sb26 1/8 at 181; zero finish calls |
+| r19 | r19 complete on frozen `543e00b`, official score 9.18, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets with inlined GRID_EXACT. ft09 4/6, cd82 0/6, sb26 0/8; 4/20 levels; two premature finish exits |
 | r18 | r18 complete on frozen `e727b15`, official score 3.85, zero whole-game wins | Cold cd82/ft09/sb26 at 5x budgets. ft09 2/6, cd82 0/6, sb26 1/8; all level-action-budget; 3/20 levels |
 | r17b | r17b complete on frozen `bd9d449`, official score 11.11, zero whole-game wins | Cold cd82/ft09/sb26 at 2x budgets. ft09 3/6, cd82 1/6, sb26 0/8; all level-action-budget; 4/20 levels |
 
-## Current benchmark: r20 launching
+## Current benchmark: r20e held-out evaluation launching
 
-`arc-deepseek-tuning-minimal-r20-20260919` admitted 2026-09-19T00:35:08Z with
-live Issues/PRs 0/0, on frozen `d064f3c` (the finish-contract repair) with the
-requested `deepseek-flash`/high over the Responses endpoint. Sealed plan
-`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`, capsule
-`763581a3b4ba06033ba4315ccf56e7a2a82a00b23fb63013e1fa624d6ffd6b35`. Preflights
-passed; ft09 started 2026-09-19T00:35:36Z;
-budgets/games/profile identical to r18 and r19 (5x per level, hard caps 2000).
-Private evidence is
-under `/root/avo-pi-agent-worktrees/checkout-r20/runs/`. Do not restart while
-its process chain is live.
+With the r20 tuning milestone reached (first whole-game win), the sealed r20
+plan's evaluation phase runs the reserved held-out games r11l/sc25/tn36 cold on
+the same frozen `d064f3c` code, run id `arc-deepseek-heldout-minimal-r20e-20260919`,
+phase `evaluation` of plan
+`02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`. This tests
+whether the two general harness repairs (inline exact grids; finish only from
+terminal states or exhausted budgets) generalize beyond the tuning trio, the
+overfitting check the development goal asks for. Official 5x budgets, hard caps
+2000, same provider/model/profile. Private evidence under
+`/root/avo-pi-agent-worktrees/checkout-r20/runs/`. Do not restart while its
+process chain is live.
 
-Single changed variable versus r19, declared in the sealed hypothesis: finish
-is unavailable while the episode is ACTIVE with action budget remaining
-(r19 lost whole-game progress to two structured finish exits: ft09 quit at 4/6
-with 900 of 1040 actions unused during productive level-4 work, and cd82 quit
-at 0/6 after a 13-full-reset churn spiral). The runtime status no longer
-advertises finish. Held-out evaluation r11l/sc25/tn36 stays sealed and
-reserved in the same plan.
+## Milestone benchmark: r20 complete, first whole-game win
+
+`arc-deepseek-tuning-minimal-r20-20260919` completed at 2026-09-19T03:04:28Z
+on frozen `d064f3c` with the requested `deepseek-flash`/high over the Responses
+endpoint. Plan `02d13a1a30af4310e983149b9f1a173c9ff3a60a07cd7443bf8c2a150b8e716c`,
+capsule `763581a3b4ba06033ba4315ccf56e7a2a82a00b23fb63013e1fa624d6ffd6b35`.
+Official scoreStatus, accepted score 18.93873886469426, complete report with
+exact 3 games / 3 executions / 1 session and no missing or unexpected coverage.
+**ft09 WIN 6/6 at 277 actions, zero resets** — the series' first whole-game
+win. cd82 0/6 at 275 (level-action-budget, 2 resets); sb26 1/8 at 181
+(GAME_OVER, level-action-budget). Zero finish calls across all games.
+Private evidence under `/root/avo-pi-agent-worktrees/checkout-r20/runs/`.
+
+Causal reading (same conditions as r19 except the finish contract): ft09 quit
+at 4/6 with 900 actions unused in r19; in r20 the same game was won at 277
+actions. The two harness repairs — inlined exact grids (r19) and finish only
+from terminal states or exhausted budgets (r20) — moved the official score
+3.85 (r18) → 9.18 (r19) → 18.94 (r20) with zero game-specific logic.
 
 ## Previous benchmark: r19 complete, zero whole-game wins
 
