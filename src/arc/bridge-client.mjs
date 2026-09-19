@@ -144,6 +144,12 @@ export class ArcBridgeClient {
       const suffix = this.stderr ? `: ${this.stderr.trim()}` : '';
       this.rejectPending(new Error(`ARC bridge exited with code ${code ?? 'null'}${signal ? ` (${signal})` : ''}${suffix}`));
     });
+    // A failed write also emits on the stdin socket itself, and a write
+    // callback does not consume that event; without this listener Node
+    // terminates on the unhandled 'error' event.
+    child.stdin.on('error', (error) => {
+      if (this.child === child) this.abortBridge(error);
+    });
 
     let buffer = Buffer.alloc(0);
     let used = 0;
