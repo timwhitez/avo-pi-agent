@@ -815,6 +815,116 @@ test('installed Pi applies the outer-turn budget inside novel read-only loops', 
   )), ['1', '2']);
 });
 
+test('installed Pi counts a recovered error turn toward the sealed outer-turn budget', async (t) => {
+  // Ceiling 2 with the first turn lost to a transient stream error: the
+  // recovered turn starts the second logical assistant turn, so the budget
+  // must stop there. The request count is the hard discriminator — the
+  // previous hook-based counter let a third logical request through while
+  // still reporting outerTurns=2.
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    requests.push(1);
+    if (requests.length === 1) {
+      sendFailedResponse(response, 'resp_error_then_budget');
+      return;
+    }
+    sendToolCall(response, {
+      responseId: 'resp_act_after_budget_error',
+      itemId: 'fc_act_after_budget_error',
+      callId: 'call_act_after_budget_error',
+      name: 'act',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  let actions = 0;
+  t.after(() => { if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousApiKey; });
+  const loop = await createPiSdkLoop({ provider: {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+    model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+  }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: 2 });
+  const result = await loop.run({ systemPrompt: 'Local budget fixture.', initialPrompt: 'Begin.',
+    tools: [{ name: 'act', label: 'Act', description: 'Take one action.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => {
+        actions += 1;
+        return { text: `action complete ${actions}`, details: {} };
+      } }],
+    shouldStop: () => false,
+    runtimeStatus: () => ({ state: 'ACTIVE', environmentActions: actions, maxActions: 2,
+      terminalReason: 'none', allowedNext: 'act' }) });
+  assert.equal(requests.length, 2, String(result.error));
+  assert.equal(result.outerTurns, 2);
+  assert.equal(result.transientRecoveries, 1);
+  assert.equal(result.error, null);
+  assert.equal(result.exhaustedOuterTurns, true);
+  assert.equal(result.terminationReason, 'outer-turn-budget');
+});
+
+test('installed Pi counts a mid-run error turn in the returned outer turns', async (t) => {
+  // Observe, then a transient stream error, then a terminal act: the errored
+  // turn must appear in the returned count. The old hook-based counter
+  // reported outerTurns=2 for these same three logical requests.
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    requests.push(1);
+    if (requests.length === 2) {
+      sendFailedResponse(response, 'resp_midrun_error');
+      return;
+    }
+    sendToolCall(response, requests.length === 1 ? {
+      responseId: 'resp_observe_midrun',
+      itemId: 'fc_observe_midrun',
+      callId: 'call_observe_midrun',
+      name: 'observe',
+      argumentsJson: '{}',
+    } : {
+      responseId: 'resp_act_midrun',
+      itemId: 'fc_act_midrun',
+      callId: 'call_act_midrun',
+      name: 'act',
+      argumentsJson: '{}',
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  let reads = 0;
+  let actions = 0;
+  t.after(() => { if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousApiKey; });
+  const loop = await createPiSdkLoop({ provider: {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+    model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+  }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: 3 });
+  const result = await loop.run({ systemPrompt: 'Inspect, then act.', initialPrompt: 'Begin.',
+    tools: [
+      { name: 'observe', label: 'Observe', description: 'Read state.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: `observed state ${++reads}`, details: {} }) },
+      { name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
+          actions += 1;
+          return { text: 'action complete', details: {}, terminate: true };
+        } },
+    ],
+    shouldStop: () => actions === 1,
+    runtimeStatus: () => ({ state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions, maxActions: 2,
+      terminalReason: actions ? 'win' : 'none', allowedNext: 'act' }) });
+  assert.equal(requests.length, 3, String(result.error));
+  assert.equal(result.outerTurns, 3);
+  assert.equal(result.transientRecoveries, 1);
+  assert.equal(result.error, null);
+});
+
 async function runReadOnlyScenario({ textFor, maxOuterTurns, maxToolResultChars = null }) {
   const requests = [];
   const server = http.createServer(async (request, response) => {

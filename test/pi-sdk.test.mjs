@@ -32,6 +32,9 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
         }
         subscribe(listener) { globalThis.__avoFakePi.listener = listener; return () => {}; }
         async prompt(prompt) {
+          // Pinned SDK lifecycle: every started turn emits turn_start first.
+          globalThis.__avoFakePi.listener?.({ type: 'agent_start' });
+          globalThis.__avoFakePi.listener?.({ type: 'turn_start' });
           globalThis.__avoFakePi.prompt = prompt;
           this.state.messages.push(
             { role: 'user', content: [{ type: 'text', text: prompt }], timestamp: 0 },
@@ -58,6 +61,8 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
           globalThis.__avoFakePi.listener?.({ type: 'message_end', message: assistant });
         }
         async continue() {
+          globalThis.__avoFakePi.listener?.({ type: 'agent_start' });
+          globalThis.__avoFakePi.listener?.({ type: 'turn_start' });
           globalThis.__avoFakePi.handoffs.push(structuredClone(this.options.transformContext(this.state.messages)));
           globalThis.__avoFakePi.continues += 1;
           this.state.messages.push({
