@@ -28,13 +28,19 @@ async function loadLoopWith(script) {
         this.shouldStop = options.initialState.shouldStopProbe;
         this.transientRetries = 0;
       }
-      subscribe() { return () => {}; }
+      // Emit the pinned SDK lifecycle so the event-based turn counter sees the
+      // same turn boundaries the real agent-loop emits.
+      subscribe(listener) { this.listener = listener; return () => {}; }
       followUp() {}
       async prompt() {
+        this.listener?.({ type: 'agent_start' });
+        this.listener?.({ type: 'turn_start' });
         const plan = globalThis.__avoPlan;
         if (plan.promptError) this.state.errorMessage = plan.promptError;
       }
       async continue() {
+        this.listener?.({ type: 'agent_start' });
+        this.listener?.({ type: 'turn_start' });
         const plan = globalThis.__avoPlan;
         const step = plan.steps[Math.min(plan.continues, plan.steps.length - 1)];
         plan.continues += 1;

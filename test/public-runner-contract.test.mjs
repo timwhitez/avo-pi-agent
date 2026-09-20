@@ -141,11 +141,16 @@ export function createProgressStatusReporter(env = process.env) {
       subscribe(listener) { this.listener = listener; return () => {}; }
       followUp() {}
       async continue() {
+        // Pinned SDK lifecycle: every started turn emits turn_start first.
+        this.listener?.({ type: 'agent_start' });
+        this.listener?.({ type: 'turn_start' });
         const message = { role: 'assistant', content: [{ type: 'text', text: 'No further tool call.' }], stopReason: 'stop', usage: { input: 3, output: 1, totalTokens: 4 } };
         this.state.messages.push(message);
         this.listener?.({ type: 'message_end', message });
       }
       async prompt() {
+        this.listener?.({ type: 'agent_start' });
+        this.listener?.({ type: 'turn_start' });
         await this.options.prepareNextTurnWithContext({
           message: { content: [{ type: 'toolCall' }] },
           context: { messages: [] },

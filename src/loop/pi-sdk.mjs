@@ -300,8 +300,13 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         }).tokens,
       };
 
-      let outerTurns = 1;
-      let assistantTurns = 0;
+      // One logical assistant turn is one SDK `turn_start` event, including a
+      // turn that fails before or during streaming. Counting at the event
+      // keeps a recovered error turn inside the sealed budget; the stop hook
+      // runs too late because the pinned SDK returns early after an errored
+      // assistant response. Error-free runs report the same per-request values
+      // as the previous counter; only previously omitted error turns are added.
+      let outerTurns = 0;
       const maxNoActionInnerTurns = Number.isInteger(config.stallWindow) && config.stallWindow >= 2
         ? config.stallWindow
         : 8;
@@ -323,8 +328,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
         shouldStopAfterTurn: async ({ message }) => {
-          assistantTurns += 1;
-          outerTurns = Math.max(outerTurns, assistantTurns);
           if (shouldStop()) return true;
           if (outerTurns >= config.maxOuterTurns) return true;
           if (!assistantTurnHasToolCall(message)) return false;
@@ -346,10 +349,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           return true;
         },
         prepareNextTurnWithContext: (turn) => {
-          outerTurns = Math.min(
-            config.maxOuterTurns,
-            Math.max(outerTurns, assistantTurns + 1),
-          );
           return prepareRuntimeStatusTurn(turn, {
             runtimeStatus,
             shouldStop,
@@ -362,7 +361,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       });
       lastEnvironmentActions = runtimeEnvironmentActions(runtimeStatus());
       lastNovelToolOutcomes = novelToolOutcomes;
-      agent.subscribe(emitEvent);
+      agent.subscribe((event) => {
+        if (event?.type === 'turn_start') outerTurns += 1;
+        emitEvent(event);
+      });
       await agent.prompt(initialPrompt);
       let noToolTurn = !shouldStop()
         && !agent.state.errorMessage
@@ -406,9 +408,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           onEvent: emitEvent,
           timestamp: Date.now() + outerTurns,
         });
-        const turnsBeforeContinue = outerTurns;
         await agent.continue();
-        outerTurns = Math.max(outerTurns, turnsBeforeContinue + 1);
         noToolTurn = !shouldStop()
           && !agent.state.errorMessage
           && latestAssistantTurnHasNoToolCall(agent.state.messages);
