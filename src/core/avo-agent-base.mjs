@@ -1040,7 +1040,14 @@ export class AvoArcAgent {
     });
     this.evidenceLedger.push(event);
     this.currentObservationId = afterIdentity.episodeObservationId;
-    if (!this.currentObservationRef || event.beforeObservationId !== event.episodeObservationId) {
+    // Episode identity stays neutral to hash-neutral observation fields such
+    // as currentLevelsCompleted, so exact payload equality — not the
+    // episode-observation ID — decides whether an unchanged observation may
+    // keep advertising the previous event.
+    if (!this.currentObservationRef
+        || event.beforeObservationId !== event.episodeObservationId
+        || canonicalJson(beforeIdentity?.observation ?? null)
+          !== canonicalJson(afterIdentity.observation)) {
       this.currentObservationRef = event.id;
     }
     return event;

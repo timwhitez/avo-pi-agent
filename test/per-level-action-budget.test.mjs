@@ -162,3 +162,81 @@ test('invalid per-level configuration is rejected before environment execution',
     assert.throws(() => fixture(t, { perLevelBudgets }), /perLevelBudgets/);
   }
 });
+
+test('a hash-neutral current-level change republishes the current evidence ref', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-current-level-ref-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let calls = 0;
+  // Identical grid, state, affordances, and guid across the last two steps;
+  // only the raw level moves, so the adopted frames differ solely in
+  // currentLevelsCompleted (the high-water mark already covers level 1).
+  const raw = (overrides = {}) => ({
+    game_id: 'budget-game', guid: 'budget-execution', frame: [[2]], state: 'PLAYING',
+    levels_completed: 0, total_levels: 2, available_actions: ['ACTION1'], ...overrides,
+  });
+  const config = {
+    perLevelBudgets: [3, 5], maxActions: 20, stallWindow: 8,
+    policyProfile: 'minimal-v1', workspaceMode: 'disabled',
+    memoryDir: path.join(root, 'memory'),
+  };
+  const environment = {
+    async start() { calls = 1; return raw({ frame: [[0]], levels_completed: 0 }); },
+    async step() {
+      calls += 1;
+      if (calls === 2) return raw({ frame: [[1]], levels_completed: 1 });
+      if (calls >= 5) return raw({ levels_completed: 1 });
+      return raw();
+    },
+    async reset() { calls += 1; return raw({ full_reset: true }); },
+  };
+  const makeAgent = () => new AvoArcAgent({
+    gameId: 'budget-game', captureScorecard: false, environment, loop: { kind: 'test', async run() { return { error: null, mechanismMetrics: {} }; } },
+    config,
+  });
+  const agent = makeAgent();
+  await agent.initialize();
+  const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+  const advertisedCurrentLevel = async () => {
+    const observe = await tools.observe.execute({});
+    const read = await tools.trajectory_read.execute({ ref: observe.details.evidenceRef, part: 'after' });
+    return { ref: observe.details.evidenceRef, level: JSON.parse(read.text).observation.currentLevelsCompleted };
+  };
+
+  await agent.act({ action: 'ACTION1' });
+  await agent.reset({ rationale: 'full reset to replay level 0' });
+  // The step that only clears the reset flag legitimately refreshes the ref
+  // (fullReset participates in the episode identity) and serves its own payload.
+  const resetClear = await agent.act({ action: 'ACTION1' });
+  assert.equal(agent.frame.currentLevelsCompleted, 0);
+  const clearedControl = await advertisedCurrentLevel();
+  assert.equal(clearedControl.ref, resetClear.details.evidenceRef);
+  assert.equal(clearedControl.level, 0, 'the advertised ref serves the observation it recorded');
+
+  const hashNeutral = agent.evidenceLedger.at(-1);
+  const levelProgress = await agent.act({ action: 'ACTION1' });
+  const progressed = agent.evidenceLedger.at(-1);
+  assert.equal(agent.evidenceLedger.length, agent.evidenceSequence);
+  assert.equal(progressed.episodeObservationId, hashNeutral.episodeObservationId,
+    'the scenario stays hash-neutral: only currentLevelsCompleted changed');
+  assert.equal(progressed.observationContentHash, hashNeutral.observationContentHash);
+  assert.equal(progressed.observation.currentLevelsCompleted, 1);
+  assert.equal(hashNeutral.observation.currentLevelsCompleted, 0);
+  assert.equal(agent.frame.currentLevelsCompleted, 1);
+  assert.equal(agent.frame.levelsCompleted, 1, 'the replayed level is not new high-water progress');
+  assert.equal(levelProgress.details.evidenceRef, progressed.id);
+
+  const advertised = await advertisedCurrentLevel();
+  assert.equal(advertised.ref, progressed.id,
+    'the current ref must move to the event whose exact payload changed');
+  assert.equal(advertised.level, 1, 'the advertised ref must resolve the new current level');
+  const repeat = await advertisedCurrentLevel();
+  assert.equal(repeat.ref, advertised.ref,
+    'an unchanged observation keeps reusing the refreshed ref');
+  assert.equal(repeat.level, 1);
+
+  const digests = agent.evidenceLedger.map((event) => [event.id, event.digest]);
+  const restarted = makeAgent();
+  assert.equal(restarted.evidenceLedger.length, digests.length);
+  for (const [id, digest] of digests) assert.equal(restarted.evidenceStore.get(id).digest, digest);
+  assert.equal(restarted.evidenceStore.get(advertised.ref).observation.currentLevelsCompleted, 1);
+});
