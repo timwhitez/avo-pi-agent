@@ -370,3 +370,168 @@ test('production agent refuses legacy lossy evidence before opening the environm
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('same-grid lossy terminal and restoration read back the observed level', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-trajectory-charged-level-'));
+  const memoryDir = path.join(root, 'memory');
+  const grid = [[7, 7]];
+  const guid = 'trajectory-charged-guid';
+  const counts = { start: 0 };
+  const raw = (overrides = {}) => ({
+    game_id: 'trajectory-charged-v1',
+    frame: grid,
+    state: 'PLAYING',
+    levels_completed: 0,
+    total_levels: 3,
+    guid,
+    full_reset: false,
+    available_actions: ['ACTION1'],
+    ...overrides,
+  });
+  const queue = [
+    raw({ levels_completed: 1 }),
+    raw({ state: 'GAME_OVER', levels_completed: 0 }),
+    raw({ levels_completed: 1 }),
+    raw({ levels_completed: 0, full_reset: true }),
+    raw({ levels_completed: 0, full_reset: false }),
+    raw({ levels_completed: 1, full_reset: false }),
+  ];
+  const environment = {
+    async start() {
+      counts.start += 1;
+      return raw();
+    },
+    async step() { return queue.shift(); },
+    async reset() { return queue.shift(); },
+  };
+  const config = {
+    perLevelBudgets: [20, 20, 20],
+    maxActions: 40,
+    stallWindow: 8,
+    policyProfile: 'minimal-v1',
+    workspaceMode: 'disabled',
+    memoryDir,
+    workspaceDir: path.join(root, 'workspace'),
+  };
+  const headerOf = (text) => JSON.parse(text.split('\nEVIDENCE_REF:')[0]);
+  try {
+    const agent = new AvoArcAgent({
+      gameId: 'trajectory-charged-v1',
+      environment,
+      loop: inertLoop,
+      captureScorecard: false,
+      config,
+    });
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const afterOf = async (ref) => JSON.parse((await tools.trajectory_read.execute({
+      ref,
+      part: 'after',
+    })).text);
+
+    await agent.act({ action: 'ACTION1' });
+    const playingRef = agent.currentObservationRef;
+    const terminal = await agent.act({ action: 'ACTION1' });
+    assert.equal(agent.currentLevel, 1);
+    assert.equal(agent.frame.currentLevelsCompleted, 0);
+    assert.equal(agent.frame.levelsCompleted, 1);
+    const terminalRef = terminal.details.evidenceRef;
+    assert.equal(agent.currentObservationRef, terminalRef);
+    assert.notEqual(terminalRef, playingRef);
+    const terminalObserve = await tools.observe.execute({});
+    assert.equal(terminalObserve.details.evidenceRef, terminalRef);
+    const terminalHeader = headerOf(terminalObserve.text);
+    assert.equal(terminalHeader.current_levels_completed, 0);
+    assert.equal(terminalHeader.levels_completed, 1);
+    assert.equal(terminalHeader.state, 'GAME_OVER');
+    const terminalAfter = await afterOf(terminalRef);
+    assert.equal(terminalAfter.evidenceRef, terminalRef);
+    assert.equal(terminalAfter.observation.currentLevelsCompleted, 0);
+    assert.equal(terminalAfter.observation.levelsCompleted, 1);
+    assert.deepEqual(terminalAfter.observation.frame, grid);
+    const playingAfter = await afterOf(playingRef);
+    assert.equal(playingAfter.observation.currentLevelsCompleted, 1);
+    assert.equal(playingAfter.observation.state, 'PLAYING');
+    assert.deepEqual(playingAfter.observation.frame, grid);
+
+    const reset = await agent.reset({ rationale: 'restore the same grid and level' });
+    assert.equal(reset.details.currentLevelDelta, 0);
+    assert.equal(agent.currentLevel, 1);
+    assert.equal(agent.levelActions, 2);
+    const restoredRef = reset.details.evidenceRef;
+    assert.notEqual(restoredRef, terminalRef);
+    const restoredObserve = await tools.observe.execute({});
+    assert.equal(restoredObserve.details.evidenceRef, restoredRef);
+    const restoredHeader = headerOf(restoredObserve.text);
+    assert.equal(restoredHeader.current_levels_completed, 1);
+    assert.equal(restoredHeader.levels_completed, 1);
+    assert.equal(restoredHeader.state, 'PLAYING');
+    const restoredAfter = await afterOf(restoredRef);
+    assert.equal(restoredAfter.observation.currentLevelsCompleted, 1);
+    assert.deepEqual(restoredAfter.observation.frame, grid);
+    assert.equal((await afterOf(terminalRef)).observation.currentLevelsCompleted, 0);
+
+    await agent.reset({ rationale: 'full reset to replay the level' });
+    const cleared = await agent.act({ action: 'ACTION1' });
+    assert.equal(agent.frame.currentLevelsCompleted, 0);
+    assert.equal(agent.frame.levelsCompleted, 1);
+    assert.equal(agent.frame.fullReset, false);
+    const neutral = await agent.act({ action: 'ACTION1' });
+    const before = agent.evidenceLedger.at(-2);
+    const after = agent.evidenceLedger.at(-1);
+    assert.equal(cleared.details.evidenceRef, before.id);
+    assert.equal(neutral.details.evidenceRef, after.id);
+    assert.equal(after.episodeObservationId, before.episodeObservationId);
+    assert.equal(after.observationContentHash, before.observationContentHash);
+    assert.equal(before.observation.currentLevelsCompleted, 0);
+    assert.equal(after.observation.currentLevelsCompleted, 1);
+    assert.notEqual(after.id, before.id);
+    const republished = await tools.observe.execute({});
+    assert.equal(republished.details.evidenceRef, after.id);
+    assert.equal(headerOf(republished.text).current_levels_completed, 1);
+    assert.equal((await afterOf(after.id)).observation.currentLevelsCompleted, 1);
+    const again = await tools.observe.execute({});
+    assert.equal(again.details.evidenceRef, after.id);
+    assert.equal((await afterOf(terminalRef)).observation.currentLevelsCompleted, 0);
+    assert.equal((await afterOf(terminalRef)).observation.levelsCompleted, 1);
+
+    const digests = agent.evidenceLedger.map((event) => [event.id, event.digest]);
+    const restarted = new AvoArcAgent({
+      gameId: 'trajectory-charged-v1',
+      environment,
+      loop: inertLoop,
+      captureScorecard: false,
+      config,
+    });
+    assert.equal(counts.start, 1);
+    assert.equal(restarted.frame, null);
+    assert.equal(restarted.currentLevel, 0);
+    assert.equal(restarted.actions, 0);
+    assert.equal(restarted.levelActions, 0);
+    assert.notEqual(restarted.attemptId, agent.attemptId);
+    assert.equal(restarted.evidenceLedger.length, digests.length);
+    for (const [id, digest] of digests) {
+      assert.equal(restarted.evidenceStore.get(id).digest, digest);
+    }
+    const savedTerminal = restarted.evidenceStore.get(terminalRef);
+    assert.equal(savedTerminal.observation.currentLevelsCompleted, 0);
+    assert.equal(savedTerminal.observation.levelsCompleted, 1);
+    assert.deepEqual(savedTerminal.observation.frame, grid);
+    const reloadedTools = Object.fromEntries(restarted.tools().map((tool) => [tool.name, tool]));
+    const reloadedTerminal = JSON.parse((await reloadedTools.trajectory_read.execute({
+      ref: terminalRef,
+      part: 'after',
+    })).text);
+    assert.equal(reloadedTerminal.observation.currentLevelsCompleted, 0);
+    assert.equal(reloadedTerminal.observation.levelsCompleted, 1);
+    assert.deepEqual(reloadedTerminal.observation.frame, grid);
+    const reloadedRestore = JSON.parse((await reloadedTools.trajectory_read.execute({
+      ref: restoredRef,
+      part: 'after',
+    })).text);
+    assert.equal(reloadedRestore.observation.currentLevelsCompleted, 1);
+    assert.deepEqual(reloadedRestore.observation.frame, grid);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

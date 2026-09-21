@@ -324,3 +324,113 @@ test('ERROR rejects gameplay while keeping reset and finish reachable', async ()
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+function chargedFrame({ state = 'PLAYING', levelsCompleted = 0, fullReset = false } = {}) {
+  return {
+    game_id: 'reset-charged-level',
+    frame: [[1]],
+    state,
+    levels_completed: levelsCompleted,
+    total_levels: 3,
+    guid: 'reset-charged-guid',
+    full_reset: fullReset,
+    available_actions: ['ACTION1'],
+  };
+}
+
+test('reset admission follows the charged level after a lossy terminal frame', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-reset-charged-level-'));
+  const openCounts = { step: 0, reset: 0 };
+  const openEnvironment = {
+    async start() { return chargedFrame(); },
+    async step() {
+      openCounts.step += 1;
+      if (openCounts.step === 1) return chargedFrame({ levelsCompleted: 1 });
+      if (openCounts.step === 2) return chargedFrame({ state: 'GAME_OVER', levelsCompleted: 0 });
+      return chargedFrame({ levelsCompleted: 1 });
+    },
+    async reset() {
+      openCounts.reset += 1;
+      return chargedFrame({ levelsCompleted: 1 });
+    },
+  };
+  const closedCounts = { step: 0, reset: 0 };
+  const closedEnvironment = {
+    async start() { return chargedFrame(); },
+    async step() {
+      closedCounts.step += 1;
+      if (closedCounts.step === 1) return chargedFrame({ levelsCompleted: 1 });
+      return chargedFrame({ state: 'GAME_OVER', levelsCompleted: 0 });
+    },
+    async reset() {
+      closedCounts.reset += 1;
+      return chargedFrame({ levelsCompleted: 1 });
+    },
+  };
+  const configFor = (budgets, memoryName) => ({
+    perLevelBudgets: budgets,
+    maxActions: 40,
+    stallWindow: 8,
+    policyProfile: 'minimal-v1',
+    workspaceMode: 'disabled',
+    memoryDir: path.join(root, memoryName),
+  });
+  try {
+    const open = new AvoArcAgent({
+      gameId: 'reset-charged-level',
+      environment: openEnvironment,
+      loop: inertLoop,
+      captureScorecard: false,
+      config: configFor([1, 5, 9], 'open-memory'),
+    });
+    await open.initialize();
+    const openTools = Object.fromEntries(open.tools().map((tool) => [tool.name, tool]));
+    await openTools.act.execute({ action: 'ACTION1', reasoning: 'finish level 0' });
+    const death = await openTools.act.execute({ action: 'ACTION1', reasoning: 'lossy death' });
+    assert.equal(death.details.currentLevelDelta, 0);
+    assert.equal(open.currentLevel, 1);
+    assert.equal(open.levelActions, 1);
+    assert.equal(open.isDone(), false);
+    const rejected = await openTools.act.execute({ action: 'ACTION1', reasoning: 'still terminal' });
+    assert.equal(rejected.details.code, 'EPISODE_TERMINAL');
+    assert.equal(openCounts.step, 2);
+    const reset = await openTools.reset.execute({ rationale: 'restore the charged level' });
+    assert.equal(openCounts.reset, 1);
+    assert.equal(reset.details.ok, true);
+    assert.equal(reset.details.currentLevelDelta, 0);
+    assert.equal(reset.terminate, false);
+    assert.equal(open.currentLevel, 1);
+    assert.equal(open.levelActions, 2);
+    const recovered = await openTools.act.execute({ action: 'ACTION1', reasoning: 'play after recovery' });
+    assert.equal(recovered.details.ok, true);
+    assert.equal(openCounts.step, 3);
+    assert.equal(open.frame.state, 'PLAYING');
+
+    const closed = new AvoArcAgent({
+      gameId: 'reset-charged-level',
+      environment: closedEnvironment,
+      loop: inertLoop,
+      captureScorecard: false,
+      config: configFor([10, 1, 9], 'closed-memory'),
+    });
+    await closed.initialize();
+    const closedTools = Object.fromEntries(closed.tools().map((tool) => [tool.name, tool]));
+    await closedTools.act.execute({ action: 'ACTION1', reasoning: 'finish level 0' });
+    const exhausted = await closedTools.act.execute({ action: 'ACTION1', reasoning: 'spend the level' });
+    assert.equal(exhausted.terminate, true);
+    assert.equal(closed.currentLevel, 1);
+    assert.equal(closed.levelActions, 1);
+    assert.equal(closed.runtimeStatus().terminalReason, 'level_action_budget_exhausted');
+    const denied = await closedTools.reset.execute({ rationale: 'must not forward' });
+    const deniedAct = await closedTools.act.execute({ action: 'ACTION1', reasoning: 'must not forward' });
+    assert.match(denied.text, /already complete/);
+    assert.match(deniedAct.text, /already complete/);
+    assert.equal(closedCounts.reset, 0);
+    assert.equal(closedCounts.step, 2);
+    assert.equal(closed.resets, 0);
+    assert.equal(closed.actions, 2);
+    assert.equal(closed.levelActions, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
