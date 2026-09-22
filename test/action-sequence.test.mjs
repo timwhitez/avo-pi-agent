@@ -18,7 +18,11 @@ function frame({ cell = 0, state = 'PLAYING', levels = 0, actions = ['ACTION1', 
   };
 }
 
-function makeAgent(root, environment, { maxActions = 20, gameId = 'sequence-game' } = {}) {
+function makeAgent(root, environment, {
+  maxActions = 20,
+  gameId = 'sequence-game',
+  perLevelBudgets,
+} = {}) {
   return new AvoArcAgent({
     gameId,
     environment,
@@ -26,6 +30,7 @@ function makeAgent(root, environment, { maxActions = 20, gameId = 'sequence-game
     captureScorecard: false,
     config: {
       maxActions,
+      ...(perLevelBudgets ? { perLevelBudgets } : {}),
       stallWindow: 8,
       memoryDir: path.join(root, 'memory'),
       workspaceDir: path.join(root, 'workspace'),
@@ -432,6 +437,102 @@ test('act_sequence omits finalFrameText when every step is rejected', async () =
     assert.equal(result.details.executed.length, 0);
     assert.equal('finalFrameText' in result.details, false);
     assert.equal('finalFrameText' in JSON.parse(result.text), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a lossy terminal step cancels the sequence tail and keeps the charged level cost', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-sequence-lossy-tail-'));
+  const counts = { step: 0, reset: 0 };
+  let phase = 'progress';
+  const environment = {
+    async start() { return frame(); },
+    async step() {
+      counts.step += 1;
+      if (phase === 'progress') return frame({ cell: 1, levels: 1 });
+      return frame({ cell: 1, state: 'GAME_OVER', levels: 0 });
+    },
+    async reset() {
+      counts.reset += 1;
+      return frame({ cell: 1, levels: 1 });
+    },
+  };
+  try {
+    const agent = makeAgent(root, environment, { perLevelBudgets: [10, 4, 9], maxActions: 40 });
+    await agent.initialize();
+    phase = 'progress';
+    await agent.act({ action: 'ACTION1' });
+    phase = 'die';
+    const result = await agent.actSequence({
+      steps: [{ action: 'ACTION1' }, { action: 'ACTION2' }, { action: 'ACTION3' }],
+    });
+    assert.equal(counts.step, 2);
+    assert.equal(result.details.stopReason, 'GAME_OVER');
+    assert.equal(result.terminate, false);
+    assert.equal(result.details.executed.length, 1);
+    assert.deepEqual(result.details.skipped.map((entry) => entry.index), [1, 2]);
+    assert.equal(result.details.executed[0].currentLevelDelta, 0);
+    assert.equal(result.details.executed[0].levelDelta, 0);
+    assert.equal(agent.currentLevel, 1);
+    assert.equal(agent.levelActions, 1);
+    assert.equal(agent.frame.currentLevelsCompleted, 0);
+    assert.equal(agent.frame.levelsCompleted, 1);
+    const reset = await agent.reset({ rationale: 'recover with the retained cost' });
+    assert.equal(counts.reset, 1);
+    assert.equal(reset.details.currentLevelDelta, 0);
+    assert.equal(reset.terminate, false);
+    assert.equal(agent.currentLevel, 1);
+    assert.equal(agent.levelActions, 2);
+    assert.equal(agent.actions, 3);
+    assert.equal(agent.gameplayActions, 2);
+    assert.equal(agent.resets, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a lossy terminal step that exhausts the level keeps GAME_OVER as the sequence stop reason', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-sequence-lossy-exhaust-'));
+  const counts = { step: 0, reset: 0 };
+  let phase = 'progress';
+  const environment = {
+    async start() { return frame(); },
+    async step() {
+      counts.step += 1;
+      if (phase === 'progress') return frame({ cell: 1, levels: 1 });
+      return frame({ cell: 1, state: 'GAME_OVER', levels: 0 });
+    },
+    async reset() {
+      counts.reset += 1;
+      return frame({ cell: 1, levels: 1 });
+    },
+  };
+  try {
+    const agent = makeAgent(root, environment, { perLevelBudgets: [10, 1, 9], maxActions: 40 });
+    await agent.initialize();
+    await agent.act({ action: 'ACTION1' });
+    phase = 'die';
+    const result = await agent.actSequence({
+      steps: [{ action: 'ACTION1' }, { action: 'ACTION2' }],
+    });
+    assert.equal(counts.step, 2);
+    assert.equal(result.details.stopReason, 'GAME_OVER');
+    assert.equal(result.terminate, true);
+    assert.equal(result.details.executed.length, 1);
+    assert.deepEqual(result.details.skipped.map((entry) => entry.index), [1]);
+    assert.equal(result.details.executed[0].currentLevelDelta, 0);
+    assert.equal(agent.currentLevel, 1);
+    assert.equal(agent.levelActions, 1);
+    assert.equal(agent.isDone(), true);
+    assert.equal(agent.runtimeStatus().terminalReason, 'level_action_budget_exhausted');
+    const reset = await agent.reset({ rationale: 'must not forward' });
+    assert.match(reset.text, /already complete/);
+    assert.equal(reset.terminate, true);
+    assert.equal(counts.reset, 0);
+    assert.equal(agent.actions, 2);
+    assert.equal(agent.levelActions, 1);
+    assert.equal(agent.resets, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

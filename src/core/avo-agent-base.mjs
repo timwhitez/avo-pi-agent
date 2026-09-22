@@ -136,7 +136,16 @@ export class AvoArcAgent {
 
   adoptFrame(raw) {
     const frame = normalizeFrame(raw);
-    this.currentLevel = frame.levelsCompleted;
+    const state = episodeState(frame);
+    // A terminal GAME_OVER/ERROR can drop levelsCompleted without fullReset.
+    // The observation keeps that raw value, but the charged budget index does
+    // not follow it backward: restoring the level with an ordinary RESET is
+    // not newly completed gameplay and must not clear accumulated cost.
+    const retainChargedLevel = this.frame != null
+      && !frame.fullReset
+      && (state === 'GAME_OVER' || state === 'ERROR')
+      && frame.levelsCompleted < this.currentLevel;
+    if (!retainChargedLevel) this.currentLevel = frame.levelsCompleted;
     this.maxObservedLevelsCompleted = Math.max(
       this.maxObservedLevelsCompleted,
       frame.levelsCompleted,
