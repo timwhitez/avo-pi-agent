@@ -229,8 +229,11 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
     'src/core/observation.mjs',
     'src/core/policy-profile.mjs',
     'src/core/supervisor.mjs',
+    'src/core/bounded-read.mjs',
   ]) {
     assert.ok(RUN_CAPSULE_COMPONENT_FILES.includes(file), `${file} is outside the run capsule`);
+    assert.match(baseline.definition.components.files[file], /^[a-f0-9]{64}$/,
+      `${file} is not hash-bound in the sealed components`);
   }
 });
 

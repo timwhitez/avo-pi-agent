@@ -97,6 +97,7 @@ async function loadLoopWith(script) {
   fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
   fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
   fs.copyFileSync('src/core/policy-profile.mjs', path.join(root, 'src', 'core', 'policy-profile.mjs'));
+  fs.copyFileSync('src/core/bounded-read.mjs', path.join(root, 'src', 'core', 'bounded-read.mjs'));
   const captured = root;
   globalThis.__avoPlan = script;
   const mod = await import(pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href);

@@ -1,9 +1,14 @@
 import crypto from 'node:crypto';
 import { normalizeHypothesis } from './evaluator.mjs';
+import { previewText } from './bounded-read.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
 
 const OUTCOMES = new Set(['confirmed', 'contradicted', 'inconclusive', 'expired']);
-const PROPOSAL_ID = /^proposal-[a-f0-9]{12}$/;
-const EVALUATION_ID = /^(evaluation|attempt)-[a-f0-9]{12}$/;
+export const PROPOSAL_ID = /^proposal-[a-f0-9]{12}$/;
+export const EVALUATION_ID = /^(evaluation|attempt)-[a-f0-9]{12}$/;
+export const JOURNAL_COLLECTIONS = Object.freeze(['proposals', 'evaluations', 'pending']);
+
+const SNAPSHOT_SCHEMA = 'avo.journal-collection-snapshot.v1';
 
 function idFor(prefix, record) {
   return `${prefix}-${crypto.createHash('sha256')
@@ -89,6 +94,65 @@ export class HypothesisJournal {
 
   recentEvaluations(limit = 12) {
     return this.evaluations.slice(-boundedLimit(limit));
+  }
+
+  /** Retained records of one readable collection in original append order. */
+  collection(name) {
+    if (name === 'proposals') return this.proposals;
+    if (name === 'evaluations') return this.evaluations;
+    if (name === 'pending') return this.pendingProposals();
+    throw new Error(`unknown hypothesis journal collection: ${String(name)}`);
+  }
+
+  collectionIds(name) {
+    return this.collection(name).map((record) => record.id);
+  }
+
+  /**
+   * Snapshot identity of one retained collection: game scope plus the append
+   * order ID list. Any append, pending-to-evaluation move or eviction changes it.
+   */
+  snapshotSha256(name, gameId) {
+    return crypto.createHash('sha256').update(canonicalJson({
+      schema: SNAPSHOT_SCHEMA,
+      gameId: String(gameId ?? ''),
+      collection: name,
+      ids: this.collectionIds(name),
+    })).digest('hex');
+  }
+
+  recordById(name, id) {
+    if (name !== 'proposals' && name !== 'evaluations') return null;
+    return this.collection(name).find((record) => record.id === id) ?? null;
+  }
+
+  relatedEvaluationId(proposalId) {
+    return this.evaluations.find((record) => record.proposalId === proposalId)?.id ?? null;
+  }
+
+  /** Bounded read summary; full content stays addressable through recordRequest. */
+  summarize(name, record) {
+    const { preview, previewTruncated } = previewText(record.hypothesis, 160);
+    if (name === 'evaluations') {
+      return {
+        id: record.id,
+        proposalId: record.proposalId,
+        outcome: record.outcome,
+        evaluatedAt: record.evaluatedAt,
+        hypothesisPreview: preview,
+        previewTruncated,
+        predictionCount: record.predictions.length,
+        recordRequest: { view: 'record', collection: 'evaluations', recordId: record.id },
+      };
+    }
+    return {
+      id: record.id,
+      createdAt: record.createdAt,
+      hypothesisPreview: preview,
+      previewTruncated,
+      predictionCount: record.predictions.length,
+      recordRequest: { view: 'record', collection: 'proposals', recordId: record.id },
+    };
   }
 
   toJSON() {

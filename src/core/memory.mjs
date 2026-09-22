@@ -1,9 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { HypothesisJournal } from './hypothesis-journal.mjs';
+import {
+  EVALUATION_ID, HypothesisJournal, JOURNAL_COLLECTIONS, PROPOSAL_ID,
+} from './hypothesis-journal.mjs';
 import { normalizeHypothesis } from './evaluator.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { wasAtomicWriteCommitted, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
+import {
+  decodeCursor,
+  encodeCursor,
+  fitsBound,
+  packListPage,
+  previewText,
+  readDetailEnvelope,
+  readRequestError,
+  resolveToolResultMaxChars,
+} from './bounded-read.mjs';
 
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
@@ -15,6 +27,26 @@ const CLAIM_ID = /^claim-[0-9]{6,16}$/;
 const EVIDENCE_ID = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 const CLAIM_STATUSES = new Set(['proposed', 'confirmed', 'contradicted', 'superseded']);
 const ACTIVE_CLAIM_STATUSES = new Set(['proposed', 'confirmed']);
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const JOURNAL_READ_SCHEMA = 'avo.journal-read.v1';
+const MEMORY_READ_SCHEMA = 'avo.memory-read.v1';
+const JOURNAL_READ_KEYS = new Set([
+  'view', 'proposalLimit', 'evaluationLimit', 'collection', 'limit', 'cursor',
+  'recordId', 'offset', 'expectedSha256',
+]);
+const MEMORY_READ_KEYS = new Set([
+  'view', 'query', 'status', 'startSequence', 'limit', 'claimId', 'section', 'offset', 'expectedSha256',
+]);
+export const MEMORY_READ_SECTIONS = Object.freeze([
+  'actionSemantics',
+  'objects',
+  'goals',
+  'invariants',
+  'failedHypotheses',
+  'provenStrategies',
+  'notes',
+  'supervisorInterventions',
+]);
 
 function initial(gameId) {
   return {
@@ -102,16 +134,21 @@ export class PersistentMemory {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) {
       throw new Error('memory claim limit must be an integer from 1 through 8');
     }
-    const terms = words(query);
-    const matching = this.data.claims.filter((claim) => claim.sequence >= startSequence
-      && (status === 'all' || claim.status === status)
-      && (terms.length === 0 || terms.some((term) => claimSearchText(claim).includes(term))));
+    const matching = this.matchingClaims({ query, status, startSequence });
     const claims = matching.slice(0, limit).map((claim) => structuredClone(claim));
     return {
       claims,
       nextSequence: matching.length > claims.length ? claims.at(-1).sequence + 1 : null,
       totalMatches: matching.length,
     };
+  }
+
+  /** Retained claims matching the existing filter, in append (sequence) order. */
+  matchingClaims({ query = '', status = 'all', startSequence = 1 } = {}) {
+    const terms = words(query);
+    return this.data.claims.filter((claim) => claim.sequence >= startSequence
+      && (status === 'all' || claim.status === status)
+      && (terms.length === 0 || terms.some((term) => claimSearchText(claim).includes(term))));
   }
 
   relevantClaims(context = {}, limit = 4) {
@@ -252,6 +289,207 @@ export class PersistentMemory {
       evaluations: this.journal.recentEvaluations(evaluationLimit),
       supervisorInterventions: this.data.supervisorInterventions.slice(-50),
     };
+  }
+
+  /**
+   * Bounded model-facing read of the retained hypothesis journal. This is a new
+   * projection: the internal snapshot()/hypothesisJournal() readers above keep
+   * their previous shape for the supervisor and other in-process consumers.
+   */
+  journalRead(input = {}, maxChars) {
+    const B = readBound(maxChars, 'journal_read');
+    const request = normalizeJournalRead(input);
+    if (request.view === 'recent') return this.#journalRecent(request, B);
+    if (request.view === 'list') return this.#journalList(request, B);
+    return this.#journalRecord(request, B);
+  }
+
+  /** Bounded model-facing read of retained memory claims and retained sections. */
+  memoryRead(input = {}, maxChars) {
+    const B = readBound(maxChars, 'memory_read');
+    const request = normalizeMemoryRead(input);
+    if (request.view === 'claims') return this.#claimsRead(request, B);
+    if (request.view === 'record') return this.#claimRecord(request, B);
+    return this.#sectionRead(request, B);
+  }
+
+  #journalRecent({ proposalLimit, evaluationLimit }, B) {
+    const groups = [
+      ['proposals', this.journal.collection('proposals').slice(-proposalLimit)],
+      ['evaluations', this.journal.collection('evaluations').slice(-evaluationLimit)],
+      ['pending', this.journal.collection('pending').slice(-proposalLimit)],
+    ];
+    const retained = {
+      proposals: this.journal.proposals.length,
+      evaluations: this.journal.evaluations.length,
+      pending: this.journal.pendingProposals().length,
+    };
+    const summaries = new Map(groups.map(([name, records]) => [
+      name,
+      records.map((record) => this.journal.summarize(name, record)),
+    ]));
+    const taken = new Map(groups.map(([name]) => [name, new Set()]));
+    const nextIndex = new Map(groups.map(([name, records]) => [name, records.length - 1]));
+    const build = () => ({
+      schema: JOURNAL_READ_SCHEMA,
+      ok: true,
+      view: 'recent',
+      summaryOnly: true,
+      ...Object.fromEntries(groups.map(([name]) => [name, {
+        items: summaries.get(name).filter((_, index) => taken.get(name).has(index)),
+        returned: taken.get(name).size,
+        totalRetained: retained[name],
+        listRequest: { view: 'list', collection: name, limit: 20 },
+      }])),
+      supervisorHistoryRequest: { view: 'section', section: 'supervisorInterventions' },
+    });
+    let best = null;
+    let filling = true;
+    while (filling) {
+      filling = false;
+      for (const [name] of groups) {
+        const index = nextIndex.get(name);
+        if (index < 0) continue;
+        taken.get(name).add(index);
+        nextIndex.set(name, index - 1);
+        const envelope = build();
+        if (!fitsBound(envelope, B)) {
+          taken.get(name).delete(index);
+          nextIndex.set(name, index);
+          filling = false;
+          break;
+        }
+        best = envelope;
+        filling = true;
+      }
+    }
+    if (best) return best;
+    const empty = build();
+    if (fitsBound(empty, B)) return empty;
+    throw readRequestError('READ_BUDGET_TOO_SMALL');
+  }
+
+  #journalList({ collection, limit, cursor }, B) {
+    const records = this.journal.collection(collection);
+    const snapshotSha256 = this.journal.snapshotSha256(collection, this.gameId);
+    let startIndex = 0;
+    if (cursor !== undefined) {
+      const decoded = decodeCursor(cursor);
+      if (decoded.collection !== collection) throw readRequestError('INVALID_CURSOR');
+      if (decoded.snapshotSha256 !== snapshotSha256) throw readRequestError('STALE_CURSOR');
+      const anchor = records.findIndex((record) => record.id === decoded.afterId);
+      if (anchor < 0) throw readRequestError('STALE_CURSOR');
+      startIndex = anchor + 1;
+    }
+    const remaining = records.slice(startIndex);
+    const candidates = remaining.slice(0, limit)
+      .map((record) => this.journal.summarize(collection, record));
+    return packListPage({
+      items: candidates,
+      limit,
+      B,
+      hasMore: remaining.length > candidates.length,
+      envelopeFor: (items, last, isFinal) => {
+        const nextCursor = isFinal || !last ? null
+          : encodeCursor({ v: 1, collection, snapshotSha256, afterId: last.id });
+        return {
+          schema: JOURNAL_READ_SCHEMA,
+          ok: true,
+          view: 'list',
+          collection,
+          items,
+          returned: items.length,
+          totalRetained: records.length,
+          nextCursor,
+          nextRequest: nextCursor === null ? null : {
+            view: 'list', collection, limit, cursor: nextCursor,
+          },
+        };
+      },
+    });
+  }
+
+  #journalRecord({ collection, recordId, offset, expectedSha256 }, B) {
+    const record = this.journal.recordById(collection, recordId);
+    if (!record) throw readRequestError('READ_NOT_FOUND');
+    const fields = {
+      schema: JOURNAL_READ_SCHEMA,
+      ok: true,
+      view: 'record',
+      collection,
+      recordId,
+      ...(collection === 'proposals'
+        ? { relatedEvaluationId: this.journal.relatedEvaluationId(recordId) }
+        : {}),
+    };
+    return readDetailEnvelope({
+      value: record,
+      offset,
+      expectedSha256,
+      B,
+      fields,
+      nextRequest: (nextOffset, contentSha256) => ({
+        view: 'record', collection, recordId, offset: nextOffset, expectedSha256: contentSha256,
+      }),
+    });
+  }
+
+  #claimsRead({ query, status, startSequence, limit }, B) {
+    const matching = this.matchingClaims({ query, status, startSequence });
+    const candidates = matching.slice(0, limit)
+      .map((claim) => readClaimSummary(claim));
+    const totalMatches = matching.length;
+    return packListPage({
+      items: candidates,
+      limit,
+      B,
+      hasMore: totalMatches > candidates.length,
+      envelopeFor: (claims, last, isFinal) => {
+        const nextRequest = isFinal || !last ? null
+          : { view: 'claims', query, status, limit, startSequence: last.sequence + 1 };
+        return {
+          schema: MEMORY_READ_SCHEMA,
+          ok: true,
+          view: 'claims',
+          summaryOnly: true,
+          claimPage: {
+            claims,
+            returned: claims.length,
+            nextSequence: nextRequest ? nextRequest.startSequence : null,
+            nextRequest,
+            totalMatches,
+          },
+        };
+      },
+    });
+  }
+
+  #claimRecord({ claimId, offset, expectedSha256 }, B) {
+    const claim = this.data.claims.find((entry) => entry.id === claimId);
+    if (!claim) throw readRequestError('READ_NOT_FOUND');
+    return readDetailEnvelope({
+      value: claim,
+      offset,
+      expectedSha256,
+      B,
+      fields: { schema: MEMORY_READ_SCHEMA, ok: true, view: 'record', claimId },
+      nextRequest: (nextOffset, contentSha256) => ({
+        view: 'record', claimId, offset: nextOffset, expectedSha256: contentSha256,
+      }),
+    });
+  }
+
+  #sectionRead({ section, offset, expectedSha256 }, B) {
+    return readDetailEnvelope({
+      value: this.data[section] ?? null,
+      offset,
+      expectedSha256,
+      B,
+      fields: { schema: MEMORY_READ_SCHEMA, ok: true, view: 'section', section },
+      nextRequest: (nextOffset, contentSha256) => ({
+        view: 'section', section, offset: nextOffset, expectedSha256: contentSha256,
+      }),
+    });
   }
 
   merge(patch) {
@@ -722,6 +960,153 @@ function dedupe(values) {
 function boundedLimit(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 200)) : 100;
+}
+
+function readBound(maxChars, tool) {
+  const bound = maxChars === undefined ? resolveToolResultMaxChars({}) : maxChars;
+  if (!Number.isSafeInteger(bound) || bound <= 0) {
+    throw new Error(`${tool} requires a positive tool result bound`);
+  }
+  return bound;
+}
+
+function plainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function readString(value, maxLength) {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw readRequestError('INVALID_READ_REQUEST');
+  }
+  return value;
+}
+
+function readInteger(value, min, max) {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw readRequestError('INVALID_READ_REQUEST');
+  }
+  return value;
+}
+
+function readOptionalSha256(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !SHA256_HEX.test(value)) {
+    throw readRequestError('INVALID_READ_REQUEST');
+  }
+  return value;
+}
+
+function assertOnlyKeys(input, allowed) {
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) throw readRequestError('INVALID_READ_REQUEST');
+  }
+}
+
+function normalizeJournalRead(input) {
+  if (!plainObject(input)) throw readRequestError('INVALID_READ_REQUEST');
+  assertOnlyKeys(input, JOURNAL_READ_KEYS);
+  const view = input.view === undefined ? 'recent' : input.view;
+  if (view === 'recent') {
+    assertOnlyKeys(input, new Set(['view', 'proposalLimit', 'evaluationLimit']));
+    return {
+      view,
+      proposalLimit: input.proposalLimit === undefined
+        ? 100 : readInteger(input.proposalLimit, 1, 200),
+      evaluationLimit: input.evaluationLimit === undefined
+        ? 100 : readInteger(input.evaluationLimit, 1, 200),
+    };
+  }
+  if (view === 'list') {
+    assertOnlyKeys(input, new Set(['view', 'collection', 'limit', 'cursor']));
+    if (!JOURNAL_COLLECTIONS.includes(input.collection)) {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    return {
+      view,
+      collection: input.collection,
+      limit: input.limit === undefined ? 20 : readInteger(input.limit, 1, 200),
+      cursor: input.cursor === undefined ? undefined : readString(input.cursor, 2048),
+    };
+  }
+  if (view === 'record') {
+    assertOnlyKeys(input, new Set(['view', 'collection', 'recordId', 'offset', 'expectedSha256']));
+    if (input.collection !== 'proposals' && input.collection !== 'evaluations') {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    const pattern = input.collection === 'proposals' ? PROPOSAL_ID : EVALUATION_ID;
+    if (typeof input.recordId !== 'string' || !pattern.test(input.recordId)) {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    return {
+      view,
+      collection: input.collection,
+      recordId: input.recordId,
+      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
+      expectedSha256: readOptionalSha256(input.expectedSha256),
+    };
+  }
+  throw readRequestError('INVALID_READ_REQUEST');
+}
+
+function normalizeMemoryRead(input) {
+  if (!plainObject(input)) throw readRequestError('INVALID_READ_REQUEST');
+  assertOnlyKeys(input, MEMORY_READ_KEYS);
+  const view = input.view === undefined ? 'claims' : input.view;
+  if (view === 'claims') {
+    assertOnlyKeys(input, new Set(['view', 'query', 'status', 'startSequence', 'limit']));
+    if (input.status !== undefined
+        && (typeof input.status !== 'string' || (input.status !== 'all' && !CLAIM_STATUSES.has(input.status)))) {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    return {
+      view,
+      query: input.query === undefined ? '' : readString(input.query, 1000),
+      status: input.status === undefined ? 'all' : input.status,
+      startSequence: input.startSequence === undefined
+        ? 1 : readInteger(input.startSequence, 1, Number.MAX_SAFE_INTEGER),
+      limit: input.limit === undefined ? 4 : readInteger(input.limit, 1, 8),
+    };
+  }
+  if (view === 'record') {
+    assertOnlyKeys(input, new Set(['view', 'claimId', 'offset', 'expectedSha256']));
+    if (typeof input.claimId !== 'string' || !CLAIM_ID.test(input.claimId)) {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    return {
+      view,
+      claimId: input.claimId,
+      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
+      expectedSha256: readOptionalSha256(input.expectedSha256),
+    };
+  }
+  if (view === 'section') {
+    assertOnlyKeys(input, new Set(['view', 'section', 'offset', 'expectedSha256']));
+    if (typeof input.section !== 'string' || !MEMORY_READ_SECTIONS.includes(input.section)) {
+      throw readRequestError('INVALID_READ_REQUEST');
+    }
+    return {
+      view,
+      section: input.section,
+      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
+      expectedSha256: readOptionalSha256(input.expectedSha256),
+    };
+  }
+  throw readRequestError('INVALID_READ_REQUEST');
+}
+
+function readClaimSummary(claim) {
+  const { preview, previewTruncated } = previewText(claim.content, 160);
+  return {
+    id: claim.id,
+    sequence: claim.sequence,
+    status: claim.status,
+    subject: claim.subject,
+    type: claim.type,
+    contentPreview: preview,
+    previewTruncated,
+    evidenceRefCount: claim.evidenceRefs.length,
+    recordRequest: { view: 'record', claimId: claim.id },
+  };
 }
 
 function boundedValue(value, depth = 0) {

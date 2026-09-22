@@ -7,6 +7,7 @@ import {
   policyToolContract,
 } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { resolveToolResultMaxChars } from '../core/bounded-read.mjs';
 import {
   assertProviderCapabilities,
   providerCapabilityDigest,
@@ -199,7 +200,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
   };
   // A single fat read (full journal, a whole workspace file) kept verbatim in
   // the recent window can exceed the provider context by itself.
-  const maxToolResultChars = positiveEnvInt('AVO_TOOL_RESULT_MAX_CHARS', 24_000);
+  // One resolved bound for tool results; an already-parsed config value wins
+  // over the environment so CLI parsing and the adapter cannot diverge.
+  const maxToolResultChars = resolveToolResultMaxChars(config);
 
   return {
     kind: 'pi-sdk',
@@ -212,6 +215,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       workspaceMode: initializedWorkspaceMode,
       policyProfile: initializedPolicyProfile,
       productionToolContract,
+      toolResultMaxChars: initializedToolResultMaxChars,
     }) {
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
@@ -229,6 +233,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       if (initializedPolicyProfile
           && normalizePolicyProfile(config.policyProfile) !== policyProfile) {
         throw new Error('Pi production loop policy profile differs from runtime configuration');
+      }
+      if (initializedToolResultMaxChars !== undefined
+          && initializedToolResultMaxChars !== maxToolResultChars) {
+        throw new Error('Pi production loop tool result bound differs from the initialized limit');
       }
       if (initializedPolicyProfile) {
         const permittedTools = filterToolsForPolicy(tools, workspaceMode, policyProfile);
@@ -1232,6 +1240,12 @@ function toolRecoveryHint(toolName, details) {
   if (ref) return `exact environment evidence remains available via trajectory_read ref=${ref}`;
   if (toolName === 'workspace_read') {
     return 'use workspace_read with the same path and a smaller limit; resume at the returned nextOffset';
+  }
+  if (toolName === 'memory_read') {
+    return 'use memory_read view="claims", "record" or "section" and follow the returned nextRequest; do not repeat memory_update to recover output';
+  }
+  if (toolName === 'journal_read') {
+    return 'use journal_read view="recent", "list" or "record" and follow the returned nextRequest; do not repeat hypothesis_propose or hypothesis_evaluate to recover output';
   }
   if (RECALL_SAFE_TOOLS.has(toolName)) {
     return 're-call this read-only tool with narrower bounds if its result is needed';

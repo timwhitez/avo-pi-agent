@@ -282,7 +282,15 @@ test('production tools surface bounded active claims and reject orphan evidence 
     const afterCorrection = await tools.observe.execute({});
     assert.deepEqual(afterCorrection.details.relevantMemory.map((claim) => claim.id), [corrected.details.claim.id]);
     const page = await tools.memory_read.execute({ startSequence: 1, limit: 8 });
-    assert.deepEqual(page.details.memory.claimPage.claims.map((claim) => claim.status), ['contradicted', 'confirmed']);
+    const pageValue = JSON.parse(page.text);
+    assert.deepEqual(pageValue, page.details);
+    assert.equal(pageValue.schema, 'avo.memory-read.v1');
+    assert.equal(pageValue.view, 'claims');
+    assert.deepEqual(pageValue.claimPage.claims.map((claim) => claim.status), ['contradicted', 'confirmed']);
+    assert.deepEqual(
+      pageValue.claimPage.claims.map((claim) => claim.recordRequest),
+      pageValue.claimPage.claims.map((claim) => ({ view: 'record', claimId: claim.id })),
+    );
     agent.actions = agent.config.maxActions;
     const finishOutcome = await tools.finish.execute({ summary: 'Unverified final summaries must not bypass typed claims.' });
     assert.equal(finishOutcome.terminate, true, 'finish succeeds only from an exhausted budget');

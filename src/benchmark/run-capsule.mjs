@@ -98,6 +98,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/config.mjs',
   'src/core/avo-agent.mjs',
   'src/core/avo-agent-base.mjs',
+  'src/core/bounded-read.mjs',
   'src/core/durable-avo-agent.mjs',
   'src/core/durable-memory.mjs',
   'src/core/evidence-lock.mjs',
