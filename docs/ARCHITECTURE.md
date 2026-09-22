@@ -38,8 +38,8 @@ attempt/episode. Confirmation means the prediction matched, not that a policy wa
 installed or improved. New attempts and resets do not turn old evidence into new evidence.
 
 Model-facing memory reads are bounded projections rather than internal snapshots.
-`memory_read` and `journal_read` select retained collections, page them with
-snapshots/cursors, and return complete records as canonical-JSON chunks inside the
+Journal lists use snapshot-bound cursors; claim pages use their stable sequence.
+Both readers return complete records as canonical-JSON chunks inside the
 single effective `toolResultMaxChars` envelope resolved at initialization. The
 internal snapshot, retention limits, IDs and digests are unchanged for other
 consumers (`src/core/bounded-read.mjs` holds the shared budget and chunk helpers).

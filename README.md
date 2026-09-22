@@ -63,7 +63,7 @@ The last mode uses an already-local container image with no network and one writ
 workspace mount; there is no host-Python fallback.
 
 `current-v1` reads durable state through bounded `memory_read` (`claims`, `record`,
-`section`) and `journal_read` (`recent`, `list`, `record`) views. Each call returns one
+`section`) and `journal_read` (`recent`, `list`, `record`) views. Each successful read returns one
 complete JSON envelope inside the effective `toolResultMaxChars` limit, with
 `recordRequest`/`nextRequest` parameters for the next read, so retained history beyond
 the most recent records stays addressable. See [claim boundaries](docs/AVO_CONFORMANCE.md).
