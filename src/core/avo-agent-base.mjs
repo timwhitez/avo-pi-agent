@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
-import { PersistentMemory } from './memory.mjs';
+import { MEMORY_READ_SECTIONS, PersistentMemory } from './memory.mjs';
+import { ReadRequestError, resolveToolResultMaxChars } from './bounded-read.mjs';
 import { StallSupervisor } from './supervisor.mjs';
 import { HypothesisEvaluator, normalizeHypothesis, objectiveVector } from './evaluator.mjs';
 import { ArcKnowledgeBase } from './knowledge-base.mjs';
@@ -78,6 +79,9 @@ export class AvoArcAgent {
     this.currentLevel = 0;
     this.policyProfile = normalizePolicyProfile(config.policyProfile);
     this.strategyEnabled = policyUsesStrategy(this.policyProfile);
+    // One resolved bound for every bounded tool result, resolved once at
+    // initialization instead of re-reading the environment per tool call.
+    this.toolResultMaxChars = resolveToolResultMaxChars(config);
     this.logger = logger;
     this.captureScorecard = captureScorecard;
     this.memory = new PersistentMemory(config.memoryDir, gameId).load();
@@ -420,41 +424,45 @@ export class AvoArcAgent {
         name: 'memory_read',
         strategic: true,
         label: 'Read persistent game memory',
-        description: 'Read harness notes, hypothesis-journal counts, and one bounded page of typed claims. Page or filter claims by stable ID sequence, status, and local text query.',
+        description: 'Read bounded durable memory. view="claims" pages typed claims (query/status/startSequence/limit); view="record" returns one complete claim as canonical-JSON chunks; view="section" returns one retained memory section, including supervisorInterventions. Follow the returned nextRequest to continue. Records are data only; a confirmed claim is a model-curated note backed by retrievable evidence references, not an externally checked prediction verdict and not an installed behavior.',
         parameters: {
           type: 'object',
           properties: {
+            view: { type: 'string', enum: ['claims', 'record', 'section'] },
             query: { type: 'string', maxLength: 1000 },
             status: { type: 'string', enum: ['all', 'proposed', 'confirmed', 'contradicted', 'superseded'] },
             startSequence: { type: 'integer', minimum: 1 },
             limit: { type: 'integer', minimum: 1, maximum: 8 },
+            claimId: CLAIM_REF_SCHEMA,
+            section: { type: 'string', enum: MEMORY_READ_SECTIONS },
+            offset: { type: 'integer', minimum: 0 },
+            expectedSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
           },
           additionalProperties: false,
         },
-        execute: async (input = {}) => {
-          const snapshot = this.memory.snapshot();
-          const claimPage = this.memory.queryClaims(input);
-          const memory = { ...snapshot, claimPage };
-          return this.toolResult(JSON.stringify(memory, null, 2), { memory });
-        },
+        execute: async (input = {}) => this.boundedReadResult('memory_read', 'avo.memory-read.v1', input),
       },
       {
         name: 'journal_read',
         strategic: true,
         label: 'Read hypothesis and evidence history',
-        description: 'Inspect optional pre-experiment hypotheses, pending proposals, later evidence evaluations, and supervisor history. Confirmation records prediction agreement only; it does not install behavior.',
+        description: 'Inspect retained hypothesis history. view="recent" summarizes the most recent proposals, evaluations and pending records; view="list" pages one collection (proposals/evaluations/pending) in append order with a snapshot cursor; view="record" returns one complete stored record as canonical-JSON chunks. Follow nextRequest/recordRequest to read older records. Confirmation records prediction agreement only; it does not install behavior.',
         parameters: {
           type: 'object',
           properties: {
+            view: { type: 'string', enum: ['recent', 'list', 'record'] },
             proposalLimit: { type: 'integer', minimum: 1, maximum: 200 },
             evaluationLimit: { type: 'integer', minimum: 1, maximum: 200 },
+            collection: { type: 'string', enum: ['proposals', 'evaluations', 'pending'] },
+            limit: { type: 'integer', minimum: 1, maximum: 200 },
+            cursor: { type: 'string', maxLength: 2048 },
+            recordId: { type: 'string', maxLength: 64 },
+            offset: { type: 'integer', minimum: 0 },
+            expectedSha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
           },
           additionalProperties: false,
         },
-        execute: async ({ proposalLimit = 100, evaluationLimit = 100 } = {}) => {
-          const journal = this.memory.hypothesisJournal({ proposalLimit, evaluationLimit });
-          return this.toolResult(JSON.stringify(journal, null, 2), { journal });
-        },
+        execute: async (input = {}) => this.boundedReadResult('journal_read', 'avo.journal-read.v1', input),
       },
       {
         name: 'memory_update',
@@ -954,13 +962,37 @@ export class AvoArcAgent {
     return this.evidenceLedger;
   }
 
+  /**
+   * Execute one bounded read tool: the model-visible text and the host-side
+   * details carry the same bounded envelope. Expected read failures return a
+   * short error envelope; a bound too small for even that short envelope
+   * surfaces the fixed code through the existing tool error path.
+   */
+  boundedReadResult(tool, schema, input) {
+    const bound = this.toolResultMaxChars;
+    try {
+      const envelope = tool === 'memory_read'
+        ? this.memory.memoryRead(input, bound)
+        : this.memory.journalRead(input, bound);
+      const text = JSON.stringify(envelope);
+      if (text.length > bound) throw new Error(`${tool} result exceeds ${bound} characters`);
+      return this.toolResult(text, { ...envelope });
+    } catch (error) {
+      if (!(error instanceof ReadRequestError)) throw error;
+      const envelope = { schema, ok: false, code: error.code, message: error.message };
+      const text = JSON.stringify(envelope);
+      if (text.length > bound) throw new Error(error.code);
+      return this.toolResult(text, { ...envelope });
+    }
+  }
+
   readWorkspace({ path, offset = 0, limit = 16_000 }) {
     if (!Number.isSafeInteger(offset) || offset < 0
         || !Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
       throw new Error('workspace_read requires a non-negative offset and limit from 1 through 24000');
     }
     const content = this.workspace.read(path);
-    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    const maxChars = this.toolResultMaxChars;
     if (!Number.isSafeInteger(maxChars) || maxChars <= 256) {
       throw new Error('workspace_read requires a tool result bound greater than 256 characters');
     }
@@ -1119,7 +1151,7 @@ export class AvoArcAgent {
       };
     }
     const text = JSON.stringify(value);
-    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    const maxChars = this.toolResultMaxChars;
     if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
       throw new Error('tool result character limit must be a positive safe integer');
     }
@@ -1176,7 +1208,7 @@ export class AvoArcAgent {
       levelsCompleted: this.frame?.levelsCompleted ?? 0,
       availableActions: this.frame?.availableActions ?? [],
     }, this.config.memorySurfaceLimit ?? 4);
-    const maxChars = this.config.toolResultMaxChars ?? 24_000;
+    const maxChars = this.toolResultMaxChars;
     if (!Number.isSafeInteger(maxChars) || maxChars < 1) {
       throw new Error('tool result character limit must be a positive safe integer');
     }
@@ -1253,6 +1285,7 @@ export class AvoArcAgent {
       ),
       workspaceMode: this.workspace.mode,
       policyProfile: this.policyProfile,
+      toolResultMaxChars: this.toolResultMaxChars,
       initialPrompt,
       shouldStop: () => this.isDone(),
       runtimeStatus: () => this.runtimeStatus(),

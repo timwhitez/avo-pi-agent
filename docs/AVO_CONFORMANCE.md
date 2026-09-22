@@ -19,6 +19,42 @@ Future work should be motivated by observed limitations and measured separately.
 This describes the current implementation, not a permanent ban on changing it.
 Offline tests, runtime counters and analogy to a paper do not establish ARC performance.
 
+## Bounded memory and journal reads
+
+`current-v1` reads durable state through two bounded tools; `minimal-v1` exposes
+neither. Successful reads serialize one complete JSON envelope into the model-visible tool
+result, so the effective limit (`toolResultMaxChars`, default 24000 JS UTF-16
+code units) also bounds the navigation and the content hash fields.
+
+- `memory_read` `view="claims"` pages bounded claim summaries with a
+  `recordRequest` per claim and a `nextRequest` for the next page;
+  `view="record"` returns one complete claim as canonical-JSON chunks;
+  `view="section"` returns one retained memory section (including
+  `supervisorInterventions`) the same way. Section values are read from the
+  current store, so they are no longer capped at the internal snapshot's last
+  8/20/30 records or the journal's last 50 supervisor records.
+- `journal_read` `view="recent"` summarizes the most recent proposals,
+  evaluations and pending records with a list entry point per collection;
+  `view="list"` pages one retained collection (`proposals`, `evaluations`,
+  `pending`) in append order with a snapshot cursor; `view="record"` returns one
+  complete stored proposal or evaluation, so records older than the latest 200
+  remain addressable.
+
+Reads never re-evaluate, save, maintain, expire, or write environment evidence,
+and retention, IDs, digests, evidence ordering and cold/warm isolation are
+unchanged. Cursor pages are only valid while the selected collection keeps the
+same members and append order; otherwise the tool returns `STALE_CURSOR` or
+`INVALID_CURSOR`, and a changed record hash returns `STALE_READ`. Missing but
+well-formed IDs return `READ_NOT_FOUND` and never claim eviction. When the
+configured bound cannot express a minimal result with real progress the tool
+returns `READ_BUDGET_TOO_SMALL` instead of a success envelope. If even the short
+error envelope cannot fit, the existing controlled tool-exception path reports the
+fixed error code; no budget is silently increased.
+
+This is a model-visible contract change from the previous full-dump readers:
+legacy parameter shapes still work, but their output is now the bounded
+`avo.memory-read.v1` / `avo.journal-read.v1` envelope described here.
+
 ## What the observation formatter actually does
 
 Source of truth: [src/core/observation.mjs](../src/core/observation.mjs)
@@ -43,8 +79,8 @@ The two size limits are separate: `MAX_INLINE_GRID_CHARS = 12000` is a JS string
 length (not a token ceiling), while `toolResultMaxChars` (default 24000) is the
 generic Pi truncation threshold — the wrapper keeps a `toolResultMaxChars`-character
 prefix and appends a truncation notice, so it bounds the prefix, not a strict final
-return length (#336 targets making its selected readers' full envelopes fit that
-threshold). A record being written, a record having an ID, a tool being able to
+return length. The selected readers described above fit their complete successful
+envelopes within that threshold. A record being written, a record having an ID, a tool being able to
 fetch that ID, and the data arriving intact in the model context are four different
 facts. The sealed runtime prompt's "every state-changing ... `GRID_EXACT`" is a
 simplified description; this page follows the code paths above.
@@ -82,7 +118,7 @@ and no old page content is reconstructed.
 | 自主工具选择、ARC 直接交互 | NVIDIA ARC 应用文章（direct interaction / long-horizon agentic work） | [policy-profile.mjs](../src/core/policy-profile.mjs)、[pi-sdk.mjs](../src/loop/pi-sdk.mjs)、[avo-agent-base.mjs](../src/core/avo-agent-base.mjs) | 有模型自主选择和机械守卫；本地策略提示词与私有 AVO 提示词不等同 | 公开资料直接陈述（官方机制）+ 本地源码可确认 |
 | 精确观察与轨迹读取 | NVIDIA ARC 应用文章（precise text grids） | [observation.mjs](../src/core/observation.mjs)、[avo-agent-base.mjs](../src/core/avo-agent-base.mjs) 的 `recordEvidence` / `readTrajectory` | 内嵌、引用与上表的大小限制；不是所有中间动画帧 | 本地源码可确认 |
 | CUDA 实现谱系 vs 假设日志 | AVO 论文 §§3.1–3.3、§4.1 | [hypothesis-journal.mjs](../src/core/hypothesis-journal.mjs)、[evaluator.mjs](../src/core/evaluator.mjs) | `confirmed` 仅为声明预测匹配；不安装策略、不代表客观改善 | 公开资料直接陈述 + 本地源码可确认 |
-| 记忆持久化与模型可读性 | NOOA 文章（The agent curates its own memory） | [memory.mjs](../src/core/memory.mjs)、[durable-memory.mjs](../src/core/durable-memory.mjs)、`memory_read` / `journal_read` | 记录存在不代表可检索：历史寻址与完整返回缺口由 #335/#336 修复，未合并前保持披露（`memory_read` 附带最近 8 条完整监督记录、`hypothesisJournal()` 附带最近 50 条，`recent*` 上限 200，保留上限 1000） | 本地源码可确认；修复状态待验证（#335/#336 open） |
+| 记忆持久化与模型可读性 | NVIDIA ARC 长程记忆说明；NOOA 的相关接口设计 | [memory.mjs](../src/core/memory.mjs)、[bounded-read.mjs](../src/core/bounded-read.mjs)、[hypothesis-journal.mjs](../src/core/hypothesis-journal.mjs) | current-v1 的日志支持追加顺序分页和 ID 读取；claims 使用 sequence 分页，详情按内容版本分片；内部 snapshot、retention、旧 ID 和 minimal-v1 不变 | 本地源码可确认；#335/#336 的实际验收与合并状态以关联 PR 为准，不代表官方能力等价 |
 | 上下文管理 | NVIDIA ARC 应用文章（long-horizon memory） | [pi-sdk.mjs](../src/loop/pi-sdk.mjs) `boundTranscript` | 本地旧 thinking 消隐、工具输出消隐和硬边界已可见；不知道 NVIDIA 私有压缩算法，也未验证等效 | 本地源码可确认；对官方等效未知 |
 | 条件监督/知识库 | AVO 论文 §3.3 | [supervisor.mjs](../src/core/supervisor.mjs)、[knowledge-base.mjs](../src/core/knowledge-base.mjs) | 当前为确定性检测加预制方向、静态知识条目；不是已公开的私有监督实现 | 本地源码可确认 |
 | scratch/Python 能力 | AVO 论文（CUDA 候选，作为对比项） | [workspace.mjs](../src/core/workspace.mjs)、配置及政策工具过滤 | `disabled` / `files-only` / `isolated-python` 是本地隔离与能力选择；不推断官方使用同一沙箱 | 本地源码可确认 |

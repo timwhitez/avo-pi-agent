@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { normalizePolicyProfile } from './core/policy-profile.mjs';
+import { resolveToolResultMaxChars } from './core/bounded-read.mjs';
 import { providerCapabilitiesFromEnvironment } from './provider-capabilities.mjs';
 
 function parseDotEnv(text) {
@@ -74,7 +75,7 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
     maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 1000),
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
     policyProfile: normalizePolicyProfile(process.env.AVO_POLICY_PROFILE),
-    toolResultMaxChars: integer('AVO_TOOL_RESULT_MAX_CHARS', 24_000),
+    toolResultMaxChars: resolveToolResultMaxChars({}, process.env),
     memorySurfaceLimit: integer('AVO_MEMORY_SURFACE_LIMIT', 4, 0, 8),
     memoryDir: process.env.AVO_MEMORY_DIR || '.avo-memory',
     workspaceDir: process.env.AVO_WORKSPACE_DIR || '.avo-workspaces',
