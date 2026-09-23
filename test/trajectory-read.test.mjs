@@ -152,6 +152,7 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
       ...piToolContract(restartedTools.trajectory_read, Type),
       execute: restartedTools.trajectory_read.execute,
     };
+    assert.match(piTrajectoryTool.description, /Copy refs verbatim.*If a ref is unavailable, omit ref and part.*zero-based top-left.*full rectangle must fit/s);
     const providerFilledResult = await piTrajectoryTool.execute(
       validateToolCall([piTrajectoryTool], providerFilledCall),
     );
