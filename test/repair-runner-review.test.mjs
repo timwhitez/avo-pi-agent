@@ -10,13 +10,16 @@ import test from 'node:test';
 // memory writes and without starting another round.
 
 const repository = path.resolve('.');
-const EXCLUDED = new Set(['.git', 'node_modules', '.venv', 'runs', 'state', '.codex-logs', '.codex-report.md']);
+// Only what the runner executes or hashes is copied; nested app dependencies are not.
+const RUNTIME_ENTRIES = ['package.json', 'src', 'scripts', 'bridge', 'test/support'];
 
 function copyRepository() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-repair-runner-'));
-  for (const entry of fs.readdirSync(repository)) {
-    if (EXCLUDED.has(entry)) continue;
-    fs.cpSync(path.join(repository, entry), path.join(root, entry), { recursive: true });
+  for (const entry of RUNTIME_ENTRIES) {
+    fs.cpSync(path.join(repository, entry), path.join(root, entry), {
+      recursive: true,
+      filter: (source) => !source.split(path.sep).includes('__pycache__'),
+    });
   }
   fs.symlinkSync(path.join(repository, 'node_modules'), path.join(root, 'node_modules'));
   fs.copyFileSync(

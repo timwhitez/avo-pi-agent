@@ -404,6 +404,15 @@ test('A09 forwarded unavailable actions are contract violations; guard rejection
   assert.equal(invalid.length, 2, 'the normal guard rejection is not a finding');
   const decision = decideRoundOutcome({ authority: { authoritative: true, clean: false, reasons: [] }, analysis });
   assert.deepEqual([decision.status, decision.exitCode], ['repair-required', 1]);
+
+  // A failed reset is an execution incident, recovered only by a later successful step.
+  const failedReset = { ...reset(3), ok: false, error_present: true, response: { ok: false, error: 'reset failed' } };
+  const unrecovered = analyze([start(), step(2), failedReset]);
+  assert.deepEqual(findings(unrecovered, 'invalid-action').map((finding) => [finding.reasonCode, finding.resolution]),
+    [['environment-operation-failed', 'unrecovered']]);
+  const recovered = analyze([start(), step(2), failedReset, step(4, { episode: 1 })]);
+  assert.deepEqual(findings(recovered, 'invalid-action'), []);
+  assert.ok(recovered.observations.some((item) => item.reasonCode === 'environment-operation-failed'));
 });
 
 test('A10 not-applicable, legacy v1, forged eligibility and triage never bypass authority', () => {
@@ -453,6 +462,8 @@ test('A11 the loader keeps real payload and scope fields and leaves missing ones
   assert.equal(withoutData.actionData, null);
   const analysis = analyzeTrajectory({ events: loaded.events, expectedGames: ['g1'], capabilities: { strategy: false } });
   assert.equal(coverageFor(analysis, 'periodic-action-cycle').reasonCode, 'action-data-missing');
+  const noAvailability = analyze([start(), ...Array.from({ length: 12 }, (_, index) => step(index + 2, { available: null }))]);
+  assert.equal(coverageFor(noAvailability, 'low-information-exploration').reasonCode, 'available-actions-missing');
   assert.equal(JSON.stringify(analysis.findings).includes('rationale text'), false);
 });
 
@@ -484,6 +495,31 @@ test('A12 CLI exit codes, public projections and the #341 writer path agree with
       && finding.confidence === null && !('events' in finding)));
     assert.ok(projected.coverage.every((entry) => ['evaluated', 'not-applicable', 'insufficient-evidence', 'error'].includes(entry.status)));
     assert.deepEqual(fs.readFileSync(memoryFile), before, 'analysis never writes memory');
+
+    // With an explicit benchmark report the CLI reads structured outcomes and
+    // the sealed profile; a distinct-action corpus is then clean (exit 0).
+    const cleanTrace = writeTrace([start(), ...[1, 2, 3].map((index) => step(index + 1, { action: `ACTION${index}` }))]);
+    try {
+      const report = path.join(out, 'benchmark.json');
+      fs.writeFileSync(report, JSON.stringify({
+        games: [{ gameId: 'g1-v1', state: 'GAME_OVER', levelsCompleted: 0, actions: 3 }],
+        provenance: { runCapsule: { policyProfile: 'minimal-v1' } },
+      }));
+      const cleanCli = spawnSync(process.execPath, [
+        'scripts/analyze-trajectories.mjs',
+        '--trace-dir', cleanTrace,
+        '--memory-dir', memoryDir,
+        '--benchmark-report', report,
+        '--out', path.join(out, 'clean-private.json'),
+        '--redacted-out', path.join(out, 'clean-public.json'),
+        '--require-clean',
+        '--expected-games', writeManifest(out),
+      ], { encoding: 'utf8' });
+      assert.equal(cleanCli.status, 0, cleanCli.stdout + cleanCli.stderr);
+      assert.equal(JSON.parse(cleanCli.stdout.trim().split('\n').at(-1)).clean, true);
+    } finally {
+      fs.rmSync(cleanTrace, { recursive: true, force: true });
+    }
 
     const privateAnalysis = JSON.parse(fs.readFileSync(path.join(out, 'private.json'), 'utf8'));
     const plan = buildRepairPlan(privateAnalysis, 1);

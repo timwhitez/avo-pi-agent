@@ -6,6 +6,7 @@ import { mock, test } from 'node:test';
 
 import { PersistentMemory, appendBoundedMemoryValues } from '../src/core/memory.mjs';
 import { applyRepairPlan, summarizeRepairOutcomes } from '../src/trajectory/repairs.mjs';
+import { matchesRegularFileIdentity, readJsonFileEvidence } from '../src/local/regular-file-evidence.mjs';
 
 // Issue #341: the approved repair-note writer must preserve structured memory
 // values exactly, commit through the shared atomic writer and report the real
@@ -462,6 +463,21 @@ test('W11 a multi-game failure stops later writes without claiming a global roll
     const serialized = JSON.stringify(outcomes);
     assert.equal(serialized.includes(root), false);
     assert.equal(serialized.includes('Approved repair note'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('W09 the pre-write identity guard detects a file changed after its bounded read', () => {
+  const root = tempRoot();
+  try {
+    const file = writeRaw(root, 'demo.json', { gameId: 'demo', notes: [] });
+    const { identity } = readJsonFileEvidence(file, { root });
+    assert.equal(matchesRegularFileIdentity(file, identity), true);
+    fs.appendFileSync(file, ' ');
+    assert.equal(matchesRegularFileIdentity(file, identity), false);
+    fs.rmSync(file);
+    assert.equal(matchesRegularFileIdentity(file, identity), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

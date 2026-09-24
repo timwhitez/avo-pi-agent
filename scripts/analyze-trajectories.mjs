@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import {
+  analysisInputsFromReport,
   analyzeTrajectory,
   loadMemoryByGame,
   loadTrajectoryEvents,
   redactedAnalysis,
 } from '../src/trajectory/analyzer-v2.mjs';
 import { loadExpectedGames } from '../src/trajectory/evidence-loader.mjs';
+import { readJsonFileEvidence } from '../src/local/regular-file-evidence.mjs';
 import { writeJsonAtomic } from '../src/benchmark/report-safe-files.mjs';
 
 const args = parseArgs(process.argv.slice(2));
@@ -22,12 +24,18 @@ if (loaded.files.length === 0) {
   throw new Error(`No bounded regular JSONL trajectory files were found under ${traceDir}`);
 }
 const memoryByGame = loadMemoryByGame(memoryDir);
+// Terminal outcomes and the policy capability come only from an explicit
+// benchmark report; without one those detectors report insufficient evidence.
+const benchmarkReport = args.benchmarkReport
+  ? readJsonFileEvidence(path.resolve(args.benchmarkReport), { purpose: 'benchmark report' }).value
+  : null;
 const analysis = analyzeTrajectory({
   events: loaded.events,
   memoryByGame,
   parseErrors: loaded.parseErrors,
   expectedGames,
   requireExpectedGames: authoritative,
+  ...analysisInputsFromReport(benchmarkReport),
   config: {
     actionBudget: positiveNumber(args.actionBudget),
     repeatedStateWindow: positiveNumber(args.repeatedStateWindow),

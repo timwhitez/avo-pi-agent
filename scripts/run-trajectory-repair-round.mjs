@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
+  analysisInputsFromReport,
   analyzeTrajectory,
   loadMemoryByGame,
   loadTrajectoryEvents,
@@ -42,6 +43,7 @@ const analysis = loaded.files.length
       memoryByGame: loadMemoryByGame(memoryDir),
       parseErrors: loaded.parseErrors,
       expectedGames,
+      ...analysisInputsFromReport(benchmark),
       config: {
         actionBudget: number(process.env.AVO_MAX_ACTIONS),
         repeatedStateWindow: number(process.env.AVO_STALL_WINDOW),

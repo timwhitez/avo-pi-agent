@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { MEMORY_FILE_MAX_BYTES, appendBoundedMemoryValues } from '../core/memory.mjs';
-import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
+import { matchesRegularFileIdentity, readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { REPORT_LIMITS, wasAtomicWriteCommitted, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 
 const SAFE_MEMORY_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
@@ -145,7 +145,7 @@ function applyGameRepair(root, game, plan) {
   }
   // A best-effort guard against edits since the bounded read; the atomic
   // replacement below is not a compare-and-swap.
-  if (!sameFileIdentity(located.file, evidence.identity)) {
+  if (!matchesRegularFileIdentity(located.file, evidence.identity)) {
     return notCommitted('memory-file-changed', memoryFile);
   }
   try {
@@ -285,20 +285,6 @@ function inspectMemoryFile(file) {
   // A hard link would be silently detached by atomic replacement.
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) return 'unsafe';
   return 'regular';
-}
-
-function sameFileIdentity(file, identity) {
-  try {
-    const stat = fs.lstatSync(file, { bigint: true });
-    return stat.isFile()
-      && stat.dev.toString() === identity.dev
-      && stat.ino.toString() === identity.ino
-      && Number(stat.size) === identity.size
-      && stat.mtimeNs.toString() === identity.mtimeNs
-      && stat.ctimeNs.toString() === identity.ctimeNs;
-  } catch {
-    return false;
-  }
 }
 
 function sameGameId(memory, gameId, { required }) {

@@ -267,6 +267,7 @@ function buildGameContext(gameId, events, { memory, config, outcome, outcomesSup
   const runIds = unique(gameEvents.map((event) => event.runId).filter(Boolean));
   const versionedGameIds = unique(gameEvents.map((event) => event.versionedGameId).filter(Boolean));
   const attemptIds = unique(gameEvents.map((event) => event.attemptId).filter(Boolean));
+  const groups = scopeGroups(gameEvents);
   return {
     gameId,
     scope: {
@@ -281,8 +282,8 @@ function buildGameContext(gameId, events, { memory, config, outcome, outcomesSup
       versionedGameIds: versionedGameIds.length > 1 ? versionedGameIds : [],
     },
     events: gameEvents,
-    groups: scopeGroups(gameEvents),
-    segments: buildSegments(gameEvents),
+    groups,
+    segments: buildSegments(groups),
     transitions,
     resets,
     supervisorEvents: gameEvents.filter((event) => event.kind === 'supervisor.intervention'),
@@ -316,9 +317,9 @@ function scopeGroups(gameEvents) {
 
 // A segment is one contiguous episode: reset/open/make responses, episode
 // changes and identity boundaries always cut it.
-function buildSegments(gameEvents) {
+function buildSegments(groups) {
   const segments = [];
-  for (const group of scopeGroups(gameEvents)) {
+  for (const group of groups) {
     let current = null;
     let lastAvailable = null;
     const close = () => {
@@ -480,6 +481,28 @@ function detectInvalidActions(context) {
       else findings.push(incident);
     });
   }
+  // Failed reset/open/unmatched responses are execution incidents too.
+  for (const group of context.groups) {
+    group.forEach((event, index) => {
+      if (event.kind !== 'arc.response' || TRANSITION_OPERATIONS.has(event.operation)) return;
+      if (!responseFailed(event) || isNormalRejection(event)) return;
+      const recovered = group.slice(index + 1).some((later) => later.kind === 'arc.response'
+        && TRANSITION_OPERATIONS.has(later.operation) && !responseFailed(later));
+      const incident = {
+        kind: 'execution-incident',
+        severity: 'medium',
+        scope: { ...context.scope, runId: event.runId ?? null, versionedGameId: event.versionedGameId ?? null, episodeId: event.episodeId ?? null },
+        summary: `The environment returned a failed ${safeText(event.operation || 'unknown').slice(0, 40)} response`,
+        rootCause: 'A non-action environment operation failed.',
+        remediation: 'Inspect the structured response and transport evidence.',
+        reasonCode: 'environment-operation-failed',
+        resolution: recovered ? 'recovered' : 'unrecovered',
+        events: [event],
+      };
+      if (recovered) observations.push(incident);
+      else findings.push(incident);
+    });
+  }
   return evaluated(findings, observations);
 }
 
@@ -522,7 +545,11 @@ function detectLowInformationExploration(context, config) {
   if (!segment) return insufficient('no-scoped-transitions');
   const prefix = segment.transitions.slice(0, prefixLength);
   if (prefix.length < prefixLength) return evaluated([]);
-  if (prefix.some((event) => !Array.isArray(event.availableActions))) return insufficient('available-actions-missing');
+  // The loader defaults absent available_actions to []; an empty set in a
+  // non-terminal opening is therefore unknown, not "nothing was available".
+  if (prefix.some((event) => !Array.isArray(event.availableActions) || event.availableActions.length === 0)) {
+    return insufficient('available-actions-missing');
+  }
   if (prefix.some((event) => number(event.levelDelta) > 0)) return evaluated([]);
   const actions = new Set(prefix.map((event) => normalizeActionName(event.action)).filter(Boolean));
   const available = new Set(prefix.flatMap((event) => event.availableActions.map(normalizeActionName).filter(Boolean)));

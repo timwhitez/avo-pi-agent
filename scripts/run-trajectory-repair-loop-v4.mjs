@@ -18,6 +18,7 @@ import {
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 import { redactRuntimeSecrets } from '../src/redaction.mjs';
 import {
+  analysisInputsFromReport,
   analyzeTrajectory,
   loadMemoryByGame,
   loadTrajectoryEvents,
@@ -28,8 +29,6 @@ import {
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
 import { decideRoundOutcome, evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
-import { extractGameRecords } from '../src/benchmark/report-records.mjs';
-import { policyUsesStrategy } from '../src/core/policy-profile.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { resolveRunOutputState } from '../src/trajectory/repair-state.mjs';
 
@@ -119,8 +118,7 @@ try {
       parseErrors: loaded.parseErrors,
       expectedGames,
       requireExpectedGames: true,
-      gameOutcomes: structuredGameOutcomes(benchmark),
-      capabilities: { strategy: reportedStrategyCapability(benchmark) },
+      ...analysisInputsFromReport(benchmark),
       config: {
         actionBudget: optionalInteger(process.env.AVO_MAX_ACTIONS, 1, 100_000, 'AVO_MAX_ACTIONS'),
         repeatedStateWindow: optionalInteger(process.env.AVO_STALL_WINDOW, 2, 10_000, 'AVO_STALL_WINDOW'),
@@ -307,23 +305,6 @@ function signalChildTree(child, signal) {
 
 function childAlive(child) {
   return Boolean(child) && child.exitCode === null && child.signalCode === null;
-}
-
-function structuredGameOutcomes(report) {
-  try {
-    return report ? extractGameRecords(report) : null;
-  } catch {
-    return null;
-  }
-}
-
-function reportedStrategyCapability(report) {
-  try {
-    const profile = report?.provenance?.runCapsule?.policyProfile;
-    return typeof profile === 'string' ? policyUsesStrategy(profile) : null;
-  } catch {
-    return null;
-  }
 }
 
 function writePrivateRound(roundRoot, { benchmark, analysis, plan, authority, provenance, record }) {

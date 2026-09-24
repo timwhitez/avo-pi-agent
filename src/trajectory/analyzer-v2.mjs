@@ -1,4 +1,6 @@
 import * as base from './analyzer.mjs';
+import { extractGameRecords } from '../benchmark/report-records.mjs';
+import { policyUsesStrategy } from '../core/policy-profile.mjs';
 import {
   loadMemoryByGame,
   loadTrajectoryEvents,
@@ -8,6 +10,29 @@ export const DETECTOR_IDS = base.DETECTOR_IDS;
 export const ANALYSIS_SCHEMA = base.ANALYSIS_SCHEMA;
 export const verifyAnalysisCoverage = base.verifyAnalysisCoverage;
 export { loadMemoryByGame, loadTrajectoryEvents };
+
+/**
+ * Structured analysis inputs derived from one benchmark report: per-game
+ * terminal outcomes from the validated game records and the strategy
+ * capability of the sealed policy profile. Unavailable or invalid sources
+ * yield null, which detectors report as insufficient evidence.
+ */
+export function analysisInputsFromReport(report) {
+  let gameOutcomes = null;
+  try {
+    gameOutcomes = report ? extractGameRecords(report) : null;
+  } catch {
+    gameOutcomes = null;
+  }
+  let strategy = null;
+  try {
+    const profile = report?.provenance?.runCapsule?.policyProfile;
+    strategy = typeof profile === 'string' ? policyUsesStrategy(profile) : null;
+  } catch {
+    strategy = null;
+  }
+  return { gameOutcomes, capabilities: { strategy } };
+}
 
 export function redactedAnalysis(analysis) {
   return {
