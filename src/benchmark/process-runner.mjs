@@ -149,9 +149,11 @@ export async function runProcess(command, args, {
     ? await control.finalize({ status: result.status, signal: result.signal, drainTimedOut, streamFailed: Boolean(spawnError || sinkError || streamError) })
     : null;
 
-  if (spawnError) throw spawnError;
-  if (sinkError) throw new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError });
-  if (streamError) throw streamError;
+  // The final record (already committed) travels with any failure.
+  const withTerminal = (error) => (terminal ? Object.assign(error, { terminal }) : error);
+  if (spawnError) throw withTerminal(spawnError);
+  if (sinkError) throw withTerminal(new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError }));
+  if (streamError) throw withTerminal(streamError);
   return {
     ...result,
     ...(terminal ? { terminal } : {}),
@@ -291,8 +293,12 @@ function createCancellationControl(config, { timeoutMs }) {
       const exitCode = Number.isSafeInteger(status) ? status : null;
       let executionOutcome;
       let reasonCode = null;
-      if (exitCode === 0 && !signal && !streamFailed) executionOutcome = 'completed';
-      else if (decision) executionOutcome = 'censored';
+      // A cancelled execution is censored whatever its exit code: a graceful
+      // exit 0 after SIGTERM does not prove the task finished.
+      if (decision) {
+        executionOutcome = 'censored';
+        reasonCode = 'CANCELLED_BEFORE_EXIT';
+      } else if (exitCode === 0 && !signal && !streamFailed) executionOutcome = 'completed';
       else if (exitCode !== null && exitCode !== 0) executionOutcome = 'error';
       else {
         executionOutcome = 'unknown';
@@ -310,7 +316,9 @@ function createCancellationControl(config, { timeoutMs }) {
       if (drainTimedOut) gaps.push('DRAIN_TIMEOUT');
       if (decision?.requestRecordError) gaps.push('CANCEL_REQUEST_RECORD_FAILED');
       const unfinished = config.unfinished ? config.unfinished() : null;
-      if (!config.usage) gaps.push('USAGE_UNAVAILABLE');
+      // Usage has its own authority (the report's aggregated metrics); it is a
+      // gap here only when this record is declared the usage source.
+      if (config.usageRequired === true && !config.usage) gaps.push('USAGE_UNAVAILABLE');
       const receipt = buildExecutionTerminal({
         executionId,
         scope: config.scope ?? {},

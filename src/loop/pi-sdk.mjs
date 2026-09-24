@@ -208,15 +208,24 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     }));
   };
   const clockDomain = `pi-loop:${process.pid}:${process.hrtime.bigint()}`;
+  // Receipts are observation only: a failure to build one degrades audit
+  // coverage (an explicit gap event) and never changes the tool or request.
   const emitReceipt = (state, build) => {
-    if (!state) return;
+    if (!state) return null;
     state.recordSequence += 1;
-    const receipt = build({
-      recordSequence: state.recordSequence,
-      monotonicTime: Number(process.hrtime.bigint() / 1000n),
-      clockDomain,
-    });
+    let receipt;
+    try {
+      receipt = build({
+        recordSequence: state.recordSequence,
+        monotonicTime: Number(process.hrtime.bigint() / 1000n),
+        clockDomain,
+      });
+    } catch (error) {
+      emitEvent({ type: 'avo_audit_gap', recordSequence: state.recordSequence, errorClass: String(error?.name || 'Error').slice(0, 80) });
+      return null;
+    }
     emitEvent({ type: 'avo_audit_receipt', receipt });
+    return receipt;
   };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
@@ -447,7 +456,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           } catch (error) {
             receiptState.pendingTools.delete(callId);
             emitReceipt(receiptState, () => buildToolReceipt({
-              scope: callScope, resultScope: receiptScope(), toolCallId: callId, toolName: tool.name,
+              scope: callScope, resultScope: ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope, toolCallId: callId, toolName: tool.name,
               startSequence, endSequence: ++receiptState.toolSequence, originRequestSequence, params, outcome: 'exception',
             }));
             throw error;
@@ -489,9 +498,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             seenToolOutcomes.add(outcome);
             novelToolOutcomes += 1;
           }
-          const receipt = buildToolReceipt({
+          const receipt = emitReceipt(receiptState, () => buildToolReceipt({
             scope: callScope,
-            resultScope: receiptScope(),
+            resultScope: ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope,
             toolCallId: callId,
             toolName: tool.name,
             startSequence,
@@ -503,9 +512,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             deliveredText: text,
             delivery: text === originalText ? 'complete' : 'truncated',
             details,
-          });
-          receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
-          emitReceipt(receiptState, () => receipt);
+          }));
+          if (receipt) receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
           return {
             content: [{ type: 'text', text }],
             details,
@@ -1046,6 +1054,9 @@ function metadata(schema) {
   const keys = ['description', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems'];
   return Object.fromEntries(keys.filter((key) => schema[key] !== undefined).map((key) => [key, schema[key]]));
 }
+
+// Tools whose execution can change the attempt/episode scope.
+const ENVIRONMENT_TOOLS = new Set(['act', 'act_sequence', 'reset']);
 
 // Host-side tool results in the bounded request, keyed by the call id the
 // Responses conversion keeps on the wire (the part before '|').

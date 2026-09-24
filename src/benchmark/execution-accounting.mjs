@@ -7,7 +7,24 @@ import { EvidenceStore } from '../core/evidence-store.mjs';
 // are never used as final counts. Environment actions are gameplay actions
 // plus resets; initial observations and rejected commands are not actions.
 // Attempt detail and game totals are reported side by side, never added.
-export function reconcileLedgerAccounting({ memoryDir, gameIds }) {
+/**
+ * High-water ledger sequence per game before an execution starts. Accounting
+ * then counts only events this execution committed; warm-start or resumed
+ * ledgers from earlier invocations are never attributed to it.
+ */
+export function ledgerBaseline({ memoryDir, gameIds }) {
+  const baseline = {};
+  for (const gameId of Array.isArray(gameIds) ? gameIds : []) {
+    try {
+      baseline[gameId] = new EvidenceStore(path.join(memoryDir, 'evidence'), gameId, { authorityRoot: memoryDir }).load().sequence;
+    } catch {
+      baseline[gameId] = null;
+    }
+  }
+  return baseline;
+}
+
+export function reconcileLedgerAccounting({ memoryDir, gameIds, baseline = null }) {
   const games = [];
   const gaps = [];
   for (const gameId of Array.isArray(gameIds) ? gameIds : []) {
@@ -19,7 +36,11 @@ export function reconcileLedgerAccounting({ memoryDir, gameIds }) {
       games.push({ gameId, coverage: 'unreadable', environmentActions: null, gameplayActions: null, resets: null, lastCommittedEvidenceRef: null, attempts: [] });
       continue;
     }
-    const events = store.events;
+    const since = baseline === null ? 0 : baseline[gameId];
+    if (since === null || since === undefined) {
+      if (baseline !== null) gaps.push(`LEDGER_BASELINE_UNKNOWN:${gameId}`);
+    }
+    const events = store.events.filter((event) => event.sequence > (since ?? 0));
     if (!store.historyComplete) gaps.push(`LEDGER_HISTORY_INCOMPLETE:${gameId}`);
     const count = (type, list = events) => list.filter((event) => event.type === type).length;
     const attempts = [...new Set(events.map((event) => event.attemptId).filter(Boolean))].map((attemptId) => {
@@ -28,10 +49,12 @@ export function reconcileLedgerAccounting({ memoryDir, gameIds }) {
     });
     games.push({
       gameId,
-      coverage: events.length === 0 ? 'empty' : store.historyComplete ? 'complete' : 'partial',
+      coverage: baseline !== null && (since === null || since === undefined) ? 'partial'
+        : events.length === 0 ? 'empty' : store.historyComplete ? 'complete' : 'partial',
       environmentActions: count('environment-action') + count('environment-reset'),
       gameplayActions: count('environment-action'),
       resets: count('environment-reset'),
+      baselineSequence: since ?? null,
       lastCommittedEvidenceRef: events.at(-1)?.id ?? null,
       attempts,
     });

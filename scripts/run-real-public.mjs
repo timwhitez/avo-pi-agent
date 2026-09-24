@@ -13,7 +13,7 @@ import {
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
 import { runProcess, openLogFile } from '../src/benchmark/process-runner.mjs';
-import { reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
+import { ledgerBaseline, reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
@@ -245,6 +245,8 @@ try {
   const invocationId = crypto.randomBytes(16).toString('hex');
   const knownGames = new Set(observation.gameIds);
   let activitySequence = 0;
+  const ledgerGameIds = games.map((game) => String(game.versionedGameId).split('-')[0]);
+  const executionLedgerBaseline = ledgerBaseline({ memoryDir: runState.memoryDir, gameIds: ledgerGameIds });
   let child;
   try {
     child = await runProcess(process.execPath, childArgs, {
@@ -282,7 +284,8 @@ try {
       policies: progressIdlePolicies(),
       reconcile: () => reconcileLedgerAccounting({
         memoryDir: runState.memoryDir,
-        gameIds: games.map((game) => String(game.versionedGameId).split('-')[0]),
+        gameIds: ledgerGameIds,
+        baseline: executionLedgerBaseline,
       }),
     },
     appendLogs: resuming,

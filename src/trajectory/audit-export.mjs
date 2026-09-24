@@ -566,7 +566,8 @@ function summarizeReceipts(receipts, games, gaps) {
   }
   if (conflicts.length) gaps.push('RECEIPT_ID_CONFLICT');
   const counted = [...calls.values()].map((entry) => entry.receipt)
-    .filter((receipt) => ['success', 'rejected', 'exception'].includes(receipt.outcome));
+    // toolCalls counts started calls, so every started call's receipt counts.
+    .filter((receipt) => ['success', 'rejected', 'exception', 'incomplete'].includes(receipt.outcome));
   if ([...calls.values()].some((entry) => entry.receipt.outcome === 'incomplete')) gaps.push('TOOL_CALL_INCOMPLETE');
   const countDiscrepancies = [];
   for (const game of games) {

@@ -6,7 +6,7 @@ import path from 'node:path';
 import test, { mock } from 'node:test';
 
 import { runProcess } from '../src/benchmark/process-runner.mjs';
-import { reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
+import { ledgerBaseline, reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { AUDIT_INPUT_SCHEMA, normalizeAuditInputs, readAuditInputManifest } from '../src/trajectory/audit-export.mjs';
 import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
 
@@ -200,6 +200,7 @@ test('X05 repeated signals form one decision and one final record; different exe
 test('X06 missing accounting, usage and unfinished work stay explicit gaps, not zeros', async () => {
   const result = await run(childScript({ exitCode: 0 }), {
     executionId: 'exec-x06',
+    usageRequired: true,
     unfinished: () => ({ requestKeys: [{ requestSequence: 4 }], toolKeys: [{ toolCallId: 'call_x' }] }),
   });
   const receipt = result.terminal.receipt;
@@ -378,6 +379,35 @@ test('X12 real child -> cancel -> drain -> final record -> CLI extract -> export
     assert.equal(exported.audit.ready, false);
     assert.equal(exported.executionTerminals[0].discrepancies.length, 0, 'ledger 3 (2 + 1 while draining) agrees with the report');
     assert.equal(fs.readdirSync(privateDir).some((name) => /checkpoint|scorecard/.test(name)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('X13 review regressions: graceful exit after cancel is censored; accounting counts only this execution', async () => {
+  const graceful = `
+    process.send({ type: 'ready' });
+    process.on('SIGTERM', () => process.exit(0));
+    setInterval(() => {}, 1000);
+  `;
+  const controller = new AbortController();
+  const result = await run(graceful, { executionId: 'exec-x13', signal: controller.signal },
+    { onMessage: (m) => { if (m?.type === 'ready') controller.abort(); } });
+  assert.equal(result.terminal.receipt.process.exitCode, 0);
+  assert.equal(result.terminal.receipt.executionOutcome, 'censored');
+  assert.equal(result.terminal.receipt.reasonCode, 'CANCELLED_BEFORE_EXIT');
+
+  const root = tempRoot();
+  try {
+    await run(childScript({ ledgerDir: root, actionsBeforeIdle: 4, exitCode: 0 }), { executionId: 'exec-x13-prior' });
+    const baseline = ledgerBaseline({ memoryDir: root, gameIds: ['g1'] });
+    assert.deepEqual(baseline, { g1: 4 });
+    const second = await run(childScript({ ledgerDir: root, actionsBeforeIdle: 2, exitCode: 0 }), {
+      executionId: 'exec-x13-next',
+      reconcile: () => reconcileLedgerAccounting({ memoryDir: root, gameIds: ['g1'], baseline }),
+    });
+    assert.equal(second.terminal.receipt.accounting.environmentActions, 2, 'the warm-start ledger from the prior execution is not counted');
+    assert.equal(second.terminal.receipt.accounting.games[0].baselineSequence, 4);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
