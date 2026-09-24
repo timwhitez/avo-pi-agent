@@ -19,7 +19,6 @@ import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
 import {
   EPISODE_OBSERVATION_SCHEMA,
   TRANSITION_SCHEMA,
-  describeFrame,
   exactObservation,
   formatObservation,
   frameHash,
@@ -192,7 +191,17 @@ export class AvoArcAgent {
   }
 
   runtimeStatus() {
-    return { ...this.runtimeStatusCore(), currentObservation: this.currentObservationAnchor() };
+    // currentObservation is evaluated only when read (request preparation);
+    // liveness checks that read counters never compute or verify the anchor.
+    const agent = this;
+    let anchor;
+    return {
+      ...this.runtimeStatusCore(),
+      get currentObservation() {
+        if (anchor === undefined) anchor = agent.currentObservationAnchor();
+        return anchor;
+      },
+    };
   }
 
   /**
@@ -234,6 +243,15 @@ export class AvoArcAgent {
   // otherwise the largest fitting region read from the existing region view is
   // advertised as a partitioned recovery. null means no readable entry exists.
   currentObservationRecovery(event) {
+    // Evidence events are immutable, so the entry is fixed per (ref, bound).
+    const key = `${event.id}:${this.toolResultMaxChars}`;
+    if (this.recoveryCache?.key !== key) {
+      this.recoveryCache = { key, value: this.computeObservationRecovery(event) };
+    }
+    return this.recoveryCache.value;
+  }
+
+  computeObservationRecovery(event) {
     const maxChars = this.toolResultMaxChars;
     if (JSON.stringify(trajectoryView(event, 'after')).length <= maxChars) {
       return Object.freeze({ tool: 'trajectory_read', arguments: { ref: event.id, part: 'after' }, mode: 'complete' });
@@ -1302,7 +1320,7 @@ export class AvoArcAgent {
     evidenceRef = this.currentObservationRef,
     options = {},
   ) {
-    return describeFrame(this.frame, previousFrame, evidenceRef, options);
+    return this.describeView(previousFrame, evidenceRef, options).text;
   }
 
   withRelevantMemory(result, query = '', jsonType = null) {

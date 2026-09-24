@@ -1085,7 +1085,7 @@ export function boundTranscript(messages, {
   // before, but it is never reported as current.
   const protectedResult = anchor
     ? selection.current?.resultIndex
-    : selection.lastConsulted.indexes.at(-1);
+    : selection.latestEvidence.indexes.at(-1);
   if (protectedResult >= 0) keepTools.add(protectedResult);
   const kept = [];
   let toolResultsElided = 0;
@@ -1178,7 +1178,7 @@ function hardBoundTranscript(messages, {
     throw new Error('transcript bounds require the runtime status carrying the current observation anchor');
   }
   const selection = evidenceSelection(messages, anchor);
-  const noticeRef = anchor ? anchor.observationRef : selection.lastConsulted.ref;
+  const noticeRef = anchor ? anchor.observationRef : selection.latestEvidence.ref;
   const selected = new Set([taskIndex, statusIndex].filter((index) => index >= 0));
   const fits = (indexes, includeNotice = false) => {
     let candidate = repairToolPairs(messages.filter((_message, index) => indexes.has(index)));
@@ -1203,14 +1203,14 @@ function hardBoundTranscript(messages, {
   // and no other ref takes its place.
   const protectedIndexes = anchor
     ? (selection.current ? selection.current.indexes : [])
-    : (selection.lastConsulted.exact && selection.lastConsulted.indexes.length === 2 ? selection.lastConsulted.indexes : []);
+    : (selection.latestEvidence.exact && selection.latestEvidence.indexes.length === 2 ? selection.latestEvidence.indexes : []);
   const withProtected = includeGroups([...selected, ...protectedIndexes.filter((index) => !selected.has(index))]);
   const keepsProtected = protectedIndexes.length > 0 && fits(withProtected);
   if (keepsProtected) {
     for (const index of withProtected) selected.add(index);
   }
   const reserveNotice = fits(selected, true);
-  if (!anchor && selection.lastConsulted.ref && !keepsProtected && !reserveNotice) {
+  if (!anchor && selection.latestEvidence.ref && !keepsProtected && !reserveNotice) {
     throw new Error('transcript bounds cannot preserve the latest exact evidence or its durable reference');
   }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -1253,6 +1253,18 @@ function hardBoundTranscript(messages, {
   return retained;
 }
 
+/**
+ * Source of every function that decides what a bounded request keeps; sealed
+ * as the transcript policy identity so selection changes change the hash.
+ */
+export function transcriptPolicySource() {
+  return [
+    boundTranscript, hardBoundTranscript, evidenceSelection, currentRepresentation,
+    selectionTelemetry, compactionNotice, repairToolPairs, isDeliveryReduced,
+    isReducedToolResult, validateCurrentAnchor,
+  ].map((fn) => fn.toString()).join('\n');
+}
+
 function contextTokens(messages, estimateContextTokens) {
   const value = Number(estimateContextTokens(messages));
   if (!Number.isFinite(value) || value < 0) throw new Error('context token estimator returned an invalid value');
@@ -1293,18 +1305,26 @@ function evidenceSelection(messages, anchor) {
     }
     return -1;
   };
-  let lastConsulted = { ref: null, indexes: [], exact: false };
+  // latestEvidence: newest tool result carrying any evidence ref (act, reset,
+  // read); lastConsulted: newest explicit trajectory_read of a ref.
+  let latestEvidence = { ref: null, indexes: [], exact: false };
+  let lastConsultedRef = null;
   for (let resultIndex = messages.length - 1; resultIndex >= 0; resultIndex -= 1) {
     const result = messages[resultIndex];
     const ref = String(result?.details?.evidenceRef || '');
     if (result?.role !== 'toolResult' || !ref) continue;
-    const callIndex = callIndexFor(resultIndex);
-    lastConsulted = {
-      ref,
-      indexes: [callIndex, resultIndex].filter((index) => index >= 0),
-      exact: callIndex >= 0 && !isReducedToolResult(result),
-    };
-    break;
+    if (!latestEvidence.ref) {
+      const callIndex = callIndexFor(resultIndex);
+      latestEvidence = {
+        ref,
+        indexes: [callIndex, resultIndex].filter((index) => index >= 0),
+        exact: callIndex >= 0 && !isReducedToolResult(result),
+      };
+    }
+    if (result.toolName === 'trajectory_read') {
+      lastConsultedRef = ref;
+      break;
+    }
   }
   let current = null;
   if (anchor) {
@@ -1323,7 +1343,7 @@ function evidenceSelection(messages, anchor) {
       if (representation !== 'summary') break;
     }
   }
-  return { current, lastConsulted };
+  return { current, latestEvidence, lastConsultedRef };
 }
 
 function currentRepresentation(view, anchor) {
@@ -1349,10 +1369,11 @@ function selectionTelemetry(selection, anchor, retained) {
       ? (currentRetained ? selection.current.representation : 'reference-only')
       : null,
     currentObservationRetained: anchor ? currentRetained : null,
-    lastConsultedEvidenceRef: selection.lastConsulted.ref,
-    lastConsultedEvidenceRetained: selection.lastConsulted.exact
-      && selection.lastConsulted.indexes.length === 2
-      && selection.lastConsulted.indexes.every((index) => retained(index)),
+    lastConsultedEvidenceRef: selection.lastConsultedRef,
+    latestEvidenceResultRef: selection.latestEvidence.ref,
+    latestEvidenceResultRetained: selection.latestEvidence.exact
+      && selection.latestEvidence.indexes.length === 2
+      && selection.latestEvidence.indexes.every((index) => retained(index)),
   };
 }
 

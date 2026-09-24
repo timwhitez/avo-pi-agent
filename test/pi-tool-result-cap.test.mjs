@@ -136,9 +136,9 @@ test('tool results are capped before entering the model context', async () => {
     )));
     assert.deepEqual(compactions.map((event) => ({
       mode: event.mode,
-      lastConsultedEvidenceRetained: event.lastConsultedEvidenceRetained,
+      latestEvidenceResultRetained: event.latestEvidenceResultRetained,
       noticeIncluded: event.noticeIncluded,
-    })), [{ mode: 'hard', lastConsultedEvidenceRetained: false, noticeIncluded: true }]);
+    })), [{ mode: 'hard', latestEvidenceResultRetained: false, noticeIncluded: true }]);
   } finally {
     cleanup();
   }

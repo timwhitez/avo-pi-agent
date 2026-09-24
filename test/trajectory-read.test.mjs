@@ -118,7 +118,7 @@ test('exact trajectory survives restart and transcript compaction with verifiabl
     assert.equal(bounded[0].content[0].text, 'solve', 'the original task remains first');
     assert.equal(JSON.stringify(bounded).includes(actionRef), false, 'the earliest action left the transcript');
     const hardCompaction = compactions.find((event) => event.mode === 'hard');
-    assert.equal(hardCompaction.lastConsultedEvidenceRetained, false);
+    assert.equal(hardCompaction.latestEvidenceResultRetained, false);
     assert.equal(hardCompaction.noticeIncluded, true);
 
     const restarted = new AvoArcAgent({

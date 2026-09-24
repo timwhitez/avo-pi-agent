@@ -289,6 +289,13 @@ test('C05 a multi-tool turn stays whole through installed Pi Responses conversio
     }
     const kept = bounded.filter((message) => message.toolCallId?.startsWith('call-0-'));
     assert.ok(kept.length === 0 || kept.length === 2, 'the two-call group is kept or dropped as a whole');
+    // Either way the current ref and its recovery read stay in the request.
+    assert.match(statusText(bounded), new RegExp(`current_observation_ref=${agent.currentObservationRef}`));
+    assert.match(statusText(bounded), /current_observation_recovery=\{"tool":"trajectory_read"/);
+    const tighter = prepareRequest(agent, messages, { maxMessages: 4, recentToolResults: 1 });
+    assert.equal(tighter.bounded.filter((message) => message.toolCallId?.startsWith('call-0-')).length, 0, 'the group no longer fits');
+    assert.equal(tighter.events.at(-1).currentRepresentation, 'reference-only');
+    assert.match(statusText(tighter.bounded), new RegExp(`current_observation_ref=${agent.currentObservationRef}`));
     assert.equal(events.at(-1).currentObservationRef, agent.currentObservationRef);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

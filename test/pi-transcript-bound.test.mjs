@@ -63,10 +63,10 @@ test('multi-tool hard compaction retains complete successful turns through pinne
       if (outputs.length) {
         assert.ok(bounded.includes(write));
         assert.ok(bounded.includes(read));
-        assert.equal(events.at(-1).lastConsultedEvidenceRetained, true);
+        assert.equal(events.at(-1).latestEvidenceResultRetained, true);
       } else {
         assert.ok(JSON.stringify(bounded).includes(`latest_evidence_ref=${ref}`));
-        assert.equal(events.at(-1).lastConsultedEvidenceRetained, false);
+        assert.equal(events.at(-1).latestEvidenceResultRetained, false);
       }
     }
   }
@@ -227,11 +227,11 @@ test('soft elision preserves the latest exact environment evidence behind newer 
   assert.ok(bounded.some((message) => message.role === 'assistant'
     && message.content.some((block) => block.id === 'call-1')));
   assert.ok(compactions.some((event) => event.mode === 'soft'
-    && event.lastConsultedEvidenceRef === ref
-    && event.lastConsultedEvidenceRetained === true));
+    && event.latestEvidenceResultRef === ref
+    && event.latestEvidenceResultRetained === true));
   assert.ok(compactions.some((event) => event.mode === 'hard'
-    && event.lastConsultedEvidenceRef === ref
-    && event.lastConsultedEvidenceRetained === true));
+    && event.latestEvidenceResultRef === ref
+    && event.latestEvidenceResultRetained === true));
 });
 
 test('hard message cap applies across roles and discloses the compaction', () => {
@@ -301,12 +301,12 @@ test('latest exact evidence outranks the synthetic compaction notice under a tig
   assert.ok(bounded.some((message) => message.content?.[0]?.text?.startsWith('[AVO_RUNTIME_STATUS v1]')));
   assert.equal(bounded.some((message) => message.content?.[0]?.text?.includes('transcript compaction')), false);
   assert.deepEqual(compactions.map((event) => ({
-    lastConsultedEvidenceRef: event.lastConsultedEvidenceRef,
-    lastConsultedEvidenceRetained: event.lastConsultedEvidenceRetained,
+    latestEvidenceResultRef: event.latestEvidenceResultRef,
+    latestEvidenceResultRetained: event.latestEvidenceResultRetained,
     noticeIncluded: event.noticeIncluded,
   })), [{
-    lastConsultedEvidenceRef: 'evidence-000004-aaaaaaaaaaaa',
-    lastConsultedEvidenceRetained: true,
+    latestEvidenceResultRef: 'evidence-000004-aaaaaaaaaaaa',
+    latestEvidenceResultRetained: true,
     noticeIncluded: false,
   }]);
 
