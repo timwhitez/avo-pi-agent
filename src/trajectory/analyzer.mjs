@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { canonicalJson } from '../local/canonical-json.mjs';
+
 export const DETECTOR_IDS = Object.freeze([
   'repeated-state-loop',
   'periodic-action-cycle',
@@ -68,404 +70,589 @@ export function loadMemoryByGame(root) {
   return result;
 }
 
-export function analyzeTrajectory({ events, memoryByGame = new Map(), parseErrors = [], expectedGames = [], config = {} }) {
+/**
+ * Analyses one trajectory corpus with every registered detector.
+ *
+ * Output schema avo.trajectory-analysis.v2 separates three finding kinds:
+ * contract-violation (structured facts prove a named invariant was broken),
+ * behavioral-signal (an observed pattern that needs review, never a proven
+ * defect) and execution-incident (a structured error/termination fact). No
+ * automatically generated finding is eligible for automatic memory repair.
+ * Heuristic findings carry confidence=null: the old fixed probabilities were
+ * never calibrated.
+ *
+ * Every detector reports one coverage record per game scope (plus a global
+ * provider scope) with status evaluated | not-applicable |
+ * insufficient-evidence | error. clean requires every record to be
+ * evaluated or not-applicable, zero parse errors and zero findings of any
+ * status or kind.
+ */
+export function analyzeTrajectory({
+  events,
+  memoryByGame = new Map(),
+  parseErrors = [],
+  expectedGames = [],
+  config = {},
+  gameOutcomes = null,
+  capabilities = null,
+}) {
   const normalized = events.map((event, index) => ({ ...event, analysisIndex: index }));
   const gameIds = unique([
     ...expectedGames.map((value) => String(value).toLowerCase()),
     ...normalized.map((event) => event.gameId).filter(Boolean),
     ...memoryByGame.keys(),
   ]).sort();
-  const contexts = new Map(gameIds.map((gameId) => [gameId, buildGameContext(gameId, normalized, memoryByGame.get(gameId), config)]));
+  const outcomes = indexGameOutcomes(gameOutcomes);
+  const strategy = typeof capabilities?.strategy === 'boolean' ? capabilities.strategy : null;
+  const contexts = new Map(gameIds.map((gameId) => [gameId, buildGameContext(gameId, normalized, {
+    memory: memoryByGame.get(gameId),
+    config,
+    outcome: outcomes.byGame.get(gameId),
+    outcomesSupplied: outcomes.supplied,
+    outcomeConflict: outcomes.conflicts.has(gameId),
+    strategy,
+  })]));
   const findings = [];
+  const observations = [];
   const coverage = [];
 
   for (const detectorId of DETECTOR_IDS) {
     const detector = DETECTORS.get(detectorId);
-    const started = Date.now();
-    let detectorFindings = [];
-    let error = null;
-    try {
-      for (const context of contexts.values()) {
-        detectorFindings.push(...detector(context, config).map((finding) => finalizeFinding(detectorId, context, finding)));
+    const scopes = [...contexts.values()].map((context) => ({ context, scope: context.scope }));
+    if (detectorId === 'provider-failure') scopes.push({ context: null, scope: GLOBAL_SCOPE });
+    for (const { context, scope } of scopes) {
+      let result;
+      try {
+        result = context
+          ? normalizeDetectorResult(detector(context, config))
+          : normalizeDetectorResult(detectGlobalProviderIncidents(normalized));
+      } catch (cause) {
+        result = {
+          status: 'error',
+          reasonCode: 'detector-exception',
+          findings: [],
+          observations: [],
+          error: { name: safeText(cause?.name || 'Error').slice(0, 80), message: safeText(cause?.message || cause) },
+        };
       }
-      if (detectorId === 'provider-failure') {
-        detectorFindings.push(...detectGlobalProviderFailure(normalized).map((finding) => finalizeFinding(detectorId, null, finding)));
-      }
-    } catch (cause) {
-      error = { name: cause?.name || 'Error', message: safeText(cause?.message || cause) };
+      const scoped = dedupeFindings(result.findings.map((finding) => finalizeFinding(detectorId, context, finding)));
+      findings.push(...scoped);
+      observations.push(...result.observations.map((observation) => finalizeObservation(detectorId, context, observation)));
+      coverage.push({
+        detectorId,
+        scope,
+        status: result.status,
+        reasonCode: result.reasonCode,
+        evidenceRefs: scoped.flatMap((finding) => finding.evidenceRefs).slice(0, 24),
+        findingCount: scoped.length,
+        ...(result.error ? { error: result.error } : {}),
+      });
     }
-    findings.push(...dedupeFindings(detectorFindings));
-    coverage.push({
-      detectorId,
-      executed: error === null,
-      error,
-      durationMs: Date.now() - started,
-      gameCount: contexts.size,
-      eventCount: normalized.length,
-      findingCount: detectorFindings.length,
-    });
   }
 
   if (parseErrors.length) {
     findings.push(finalizeFinding('trajectory-integrity', null, {
+      kind: 'contract-violation',
       severity: 'high',
-      confidence: 1,
       summary: `${parseErrors.length} trajectory line(s) could not be parsed`,
       rootCause: 'The private replay corpus is incomplete or corrupt.',
       remediation: 'Repair the recorder or artifact transfer and rerun before accepting any clean result.',
-      evidence: parseErrors.slice(0, 50),
+      invariant: 'every-trajectory-line-parses',
+      expected: 0,
+      observed: parseErrors.length,
+      details: { parseErrors: parseErrors.slice(0, 50) },
     }));
   }
 
   const sorted = findings.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || a.id.localeCompare(b.id));
-  const allExecuted = coverage.length === DETECTOR_IDS.length && coverage.every((entry) => entry.executed);
+  const accounting = verifyAnalysisCoverage({ coverage, perGame: Object.fromEntries(gameIds.map((id) => [id, null])) });
   const openFindings = sorted.filter((finding) => finding.status === 'open');
-  const clean = allExecuted && parseErrors.length === 0 && openFindings.length === 0;
+  const clean = accounting.allRegisteredDetectorsAccountedFor
+    && accounting.applicableCoverageComplete
+    && parseErrors.length === 0
+    && sorted.length === 0;
   const perGame = Object.fromEntries([...contexts.entries()].map(([gameId, context]) => [gameId, summarizeContext(context, sorted)]));
 
   return {
-    schemaVersion: 1,
+    schema: ANALYSIS_SCHEMA,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     runId: normalized.find((event) => event.runId)?.runId || null,
     clean,
     acceptance: {
-      allRegisteredDetectorsExecuted: allExecuted,
+      schema: ANALYSIS_SCHEMA,
+      detectorRegistryCount: DETECTOR_IDS.length,
       detectorCountExpected: DETECTOR_IDS.length,
-      detectorCountExecuted: coverage.filter((entry) => entry.executed).length,
+      scopeRecordCount: accounting.scopeRecordCount,
+      expectedScopeRecordCount: accounting.expectedScopeRecordCount,
+      allRegisteredDetectorsAccountedFor: accounting.allRegisteredDetectorsAccountedFor,
+      applicableCoverageComplete: accounting.applicableCoverageComplete,
+      statusCounts: accounting.statusCounts,
+      detectorErrorCount: accounting.statusCounts.error,
       parseErrorCount: parseErrors.length,
       findingCount: sorted.length,
       openFindingCount: openFindings.length,
       triagedFindingsCount: sorted.filter((finding) => finding.status === 'triaged').length,
-      rule: 'clean=true only when every registered detector executes, parse errors are zero, and open findings are zero',
+      findingKindCounts: countBy(sorted, (finding) => finding.kind),
+      explainedObservationCount: observations.length,
+      rule: 'clean=true only when every registered detector is accounted for in every scope, every applicable detector was evaluated with sufficient evidence, parse errors are zero and there are zero findings of any status or kind',
     },
     coverage,
     findings: sorted,
+    observations,
     perGame,
   };
 }
 
-export function redactedAnalysis(analysis) {
+export const ANALYSIS_SCHEMA = 'avo.trajectory-analysis.v2';
+export const FINDING_KINDS = Object.freeze(['contract-violation', 'behavioral-signal', 'execution-incident']);
+export const COVERAGE_STATUSES = Object.freeze(['evaluated', 'not-applicable', 'insufficient-evidence', 'error']);
+const GLOBAL_SCOPE = Object.freeze({
+  runId: null, gameId: null, versionedGameId: null, attemptId: null, episodeId: null, global: true,
+});
+
+/**
+ * Recomputes detector accounting from the coverage records themselves; the
+ * declared acceptance booleans are never trusted. Every registered detector
+ * must report exactly once for each game scope (and provider-failure once for
+ * the global scope). Unknown statuses, duplicates or gaps fail accounting.
+ */
+export function verifyAnalysisCoverage(analysis) {
+  const coverage = Array.isArray(analysis?.coverage) ? analysis.coverage : [];
+  const games = analysis?.perGame && typeof analysis.perGame === 'object' ? Object.keys(analysis.perGame).sort() : [];
+  const expected = new Set();
+  for (const detectorId of DETECTOR_IDS) {
+    for (const gameId of games) expected.add(`${detectorId}|game:${gameId}`);
+    if (detectorId === 'provider-failure') expected.add(`${detectorId}|global`);
+  }
+  const seen = new Set();
+  let duplicates = 0;
+  let unknown = 0;
+  const statusCounts = { evaluated: 0, notApplicable: 0, insufficientEvidence: 0, error: 0 };
+  for (const record of coverage) {
+    const scopeKey = record?.scope?.global === true ? 'global' : `game:${record?.scope?.gameId ?? ''}`;
+    const key = `${record?.detectorId}|${scopeKey}`;
+    if (!expected.has(key) || !COVERAGE_STATUSES.includes(record?.status)
+        || !Number.isSafeInteger(record?.findingCount) || record.findingCount < 0) {
+      unknown += 1;
+      continue;
+    }
+    if (seen.has(key)) duplicates += 1;
+    seen.add(key);
+    if (record.status === 'evaluated') statusCounts.evaluated += 1;
+    else if (record.status === 'not-applicable') statusCounts.notApplicable += 1;
+    else if (record.status === 'insufficient-evidence') statusCounts.insufficientEvidence += 1;
+    else statusCounts.error += 1;
+  }
+  const allRegisteredDetectorsAccountedFor = duplicates === 0 && unknown === 0
+    && seen.size === expected.size && coverage.length === expected.size && expected.size > 0;
   return {
-    schemaVersion: analysis.schemaVersion,
-    generatedAt: analysis.generatedAt,
-    runId: analysis.runId,
-    clean: analysis.clean,
-    acceptance: analysis.acceptance,
-    coverage: analysis.coverage.map(({ detectorId, executed, error, findingCount, gameCount, eventCount }) => ({
-      detectorId,
-      executed,
-      error: error ? { name: error.name, message: safeText(error.message) } : null,
-      findingCount,
-      gameCount,
-      eventCount,
-    })),
-    findings: analysis.findings.map((finding) => ({
-      id: finding.id,
-      detectorId: finding.detectorId,
-      gameId: finding.gameId,
-      severity: finding.severity,
-      confidence: finding.confidence,
-      status: finding.status,
-      summary: safeText(finding.summary),
-      rootCause: safeText(finding.rootCause),
-      remediation: safeText(finding.remediation),
-      evidenceRange: finding.evidenceRange,
-    })),
-    perGame: analysis.perGame,
+    detectorRegistryCount: DETECTOR_IDS.length,
+    scopeRecordCount: coverage.length,
+    expectedScopeRecordCount: expected.size,
+    duplicateRecordCount: duplicates,
+    unknownRecordCount: unknown,
+    allRegisteredDetectorsAccountedFor,
+    applicableCoverageComplete: allRegisteredDetectorsAccountedFor
+      && statusCounts.insufficientEvidence === 0
+      && statusCounts.error === 0,
+    statusCounts,
   };
 }
 
-function buildGameContext(gameId, events, memory, config) {
+function buildGameContext(gameId, events, { memory, config, outcome, outcomesSupplied, outcomeConflict, strategy }) {
   const gameEvents = events.filter((event) => event.gameId === gameId);
-  const transitions = gameEvents.filter((event) => event.kind === 'arc.response' && ['step', 'act'].includes(event.operation));
+  const transitions = gameEvents.filter((event) => event.kind === 'arc.response' && TRANSITION_OPERATIONS.has(event.operation));
   const resets = gameEvents.filter((event) => event.kind === 'arc.response' && event.operation === 'reset');
-  const closes = gameEvents.filter((event) => event.kind === 'arc.response' && ['close', 'scorecard', 'cleanup'].includes(event.operation));
-  const supervisorEvents = gameEvents.filter((event) => /supervisor/i.test(`${event.kind} ${event.type || ''}`));
-  const providerEvents = gameEvents.filter((event) => /provider|assistant|model|turn/i.test(`${event.kind} ${event.type || ''}`));
-  const maxLevels = Math.max(0, ...transitions.map((event) => number(event.levelsCompleted)));
-  const winLevels = Math.max(0, ...transitions.map((event) => number(event.winLevels)));
-  const won = transitions.some((event) => String(event.state).toUpperCase() === 'WIN');
+  const runIds = unique(gameEvents.map((event) => event.runId).filter(Boolean));
+  const versionedGameIds = unique(gameEvents.map((event) => event.versionedGameId).filter(Boolean));
+  const attemptIds = unique(gameEvents.map((event) => event.attemptId).filter(Boolean));
   return {
     gameId,
+    scope: {
+      runId: runIds.length === 1 ? runIds[0] : null,
+      gameId,
+      versionedGameId: versionedGameIds.length === 1 ? versionedGameIds[0] : null,
+      attemptId: attemptIds.length === 1 ? attemptIds[0] : null,
+      episodeId: null,
+    },
+    identityConflicts: {
+      runIds: runIds.length > 1 ? runIds : [],
+      versionedGameIds: versionedGameIds.length > 1 ? versionedGameIds : [],
+    },
     events: gameEvents,
+    groups: scopeGroups(gameEvents),
+    segments: buildSegments(gameEvents),
     transitions,
     resets,
-    closes,
-    supervisorEvents,
-    providerEvents,
+    supervisorEvents: gameEvents.filter((event) => event.kind === 'supervisor.intervention'),
+    providerIncidents: gameEvents.filter(isProviderIncident),
     memory: memory || null,
-    maxLevels,
-    winLevels,
-    won,
+    outcome: outcome || null,
+    outcomesSupplied,
+    outcomeConflict,
+    strategy,
+    maxLevels: Math.max(0, ...transitions.map((event) => number(event.levelsCompleted))),
+    winLevels: Math.max(0, ...transitions.map((event) => number(event.winLevels))),
+    won: transitions.some((event) => String(event.state).toUpperCase() === 'WIN'),
     actionBudget: number(config.actionBudget) || null,
   };
 }
 
+const TRANSITION_OPERATIONS = new Set(['step', 'act']);
+const BOUNDARY_OPERATIONS = new Set(['reset', 'open', 'make']);
+
+// Events are only ordered inside one recorder clock domain and one
+// run/version/attempt identity; nothing is ordered across those boundaries.
+function scopeGroups(gameEvents) {
+  const groups = new Map();
+  for (const event of gameEvents) {
+    const key = canonicalJson([event.runId ?? null, event.versionedGameId ?? null, event.attemptId ?? null, event.clockDomain ?? null]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  }
+  return [...groups.values()].map((group) => group.sort(compareWithinClockDomain));
+}
+
+// A segment is one contiguous episode: reset/open/make responses, episode
+// changes and identity boundaries always cut it.
+function buildSegments(gameEvents) {
+  const segments = [];
+  for (const group of scopeGroups(gameEvents)) {
+    let current = null;
+    let lastAvailable = null;
+    const close = () => {
+      if (current?.transitions.length) segments.push(current);
+      current = null;
+    };
+    for (const event of group) {
+      if ((event.kind === 'arc.response' || event.kind === 'arc.request') && BOUNDARY_OPERATIONS.has(event.operation)) {
+        close();
+        if (event.kind === 'arc.response') lastAvailable = knownAvailable(event);
+        continue;
+      }
+      if (event.kind !== 'arc.response' || !TRANSITION_OPERATIONS.has(event.operation)) continue;
+      if (current && current.scope.episodeId !== (event.episodeId ?? null)) close();
+      if (!current) {
+        current = {
+          scope: {
+            runId: event.runId ?? null,
+            gameId: event.gameId,
+            versionedGameId: event.versionedGameId ?? null,
+            attemptId: event.attemptId ?? null,
+            episodeId: event.episodeId ?? null,
+          },
+          transitions: [],
+          priorAvailable: [],
+          groupEvents: group,
+        };
+      }
+      current.transitions.push(event);
+      current.priorAvailable.push(lastAvailable);
+      lastAvailable = knownAvailable(event);
+    }
+    close();
+  }
+  return segments;
+}
+
+function compareWithinClockDomain(a, b) {
+  if (a.monotonicNs && b.monotonicNs && a.monotonicNs !== b.monotonicNs) return a.monotonicNs - b.monotonicNs;
+  if (a.sequence !== b.sequence) return a.sequence - b.sequence;
+  return number(a.sourceLine) - number(b.sourceLine);
+}
+
+function perSegment(context, evaluate, { requireSegments = true } = {}) {
+  if (context.segments.length === 0) {
+    return requireSegments ? insufficient('no-scoped-transitions') : evaluated([]);
+  }
+  const findings = [];
+  let gap = null;
+  for (const segment of context.segments) {
+    const result = evaluate(segment);
+    findings.push(...result.findings.map((finding) => ({ scope: segment.scope, ...finding })));
+    if (result.status === 'insufficient-evidence' && !gap) gap = result.reasonCode;
+  }
+  return gap ? { status: 'insufficient-evidence', reasonCode: gap, findings, observations: [] } : evaluated(findings);
+}
+
 function detectRepeatedStateLoop(context, config) {
   const windowSize = Math.max(4, number(config.repeatedStateWindow) || 6);
-  const findings = [];
-  for (let end = windowSize - 1; end < context.transitions.length; end += 1) {
-    const window = context.transitions.slice(end - windowSize + 1, end + 1);
-    const hashes = window.map((event) => event.frameHash).filter(Boolean);
-    if (hashes.length !== windowSize) continue;
-    const uniqueHashes = new Set(hashes);
-    const progress = window.reduce((sum, event) => sum + Math.max(0, number(event.levelDelta)), 0);
-    if (uniqueHashes.size <= 2 && progress === 0) {
-      findings.push({
-        severity: 'high', confidence: 0.98,
-        summary: `State plateau across ${windowSize} consecutive environment actions`,
-        rootCause: 'The policy repeated states without producing level progress.',
-        remediation: 'Invalidate the active hypothesis, consult untried legal actions, and force a materially different information-gathering experiment.',
-        events: window,
-      });
-      end += windowSize - 1;
-    }
-  }
-  return findings;
+  return perSegment(context, (segment) => {
+    if (!segment.transitions.every((event) => event.frameHash)) return insufficient('frame-hash-missing');
+    return evaluated(repeatedWindows(segment.transitions, windowSize).map((window) => signal({
+      summary: `Observed state plateau: ${windowSize} consecutive actions revisited at most two frame hashes without level progress`,
+      events: window,
+      details: { claim: 'observed-repetition', windowSize },
+    })));
+  });
 }
 
 function detectPeriodicActionCycle(context, config) {
   const minRepeats = Math.max(2, number(config.actionCycleRepeats) || 3);
-  const findings = [];
-  const actions = context.transitions.map((event) => event.action).filter(Boolean);
-  for (let period = 1; period <= 4; period += 1) {
-    const length = period * minRepeats;
-    for (let end = length; end <= actions.length; end += 1) {
-      const slice = actions.slice(end - length, end);
-      const pattern = slice.slice(0, period);
-      if (!slice.every((action, index) => action === pattern[index % period])) continue;
-      const window = context.transitions.slice(end - length, end);
-      if (window.some((event) => number(event.levelDelta) > 0)) continue;
-      findings.push({
-        severity: period === 1 ? 'high' : 'medium', confidence: 0.97,
-        summary: `Periodic action cycle repeated ${minRepeats} times (period ${period})`,
-        rootCause: `The policy repeated ${pattern.join(' → ')} without level progress.`,
-        remediation: 'Record the failed cycle, prohibit the pattern for the current state cluster, and choose an untried legal action or planned reset.',
-        events: window,
-        details: { pattern },
-      });
-      break;
+  return perSegment(context, (segment) => {
+    if (!segment.transitions.every((event) => event.action && event.actionDataKnown === true)) {
+      return insufficient('action-data-missing');
     }
-  }
-  return findings;
+    const keys = segment.transitions.map((event) => canonicalJson({ action: event.action, data: event.actionData ?? null }));
+    const findings = [];
+    for (let period = 1; period <= 4; period += 1) {
+      const length = period * minRepeats;
+      for (let end = length; end <= keys.length; end += 1) {
+        const slice = keys.slice(end - length, end);
+        if (!slice.every((key, index) => key === slice[index % period])) continue;
+        const window = segment.transitions.slice(end - length, end);
+        if (window.some((event) => number(event.levelDelta) > 0)) continue;
+        findings.push(signal({
+          summary: `Observed repeated action payload cycle (${minRepeats} repeats, period ${period})`,
+          events: window,
+          details: { claim: 'observed-repetition', period, payloadKeys: slice.slice(0, period) },
+        }));
+        break;
+      }
+    }
+    return evaluated(findings);
+  });
 }
 
 function detectIneffectiveActions(context, config) {
   const threshold = Math.max(2, number(config.ineffectiveActionThreshold) || 3);
-  const findings = [];
-  let streak = [];
-  let previousHash = null;
-  for (const transition of context.transitions) {
-    const ineffective = previousHash && transition.frameHash === previousHash && number(transition.levelDelta) === 0;
-    if (ineffective) streak.push(transition);
-    else streak = [];
-    if (streak.length === threshold) {
-      findings.push({
-        severity: 'medium', confidence: 0.95,
-        summary: `${threshold} consecutive actions produced no observable state change`,
-        rootCause: 'The selected controls were ineffective in the current state or required different parameters.',
-        remediation: 'Mark these action/state combinations ineffective and switch to a different legal action or coordinate probe.',
-        events: streak,
-      });
+  return perSegment(context, (segment) => {
+    if (!segment.transitions.every((event) => event.frameHash)) return insufficient('frame-hash-missing');
+    const findings = [];
+    let streak = [];
+    let previousHash = null;
+    for (const transition of segment.transitions) {
+      const repeated = previousHash && transition.frameHash === previousHash && number(transition.levelDelta) === 0;
+      streak = repeated ? [...streak, transition] : [];
+      if (streak.length === threshold) {
+        findings.push(signal({
+          summary: `${threshold} consecutive actions returned an identical observed frame`,
+          events: streak,
+          details: { claim: 'observed-repetition' },
+        }));
+      }
+      previousHash = transition.frameHash;
     }
-    previousHash = transition.frameHash;
-  }
-  return findings;
-}
-
-function detectInvalidActions(context) {
-  return context.events.flatMap((event) => {
-    const response = event.response;
-    const text = JSON.stringify(response || {});
-    const legalRejection = response?.ok === false && response?.rejected === true
-      && response?.recoverable === true && response?.code === 'FINISH_UNAVAILABLE_ACTIVE';
-    const invalid = !legalRejection
-      && (response?.ok === false || response?.error || /invalid action|illegal action|not available|validation error/i.test(text));
-    if (!invalid) return [];
-    return [{
-      severity: 'high', confidence: 0.99,
-      summary: 'ARC boundary rejected or failed an action request',
-      rootCause: 'The policy emitted an action or payload that was not legal for the current frame.',
-      remediation: 'Select exclusively from the current available-actions set and validate complex-action coordinates before execution.',
-      events: [event],
-    }];
+    return evaluated(findings);
   });
 }
 
+// Guard rejections that never reached the environment are normal behaviour.
+// A forwarded action absent from the preceding observation's available set is
+// a harness contract violation; other failed responses are execution incidents.
+function detectInvalidActions(context) {
+  const findings = [];
+  const observations = [];
+  for (const segment of context.segments) {
+    segment.transitions.forEach((event, index) => {
+      if (!responseFailed(event) || isNormalRejection(event)) return;
+      const available = segment.priorAvailable[index];
+      const action = normalizeActionName(event.action);
+      if (available && action && !available.includes(action)) {
+        findings.push({
+          kind: 'contract-violation',
+          severity: 'high',
+          scope: segment.scope,
+          summary: 'An action outside the preceding observation\'s available actions was forwarded to the environment',
+          rootCause: 'The host action guard did not prevent an unavailable action from being forwarded.',
+          remediation: 'Repair the host action guard; this is a program defect, not agent guidance.',
+          invariant: 'forwarded-action-in-available-actions',
+          expected: available,
+          observed: action,
+          events: [event],
+        });
+        return;
+      }
+      const recovered = segment.transitions.slice(index + 1).some((later) => !responseFailed(later));
+      const incident = {
+        kind: 'execution-incident',
+        severity: 'medium',
+        scope: segment.scope,
+        summary: 'The environment returned a failed response for a forwarded action',
+        rootCause: available ? 'The response failed although the action was available.' : 'Action availability before the request was not recorded.',
+        remediation: 'Inspect the structured response and transport evidence.',
+        reasonCode: available ? 'environment-rejected-available-action' : 'availability-unknown',
+        resolution: recovered ? 'recovered' : 'unrecovered',
+        events: [event],
+      };
+      if (recovered) observations.push(incident);
+      else findings.push(incident);
+    });
+  }
+  return evaluated(findings, observations);
+}
+
 function detectPrematureFinish(context) {
-  if (context.won || context.transitions.length === 0 || context.closes.length === 0) return [];
-  const final = context.transitions.at(-1);
-  const exhausted = context.actionBudget && context.transitions.length >= context.actionBudget;
-  if (exhausted || String(final?.state).toUpperCase() === 'GAME_OVER') return [];
-  return [{
-    severity: 'high', confidence: 0.88,
-    summary: 'Game session ended before WIN or an evidenced action-budget terminal condition',
-    rootCause: 'The agent or outer loop terminated while the environment remained potentially playable.',
-    remediation: 'Treat natural model stop as a continuation point; stop only on WIN, explicit budget exhaustion, unrecoverable provider failure, or validated environment terminal state.',
-    events: [final, context.closes.at(-1)].filter(Boolean),
-  }];
+  const outcome = context.outcome;
+  if (context.outcomeConflict) return insufficient('terminal-outcome-conflict');
+  if (!outcome) return insufficient('terminal-outcome-missing');
+  if (outcome.won || outcome.error !== null || outcome.terminationReason !== null
+      || String(outcome.state || '').toUpperCase() === 'GAME_OVER') {
+    return evaluated([]);
+  }
+  return evaluated([{
+    kind: 'execution-incident',
+    severity: 'high',
+    summary: 'The final game record ended without WIN, an error, a terminal state or a sealed termination reason',
+    rootCause: 'The game termination is unexplained by the structured result record.',
+    remediation: 'Inspect the run lifecycle; do not infer a policy defect.',
+    reasonCode: 'termination-unexplained',
+    resolution: 'unrecovered',
+    events: context.transitions.slice(-1),
+    details: { state: outcome.state ?? null },
+  }]);
 }
 
 function detectResetAbuse(context, config) {
   const threshold = Math.max(3, number(config.resetThreshold) || 4);
+  if (context.transitions.length === 0) return insufficient('no-scoped-transitions');
   const total = context.transitions.length + context.resets.length;
-  if (context.resets.length < threshold || context.resets.length / Math.max(1, total) < 0.1) return [];
-  return [{
-    severity: 'medium', confidence: 0.96,
-    summary: `${context.resets.length} resets consumed ${Math.round(context.resets.length / total * 100)}% of environment operations`,
-    rootCause: 'The policy repeatedly discarded state without extracting or retaining enough information from failed attempts.',
-    remediation: 'Require a reset hypothesis, record the failed opening, and forbid identical post-reset openings unless new evidence justifies them.',
+  if (context.resets.length < threshold || context.resets.length / Math.max(1, total) < 0.1) return evaluated([]);
+  return evaluated([signal({
+    summary: `Observed ${context.resets.length} resets across ${total} environment operations`,
     events: context.resets.slice(-threshold),
-  }];
+    details: { claim: 'observed-frequency', resets: context.resets.length, operations: total },
+  })]);
 }
 
 function detectLowInformationExploration(context, config) {
   const prefixLength = Math.max(8, number(config.explorationPrefix) || 12);
-  const prefix = context.transitions.slice(0, prefixLength);
-  if (prefix.length < prefixLength || prefix.some((event) => number(event.levelDelta) > 0)) return [];
-  const actions = new Set(prefix.map((event) => event.action).filter(Boolean));
-  const available = new Set(prefix.flatMap((event) => Array.isArray(event.availableActions) ? event.availableActions : []));
-  if (available.size < 4 || actions.size > 2) return [];
-  return [{
-    severity: 'medium', confidence: 0.91,
-    summary: `Early exploration used only ${actions.size} action(s) while at least ${available.size} were exposed`,
-    rootCause: 'The opening policy under-sampled legal controls and gathered low-discrimination evidence.',
-    remediation: 'Use a coverage-oriented opening: test each uncharacterized legal action once where safe, record exact deltas, then exploit learned semantics.',
+  const segment = context.segments[0];
+  if (!segment) return insufficient('no-scoped-transitions');
+  const prefix = segment.transitions.slice(0, prefixLength);
+  if (prefix.length < prefixLength) return evaluated([]);
+  if (prefix.some((event) => !Array.isArray(event.availableActions))) return insufficient('available-actions-missing');
+  if (prefix.some((event) => number(event.levelDelta) > 0)) return evaluated([]);
+  const actions = new Set(prefix.map((event) => normalizeActionName(event.action)).filter(Boolean));
+  const available = new Set(prefix.flatMap((event) => event.availableActions.map(normalizeActionName).filter(Boolean)));
+  if (available.size < 4 || actions.size > 2) return evaluated([]);
+  return evaluated([signal({
+    scope: segment.scope,
+    summary: `Observed opening used ${actions.size} action name(s) while ${available.size} were exposed`,
     events: prefix,
-  }];
+    details: { claim: 'observed-frequency' },
+  })]);
 }
 
+// Free-text notes, plans, quotes and hypotheses are not machine-checkable
+// claims. Without structured claims these deterministic rules do not apply.
 function detectContradictoryMemory(context) {
-  const memory = context.memory;
-  if (!memory || typeof memory !== 'object') return [];
-  const semantics = memory.actionSemantics || memory.action_semantics || {};
-  const findings = [];
-  for (const [action, claim] of Object.entries(semantics)) {
-    const transitions = context.transitions.filter((event) => event.action === action);
-    if (transitions.length < 3) continue;
-    const changed = transitions.filter((event, index) => index === 0 || event.frameHash !== transitions[index - 1]?.frameHash).length;
-    const claimText = JSON.stringify(claim);
-    if (/no change|ineffective|does nothing/i.test(claimText) && changed / transitions.length >= 0.66) {
-      findings.push({
-        severity: 'medium', confidence: 0.82,
-        summary: `Memory claims ${action} is ineffective but observed transitions frequently changed state`,
-        rootCause: 'Persistent action semantics were not reconciled with newer environment evidence.',
-        remediation: 'Demote the stale semantic claim, attach contradictory transition IDs, and re-test under controlled state conditions.',
-        events: transitions.slice(-5),
-      });
-    }
-  }
-  return findings;
-}
-
-function detectStaleHypothesis(context, config) {
-  const memory = context.memory;
-  if (!memory || typeof memory !== 'object') return [];
-  const proposals = memory.hypothesisProposals || memory.hypothesisJournal?.proposals
-    || memory.proposals || memory.lineage?.proposals || [];
-  const evaluations = memory.hypothesisEvaluations || memory.hypothesisJournal?.evaluations
-    || memory.attempts || memory.lineage?.attempts || [];
-  const evaluated = new Set(evaluations.map((entry) => entry.proposalId || entry.proposal_id));
-  const threshold = Math.max(10, number(config.staleHypothesisActions) || 25);
-  const actionCount = context.transitions.length;
-  return proposals.flatMap((proposal) => {
-    if (evaluated.has(proposal.id)) return [];
-    const baseline = number(proposal.baseline?.actionIndex ?? proposal.baseline?.action_index);
-    if (actionCount - baseline < threshold) return [];
-    return [{
-      severity: 'medium', confidence: 0.9,
-      summary: `Proposal ${safeText(proposal.id)} remained unevaluated for at least ${actionCount - baseline} actions`,
-      rootCause: 'The agent accumulated a hypothesis without collecting or binding decisive post-proposal evidence.',
-      remediation: 'Evaluate or explicitly abandon pending proposals before opening additional hypotheses; cite exact transition evidence.',
-      events: context.transitions.slice(Math.max(0, baseline), Math.min(actionCount, baseline + threshold)),
-      details: { proposalId: proposal.id },
-    }];
-  });
+  return structuredMemoryClaimsRule(context);
 }
 
 function detectHallucinatedProgress(context) {
+  return structuredMemoryClaimsRule(context);
+}
+
+function structuredMemoryClaimsRule(context) {
+  if (context.strategy === false) return notApplicable('memory-capability-disabled');
+  if (!context.memory || typeof context.memory !== 'object') return insufficient('memory-missing');
+  return notApplicable('no-structured-machine-claims');
+}
+
+function detectStaleHypothesis(context) {
+  if (context.strategy === false) return notApplicable('journal-capability-disabled');
   const memory = context.memory;
-  if (!memory) return [];
-  const text = JSON.stringify({ goals: memory.goals, notes: memory.notes, provenStrategies: memory.provenStrategies || memory.proven_strategies });
-  const claimedWins = /\b(?:won|victory|all levels complete|game solved)\b/i.test(text);
-  const levelClaims = [...text.matchAll(/(?:level|levels)\s*(?:completed|done|cleared)?\s*[:=]?\s*(\d+)/gi)].map((match) => Number(match[1]));
-  const maxClaim = Math.max(0, ...levelClaims);
-  if (!claimedWins && maxClaim <= context.maxLevels) return [];
-  if (claimedWins && context.won) return [];
-  return [{
-    severity: 'high', confidence: 0.93,
-    summary: 'Persistent memory claims progress not supported by the official ARC transition record',
-    rootCause: `Memory claimed ${claimedWins ? 'a win' : `${maxClaim} levels`} while the boundary observed ${context.maxLevels}${context.won ? ' and WIN' : ''}.`,
-    remediation: 'Remove unsupported progress claims and derive level/win state only from exact FrameData and official scorecard fields.',
-    events: context.transitions.slice(-3),
-  }];
+  if (!memory || typeof memory !== 'object') return insufficient('memory-missing');
+  const proposals = memory.hypothesisProposals ?? [];
+  const evaluations = memory.hypothesisEvaluations ?? [];
+  if (!Array.isArray(proposals) || !Array.isArray(evaluations)) {
+    throw new TypeError('hypothesis journal proposals/evaluations must be arrays');
+  }
+  const evaluatedIds = new Set(evaluations.map((entry) => entry?.proposalId));
+  const pending = proposals.filter((proposal) => !evaluatedIds.has(proposal?.id));
+  // Proposal baselines use agent-local action indices that are not bound to a
+  // recorder attempt/episode, so their age cannot be measured from this corpus.
+  return pending.length === 0 ? evaluated([]) : insufficient('proposal-scope-unbound');
 }
 
 function detectProviderFailure(context) {
-  return context.providerEvents.flatMap((event) => providerFinding(event, context.gameId));
+  const outcome = context.outcome;
+  if (context.outcomeConflict) return insufficient('terminal-outcome-conflict');
+  if (!outcome) return insufficient('terminal-outcome-missing');
+  const findings = [];
+  const observations = [];
+  if (outcome.error !== null) {
+    findings.push({
+      kind: 'execution-incident',
+      severity: 'high',
+      summary: 'The final game record carries an unrecovered error',
+      rootCause: 'The game ended with a structured error; its category is in the private record.',
+      remediation: 'Repair the execution boundary and rerun; do not treat it as an agent-quality result.',
+      reasonCode: 'final-game-error',
+      resolution: 'unrecovered',
+      events: context.transitions.slice(-1),
+    });
+  }
+  for (const incident of context.providerIncidents) {
+    const item = {
+      kind: 'execution-incident',
+      severity: 'medium',
+      summary: `Structured provider incident: ${safeText(incident.category || incident.type || incident.kind).slice(0, 80)}`,
+      rootCause: 'A provider request failed during the game.',
+      remediation: 'None while the same game later completed without a final error.',
+      reasonCode: 'provider-incident',
+      resolution: outcome.error === null ? 'recovered' : 'unrecovered',
+      events: [incident],
+    };
+    if (outcome.error === null) observations.push(item);
+  }
+  return evaluated(findings, observations);
 }
 
-function detectGlobalProviderFailure(events) {
-  return events.filter((event) => !event.gameId).flatMap((event) => providerFinding(event, null));
-}
-
-function providerFinding(event, gameId) {
-  const text = safeText(JSON.stringify(event));
-  const matches = text.match(/context overflow|maximum context|rate limit|timed? out|abort(?:ed)?|stopReason[^A-Za-z]+(?:error|length)|provider[^A-Za-z]+error|fetch failed|connection refused/i);
-  if (!matches) return [];
-  const lower = matches[0].toLowerCase();
-  const infrastructure = /rate limit|timed? out|fetch failed|connection refused/.test(lower);
-  return [{
-    gameId,
-    severity: infrastructure ? 'critical' : 'high',
-    confidence: 0.95,
-    summary: `Provider/runtime failure signal: ${matches[0]}`,
-    rootCause: infrastructure ? 'The real-provider execution boundary failed or became unavailable.' : 'The model turn terminated before completing a valid reasoning/tool cycle.',
-    remediation: infrastructure
-      ? 'Repair connectivity, capacity, timeout, or retry policy and rerun the affected game; do not treat it as an agent-quality result.'
-      : 'Compact context, preserve durable state, retry from the last grounded tool result, and cap output without truncating tool arguments.',
+function detectGlobalProviderIncidents(events) {
+  const observations = events.filter((event) => !event.gameId && isProviderIncident(event)).map((event) => ({
+    kind: 'execution-incident',
+    severity: 'low',
+    summary: 'Structured provider incident without a game scope',
+    rootCause: 'The incident cannot be attributed to a game terminal outcome.',
+    remediation: 'None; recorded for audit only.',
+    reasonCode: 'unscoped-provider-incident',
+    resolution: 'unknown',
     events: [event],
-  }];
+  }));
+  return evaluated([], observations);
 }
 
 function detectMissingSupervisor(context, config) {
-  const loopWindows = repeatedWindows(context.transitions, Math.max(4, number(config.repeatedStateWindow) || 6));
-  if (loopWindows.length === 0) return [];
-  const findings = [];
-  for (const window of loopWindows) {
-    const endIndex = window.at(-1)?.analysisIndex ?? 0;
-    const intervention = context.supervisorEvents.find((event) => event.analysisIndex >= endIndex && event.analysisIndex <= endIndex + 20);
-    if (!intervention) {
-      findings.push({
-        severity: 'high', confidence: 0.9,
-        summary: 'A stagnation/cycle window had no recorded supervisor intervention within 20 subsequent events',
-        rootCause: 'Supervisor triggering, event recording, or delivery to the main agent did not occur at the required trajectory boundary.',
-        remediation: 'Trigger the supervisor from environment evidence, record cited event IDs and multiple alternatives, and inject the intervention before another equivalent cycle.',
-        events: window,
-      });
+  if (context.strategy === false) return notApplicable('supervisor-disabled');
+  if (context.strategy === null) return insufficient('supervisor-capability-unknown');
+  const windowSize = Math.max(4, number(config.repeatedStateWindow) || 6);
+  let gap = null;
+  for (const segment of context.segments) {
+    if (!segment.transitions.every((event) => event.frameHash)) {
+      gap ??= 'frame-hash-missing';
+      continue;
+    }
+    for (const window of repeatedWindows(segment.transitions, windowSize)) {
+      const end = window.at(-1);
+      const delivered = segment.groupEvents.some((event) => event.kind === 'supervisor.intervention'
+        && compareWithinClockDomain(event, end) > 0);
+      if (!delivered) gap ??= 'supervisor-delivery-evidence-missing';
     }
   }
-  return findings;
+  return gap ? insufficient(gap) : evaluated([]);
 }
 
 function detectExcessiveActions(context, config) {
   const threshold = Math.max(60, number(config.noProgressActionThreshold) || 120);
-  let sinceProgress = [];
-  const findings = [];
-  for (const event of context.transitions) {
-    if (number(event.levelDelta) > 0) sinceProgress = [];
-    else sinceProgress.push(event);
-    if (sinceProgress.length === threshold) {
-      findings.push({
-        severity: 'high', confidence: 0.98,
-        summary: `${threshold} environment actions were spent without completing a level`,
-        rootCause: 'The long-horizon policy continued low-yield exploration or exploitation without a progress checkpoint.',
-        remediation: 'Enforce a no-progress budget, invoke trajectory review, preserve failures, and switch to a distinct hypothesis family before spending more actions.',
-        events: sinceProgress,
-      });
+  return perSegment(context, (segment) => {
+    let sinceProgress = [];
+    const findings = [];
+    for (const event of segment.transitions) {
+      if (number(event.levelDelta) > 0) sinceProgress = [];
+      else sinceProgress.push(event);
+      if (sinceProgress.length === threshold) {
+        findings.push(signal({
+          summary: `Observed ${threshold} environment actions in one episode without a completed level`,
+          events: [...sinceProgress],
+          details: { claim: 'observed-frequency' },
+        }));
+      }
     }
-  }
-  return findings;
+    return evaluated(findings);
+  });
 }
 
 function repeatedWindows(transitions, size) {
@@ -479,6 +666,152 @@ function repeatedWindows(transitions, size) {
     }
   }
   return windows;
+}
+
+function signal(finding) {
+  return {
+    kind: 'behavioral-signal',
+    severity: 'low',
+    rootCause: 'Observed pattern only. It does not prove a policy or program defect, nor that hidden state was unchanged.',
+    remediation: 'Review required; no automatic directive is generated.',
+    ...finding,
+  };
+}
+
+function evaluated(findings, observations = []) {
+  return { status: 'evaluated', reasonCode: null, findings, observations };
+}
+
+function notApplicable(reasonCode) {
+  return { status: 'not-applicable', reasonCode, findings: [], observations: [] };
+}
+
+function insufficient(reasonCode) {
+  return { status: 'insufficient-evidence', reasonCode, findings: [], observations: [] };
+}
+
+function normalizeDetectorResult(result) {
+  if (!result || !COVERAGE_STATUSES.includes(result.status) || result.status === 'error') {
+    throw new Error('detector returned an invalid coverage result');
+  }
+  return {
+    status: result.status,
+    reasonCode: result.reasonCode ?? null,
+    findings: Array.isArray(result.findings) ? result.findings : [],
+    observations: Array.isArray(result.observations) ? result.observations : [],
+  };
+}
+
+function indexGameOutcomes(records) {
+  const byGame = new Map();
+  const conflicts = new Set();
+  if (!Array.isArray(records)) return { supplied: false, byGame, conflicts };
+  for (const record of records) {
+    const gameId = String(record?.gameId || '').toLowerCase();
+    if (!gameId) continue;
+    const value = {
+      won: record.won === true,
+      error: typeof record.error === 'string' && record.error ? record.error : null,
+      terminationReason: typeof record.terminationReason === 'string' ? record.terminationReason : null,
+      state: typeof record.state === 'string' ? record.state : null,
+    };
+    if (byGame.has(gameId) && canonicalJson(byGame.get(gameId)) !== canonicalJson(value)) conflicts.add(gameId);
+    byGame.set(gameId, value);
+  }
+  for (const gameId of conflicts) byGame.delete(gameId);
+  return { supplied: true, byGame, conflicts };
+}
+
+function isProviderIncident(event) {
+  return event?.kind === 'avo_provider_incident' || event?.type === 'avo_provider_incident';
+}
+
+function responseFailed(event) {
+  const response = event.response && typeof event.response === 'object' ? event.response : {};
+  return event.ok === false || response.ok === false || event.error_present === true
+    || (response.error !== undefined && response.error !== null);
+}
+
+function isNormalRejection(event) {
+  const response = event.response && typeof event.response === 'object' ? event.response : {};
+  return response.ok === false && response.rejected === true && response.recoverable === true;
+}
+
+function knownAvailable(event) {
+  if (!Array.isArray(event?.availableActions) || event.availableActions.length === 0) return null;
+  const names = event.availableActions.map(normalizeActionName);
+  return names.every(Boolean) ? names : null;
+}
+
+function normalizeActionName(value) {
+  if (Number.isSafeInteger(value) && value >= 0) return `ACTION${value}`;
+  if (typeof value === 'string' && /^action\d+$/i.test(value.trim())) return value.trim().toUpperCase();
+  if (typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value)) return value;
+  return null;
+}
+
+export function redactedAnalysis(analysis) {
+  const legacy = analysis?.schema !== ANALYSIS_SCHEMA;
+  return {
+    schema: legacy ? null : ANALYSIS_SCHEMA,
+    schemaVersion: analysis.schemaVersion,
+    generatedAt: analysis.generatedAt,
+    runId: analysis.runId,
+    clean: analysis.clean,
+    acceptance: analysis.acceptance,
+    coverage: analysis.coverage.map((entry) => (legacy
+      ? {
+        detectorId: entry.detectorId,
+        executed: entry.executed,
+        error: entry.error ? { name: entry.error.name, message: safeText(entry.error.message) } : null,
+        findingCount: entry.findingCount,
+        gameCount: entry.gameCount,
+        eventCount: entry.eventCount,
+      }
+      : {
+        detectorId: entry.detectorId,
+        scope: publicScope(entry.scope),
+        status: entry.status,
+        reasonCode: entry.reasonCode,
+        findingCount: entry.findingCount,
+        error: entry.error ? { name: entry.error.name, message: safeText(entry.error.message) } : null,
+      })),
+    findings: analysis.findings.map((finding) => ({
+      id: finding.id,
+      detectorId: finding.detectorId,
+      gameId: finding.gameId,
+      ...(legacy ? {} : {
+        kind: finding.kind,
+        scope: publicScope(finding.scope),
+        evidenceStatus: finding.evidenceStatus,
+        automaticRepairEligible: false,
+        ...(finding.kind === 'execution-incident' ? { reasonCode: finding.reasonCode, resolution: finding.resolution } : {}),
+        ...(finding.kind === 'contract-violation' ? { invariant: finding.invariant } : {}),
+      }),
+      severity: finding.severity,
+      confidence: legacy ? finding.confidence : null,
+      ...(legacy ? { confidenceStatus: 'legacy-uncalibrated' } : { confidenceStatus: 'uncalibrated' }),
+      status: finding.status,
+      summary: safeText(finding.summary),
+      rootCause: safeText(finding.rootCause),
+      remediation: safeText(finding.remediation),
+      evidenceRange: finding.evidenceRange,
+    })),
+    observationCount: Array.isArray(analysis.observations) ? analysis.observations.length : 0,
+    perGame: analysis.perGame,
+  };
+}
+
+function publicScope(scope) {
+  if (!scope || typeof scope !== 'object') return null;
+  return {
+    runId: scope.runId ?? null,
+    gameId: scope.gameId ?? null,
+    versionedGameId: scope.versionedGameId ?? null,
+    attemptId: scope.attemptId ?? null,
+    episodeId: scope.episodeId ?? null,
+    ...(scope.global === true ? { global: true } : {}),
+  };
 }
 
 function normalizeEvent(value, file, line) {
@@ -515,8 +848,47 @@ function compareEvents(a, b) {
 
 function finalizeFinding(detectorId, context, finding) {
   const events = (finding.events || []).filter(Boolean);
-  const gameId = finding.gameId ?? context?.gameId ?? null;
-  const evidenceRange = events.length ? {
+  const scope = finding.scope ?? context?.scope ?? GLOBAL_SCOPE;
+  const gameId = finding.gameId ?? scope.gameId ?? context?.gameId ?? null;
+  const evidenceRange = evidenceRangeFor(events);
+  const kind = FINDING_KINDS.includes(finding.kind) ? finding.kind : 'behavioral-signal';
+  const identity = JSON.stringify({ detectorId, kind, scope, evidenceRange, summary: finding.summary });
+  const contract = kind === 'contract-violation'
+    ? { invariant: safeText(finding.invariant), expected: sanitizeDetails(finding.expected), observed: sanitizeDetails(finding.observed) }
+    : {};
+  return {
+    id: `${detectorId}:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 16)}`,
+    detectorId,
+    gameId,
+    kind,
+    scope: { ...scope },
+    evidenceStatus: 'sufficient',
+    automaticRepairEligible: false,
+    severity: finding.severity || 'medium',
+    confidence: null,
+    confidenceStatus: 'uncalibrated',
+    status: finding.status === 'triaged' ? 'triaged' : 'open',
+    summary: safeText(finding.summary),
+    rootCause: safeText(finding.rootCause),
+    remediation: safeText(finding.remediation),
+    ...contract,
+    ...(kind === 'execution-incident'
+      ? { reasonCode: safeText(finding.reasonCode || 'execution-incident'), resolution: finding.resolution || 'unknown' }
+      : {}),
+    evidenceRange,
+    evidenceRefs: evidenceRefsFor(events),
+    details: sanitizeDetails(finding.details),
+  };
+}
+
+function finalizeObservation(detectorId, context, observation) {
+  const finalized = finalizeFinding(detectorId, context, observation);
+  return { ...finalized, id: finalized.id.replace(/^[^:]+:/, `${detectorId}:observation-`), status: 'explained' };
+}
+
+function evidenceRangeFor(events) {
+  if (!events.length) return null;
+  return {
     firstSequence: Math.min(...events.map((event) => number(event.sequence))),
     lastSequence: Math.max(...events.map((event) => number(event.sequence))),
     firstTurn: Math.min(...events.map((event) => number(event.turn))),
@@ -524,26 +896,23 @@ function finalizeFinding(detectorId, context, finding) {
     eventCount: events.length,
     frameHashes: unique(events.map((event) => event.frameHash).filter(Boolean)).slice(0, 12),
     actions: events.map((event) => event.action).filter(Boolean).slice(0, 24),
-  } : null;
-  const identity = JSON.stringify({ detectorId, gameId, evidenceRange, summary: finding.summary });
-  return {
-    id: `${detectorId}:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 16)}`,
-    detectorId,
-    gameId,
-    severity: finding.severity || 'medium',
-    confidence: clamp(number(finding.confidence) || 0.75, 0, 1),
-    status: finding.status === 'triaged' ? 'triaged' : 'open',
-    summary: safeText(finding.summary),
-    rootCause: safeText(finding.rootCause),
-    remediation: safeText(finding.remediation),
-    evidenceRange,
-    details: sanitizeDetails(finding.details),
   };
+}
+
+function evidenceRefsFor(events) {
+  return events.slice(0, 24).map((event) => ({
+    sourceFile: event.sourceFile ?? null,
+    sourceLine: Number.isSafeInteger(event.sourceLine) ? event.sourceLine : null,
+    sequence: Number.isFinite(event.sequence) ? event.sequence : null,
+  }));
 }
 
 function summarizeContext(context, findings) {
   const gameFindings = findings.filter((finding) => finding.gameId === context.gameId);
   return {
+    scope: context.scope,
+    identityConflicts: context.identityConflicts,
+    segmentCount: context.segments.length,
     eventCount: context.events.length,
     actionCount: context.transitions.length,
     resetCount: context.resets.length,
@@ -552,6 +921,7 @@ function summarizeContext(context, findings) {
     won: context.won,
     findingCount: gameFindings.length,
     openFindingCount: gameFindings.filter((finding) => finding.status === 'open').length,
+    kinds: countBy(gameFindings, (finding) => finding.kind),
     severities: countBy(gameFindings, (finding) => finding.severity),
     detectorIds: unique(gameFindings.map((finding) => finding.detectorId)).sort(),
   };
@@ -581,7 +951,6 @@ function walkFiles(root) {
 
 function unique(values) { return [...new Set(values)]; }
 function number(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
-function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
 function severityRank(value) { return ({ critical: 4, high: 3, medium: 2, low: 1 }[value] || 0); }
 function countBy(values, key) { return values.reduce((out, value) => { const name = key(value); out[name] = (out[name] || 0) + 1; return out; }, {}); }
 function safeText(value) {

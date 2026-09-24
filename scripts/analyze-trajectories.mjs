@@ -56,8 +56,11 @@ console.log(JSON.stringify({
   clean: analysis.clean,
   authoritative,
   expectedGames: expectedGames.length,
-  detectorsExecuted: analysis.acceptance.detectorCountExecuted,
+  analysisSchema: analysis.schema,
   detectorsExpected: analysis.acceptance.detectorCountExpected,
+  detectorStatusCounts: analysis.acceptance.statusCounts,
+  applicableCoverageComplete: analysis.acceptance.applicableCoverageComplete,
+  findingKinds: analysis.acceptance.findingKindCounts,
   findings: analysis.acceptance.findingCount,
   openFindings: analysis.acceptance.openFindingCount,
   trajectoryFiles: loaded.ingestion.fileCount,
@@ -68,7 +71,8 @@ console.log(JSON.stringify({
   redactedReport: path.relative(process.cwd(), publicOut),
 }));
 
-if (args.requireClean && !analysis.clean) process.exit(2);
+// Exit 1 means detection itself failed; 2 means review is required.
+if (args.requireClean && !analysis.clean) process.exit(analysis.acceptance.detectorErrorCount > 0 ? 1 : 2);
 
 function parseArgs(values) {
   const result = {};

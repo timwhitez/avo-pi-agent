@@ -5,6 +5,8 @@ import {
 } from './evidence-loader.mjs';
 
 export const DETECTOR_IDS = base.DETECTOR_IDS;
+export const ANALYSIS_SCHEMA = base.ANALYSIS_SCHEMA;
+export const verifyAnalysisCoverage = base.verifyAnalysisCoverage;
 export { loadMemoryByGame, loadTrajectoryEvents };
 
 export function redactedAnalysis(analysis) {
@@ -125,6 +127,19 @@ export function analyzeTrajectory(args) {
       { expectedGames: games, observedGames },
     ));
   }
+  for (const [gameId, summary] of Object.entries(analysis.perGame || {})) {
+    const conflicts = summary?.identityConflicts || {};
+    if ((conflicts.runIds || []).length || (conflicts.versionedGameIds || []).length) {
+      findings.push(integrityFinding(
+        'game-identity-conflict',
+        gameId,
+        `Trajectory events for ${gameId} carry conflicting run or versioned-game identities.`,
+        'One short game identifier maps to several run/version identities, so scoped windows cannot be merged.',
+        'Preserve both scopes and repair the recorder or corpus selection before any clean claim.',
+        { runIds: conflicts.runIds || [], versionedGameIds: conflicts.versionedGameIds || [] },
+      ));
+    }
+  }
   if (unknownOperationResponses > 0) {
     findings.push(integrityFinding(
       'unknown-arc-operation',
@@ -157,13 +172,22 @@ function integrityFinding(code, gameId, summary, rootCause, remediation, details
     id: `trajectory-integrity:${code}:${gameId || 'global'}`,
     detectorId: 'trajectory-integrity',
     gameId,
+    kind: 'contract-violation',
+    scope: { runId: null, gameId: gameId || null, versionedGameId: null, attemptId: null, episodeId: null },
+    evidenceStatus: 'sufficient',
+    automaticRepairEligible: false,
+    invariant: code,
+    expected: null,
+    observed: details,
     severity: 'critical',
-    confidence: 1,
+    confidence: null,
+    confidenceStatus: 'structural',
     status: 'open',
     summary,
     rootCause,
     remediation,
     evidenceRange: null,
+    evidenceRefs: [],
     details,
   };
 }

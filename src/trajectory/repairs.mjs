@@ -10,11 +10,19 @@ const SAFE_MEMORY_GAME_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 
 const INFRASTRUCTURE_DETECTORS = new Set(['provider-failure', 'trajectory-integrity']);
 
+/**
+ * Builds the review record for one analysed round.
+ *
+ * Automatically detected findings never obtain memory write permission: the
+ * plan lists finding IDs, kinds and scopes for review but carries no game
+ * directives, so applyRepairPlan rejects it. This holds for current and
+ * legacy analyses alike and cannot be bypassed by a finding's own flags.
+ */
 export function buildRepairPlan(analysis, round) {
-  const open = (analysis.findings || []).filter((finding) => finding.status === 'open');
+  const findings = Array.isArray(analysis?.findings) ? analysis.findings : [];
   const byGame = new Map();
   const infrastructure = [];
-  for (const finding of open) {
+  for (const finding of findings) {
     if (INFRASTRUCTURE_DETECTORS.has(finding.detectorId) || !finding.gameId) {
       infrastructure.push(projectFinding(finding));
       continue;
@@ -22,22 +30,26 @@ export function buildRepairPlan(analysis, round) {
     if (!byGame.has(finding.gameId)) byGame.set(finding.gameId, []);
     byGame.get(finding.gameId).push(finding);
   }
-  const games = [...byGame.entries()].map(([gameId, findings]) => ({
+  const games = [...byGame.entries()].map(([gameId, gameFindings]) => ({
     gameId,
-    directives: dedupe(findings.map((finding) => directiveFor(finding, round))),
-    findingIds: findings.map((finding) => finding.id),
-    detectorIds: dedupe(findings.map((finding) => finding.detectorId)),
+    findingIds: gameFindings.map((finding) => finding.id),
+    detectorIds: dedupe(gameFindings.map((finding) => finding.detectorId)),
+    kinds: dedupe(gameFindings.map((finding) => findingKind(finding))),
   }));
   return {
-    schemaVersion: 1,
-    planId: `repair_${crypto.createHash('sha256').update(JSON.stringify({ round, ids: open.map((finding) => finding.id).sort() })).digest('hex').slice(0, 16)}`,
+    schemaVersion: 2,
+    planId: `repair_${crypto.createHash('sha256').update(JSON.stringify({ round, ids: findings.map((finding) => finding.id).sort() })).digest('hex').slice(0, 16)}`,
     createdAt: new Date().toISOString(),
-    sourceRunId: analysis.runId,
+    sourceRunId: analysis?.runId ?? null,
     round,
-    cleanBeforeRepair: analysis.clean,
+    analysisSchema: typeof analysis?.schema === 'string' ? analysis.schema : 'legacy-v1',
+    cleanBeforeRepair: analysis?.clean === true,
+    automaticWriteEligible: false,
     games,
     infrastructure,
-    agentRepairableFindingCount: games.reduce((sum, game) => sum + game.findingIds.length, 0),
+    reviewFindingCount: findings.length,
+    findingKindCounts: countKinds(findings),
+    agentRepairableFindingCount: 0,
     infrastructureFindingCount: infrastructure.length,
   };
 }
@@ -159,41 +171,33 @@ export function redactedRepairPlan(plan) {
     createdAt: plan.createdAt,
     sourceRunId: plan.sourceRunId,
     round: plan.round,
+    analysisSchema: plan.analysisSchema ?? null,
     cleanBeforeRepair: plan.cleanBeforeRepair,
+    automaticWriteEligible: false,
+    reviewFindingCount: plan.reviewFindingCount ?? null,
+    findingKindCounts: plan.findingKindCounts ?? null,
     agentRepairableFindingCount: plan.agentRepairableFindingCount,
     infrastructureFindingCount: plan.infrastructureFindingCount,
     games: plan.games.map((game) => ({
       gameId: game.gameId,
       findingIds: game.findingIds,
       detectorIds: game.detectorIds,
-      directives: game.directives.map(({ detectorId, instruction }) => ({ detectorId, instruction })),
+      kinds: game.kinds ?? null,
     })),
     infrastructure: plan.infrastructure,
   };
 }
 
-function directiveFor(finding, round) {
-  const instruction = ({
-    'repeated-state-loop': 'Before another action, invalidate the active branch, inspect currently untried legal actions, and select a materially different experiment. Do not repeat a state cluster unless new evidence changes the hypothesis.',
-    'periodic-action-cycle': 'Treat the recorded action pattern as a failed opening for this state cluster. Prohibit the cycle, use an untried legal action or a planned reset, and record exact state deltas.',
-    'ineffective-action': 'Mark the cited action/state combinations ineffective. Change action family or complex-action coordinates instead of issuing another equivalent action.',
-    'invalid-action': 'Re-read the current available-actions list immediately before acting. Validate action payload and coordinates against the current frame; never reuse a stale action object.',
-    'premature-finish': 'A natural model stop is not completion. finish is unavailable while the episode is ACTIVE with action budget remaining; continue with useful valid experiments until WIN, GAME_OVER, ERROR, or budget exhaustion.',
-    'reset-abuse': 'A reset now requires a falsifiable reset hypothesis and a new post-reset opening. Never repeat an identical failed opening without additional evidence.',
-    'low-information-exploration': 'Use a coverage-oriented opening: safely probe each uncharacterized legal action, compare exact frame hashes and level deltas, then exploit learned semantics.',
-    'contradictory-memory': 'Demote or remove stale action semantics and cite the newer contradictory transitions. Re-test only under controlled state conditions.',
-    'stale-hypothesis': 'Resolve pending proposals before opening more. Bind post-proposal transition evidence and either evaluate or explicitly abandon the hypothesis.',
-    'hallucinated-progress': 'Delete unsupported win/level claims. Derive progress only from exact FrameData and official scorecard fields.',
-    'missing-supervisor-intervention': 'At the first repeated-state or periodic-action trigger, invoke the supervisor, cite the triggering evidence, and choose among multiple materially different alternatives.',
-    'excessive-actions-without-progress': 'Enforce a no-progress checkpoint. Stop the current hypothesis family, review failures, and switch to a distinct strategy before spending more environment actions.',
-  })[finding.detectorId] || finding.remediation || 'Review the cited evidence and choose a materially different, falsifiable experiment.';
-  return {
-    detectorId: finding.detectorId,
-    findingId: finding.id,
-    round,
-    instruction,
-    failedPattern: `${finding.summary}; evidence=${JSON.stringify(finding.evidenceRange || {})}`.slice(0, 1000),
-  };
+function findingKind(finding) {
+  return ['contract-violation', 'behavioral-signal', 'execution-incident'].includes(finding?.kind)
+    ? finding.kind
+    : 'unclassified-legacy';
+}
+
+function countKinds(findings) {
+  const counts = {};
+  for (const finding of findings) counts[findingKind(finding)] = (counts[findingKind(finding)] || 0) + 1;
+  return counts;
 }
 
 function projectFinding(finding) {
@@ -201,6 +205,7 @@ function projectFinding(finding) {
     id: finding.id,
     detectorId: finding.detectorId,
     gameId: finding.gameId,
+    kind: findingKind(finding),
     severity: finding.severity,
     summary: finding.summary,
     remediation: finding.remediation,

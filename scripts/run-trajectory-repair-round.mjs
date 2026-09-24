@@ -10,9 +10,7 @@ import {
   redactedAnalysis,
 } from '../src/trajectory/analyzer-v2.mjs';
 import {
-  applyRepairPlan,
   buildRepairPlan,
-  summarizeRepairOutcomes,
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
 import { extractPublishedOfficialScore } from '../src/benchmark/scorecard-evidence.mjs';
@@ -53,20 +51,14 @@ const analysis = loaded.files.length
 const plan = buildRepairPlan(analysis, round);
 const benchmarkComplete = child.code === 0 && benchmark?.status !== 'failed';
 const infrastructureFailure = !benchmarkComplete || plan.infrastructureFindingCount > 0;
-const repairOutcomes = !analysis.clean && !infrastructureFailure
-  ? applyRepairPlan(memoryDir, plan)
-  : [];
-const repairSummary = summarizeRepairOutcomes(repairOutcomes);
-const appliedCount = repairSummary.changedCommitted;
-const shouldContinue = !analysis.clean && !infrastructureFailure && plan.agentRepairableFindingCount > 0
-  && !repairSummary.stop && appliedCount > 0;
+// Automatic findings are reviewed, never written to memory; this runner does
+// not request another round on its own.
+const shouldContinue = false;
 const status = analysis.clean
   ? 'complete'
   : infrastructureFailure
     ? 'failed'
-    : shouldContinue
-      ? 'needs-repair'
-      : 'blocked';
+    : 'review-required';
 const officialScore = extractOfficialScore(benchmark);
 const record = {
   schemaVersion: 1,
@@ -90,13 +82,14 @@ const record = {
   parseErrorCount: loaded.parseErrors.length,
   detectorsExecuted: analysis.acceptance.detectorCountExecuted,
   detectorsExpected: analysis.acceptance.detectorCountExpected,
+  detectorStatusCounts: analysis.acceptance.statusCounts ?? null,
   findingCount: analysis.acceptance.findingCount,
   openFindingCount: analysis.acceptance.openFindingCount,
   infrastructureFindingCount: plan.infrastructureFindingCount,
   agentRepairableFindingCount: plan.agentRepairableFindingCount,
-  repairDirectiveCount: plan.games.reduce((sum, game) => sum + game.directives.length, 0),
-  repairAppliedCount: appliedCount,
-  repairOutcomes,
+  repairDirectiveCount: 0,
+  repairAppliedCount: 0,
+  memoryWrites: 0,
   metrics: extractMetrics(benchmark, analysis),
 };
 const publicRecord = {
@@ -119,6 +112,7 @@ const publicRecord = {
   parseErrorCount: record.parseErrorCount,
   detectorsExecuted: record.detectorsExecuted,
   detectorsExpected: record.detectorsExpected,
+  detectorStatusCounts: record.detectorStatusCounts,
   findingCount: record.findingCount,
   openFindingCount: record.openFindingCount,
   infrastructureFindingCount: record.infrastructureFindingCount,
@@ -150,6 +144,7 @@ console.log(JSON.stringify({
   officialScore, openFindings: analysis.acceptance.openFindingCount,
   publicFile: path.relative(process.cwd(), publicFile),
 }));
+process.exitCode = status === 'complete' ? 0 : status === 'review-required' ? 2 : 1;
 
 async function runBenchmark({ roundId, traceDir, memoryDir, workspaceDir, processLog }) {
   const log = fs.createWriteStream(processLog, { flags: 'a', mode: 0o600 });
