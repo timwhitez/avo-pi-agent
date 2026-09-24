@@ -1,6 +1,12 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
+import { buildExecutionTerminal } from '../trajectory/audit-events.mjs';
+import { wasAtomicWriteCommitted, writeJsonAtomic, REPORT_LIMITS } from './report-safe-files.mjs';
+import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
+import { canonicalJson } from '../local/canonical-json.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { managedProcessGroup } from '../local/process-group.mjs';
 import { acquireAuthorityDirectory } from '../local/authority-directory.mjs';
@@ -21,8 +27,11 @@ export async function runProcess(command, args, {
   onStdout = null,
   onStderr = null,
   onMessage = null,
+  cancellation = null,
 } = {}) {
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
+  // Policies are validated before anything is spawned.
+  const control = createCancellationControl(cancellation, { timeoutMs });
   const stdoutLimit = normalizeOptionalByteLimit(maxStdoutBytes, 'maxStdoutBytes');
   const stderrLimit = normalizeOptionalByteLimit(maxStderrBytes, 'maxStderrBytes');
   if ((stdoutFile || stderrFile) && (typeof logRoot !== 'string' || !logRoot.trim())) {
@@ -36,16 +45,18 @@ export async function runProcess(command, args, {
     stderrSink = stderrFile ? createSink(stderrFile, { root: logRoot, append: appendLogs }) : null;
     const ownedGroup = managedProcessGroup();
     const childEnv = ownedGroup ? { ...env, AVO_PROCESS_GROUP: String(ownedGroup), AVO_WORKSPACE_GUARDIAN: process.env.AVO_WORKSPACE_GUARDIAN } : env;
+    const ipc = Boolean(onMessage || cancellation);
     child = spawn(command, args, {
       cwd,
-      env: onMessage ? { ...childEnv, AVO_PROGRESS_CHANNEL: 'ipc' } : childEnv,
-      stdio: onMessage ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+      env: ipc ? { ...childEnv, AVO_PROGRESS_CHANNEL: 'ipc' } : childEnv,
+      stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32' && !ownedGroup,
     });
   } catch (error) {
     await Promise.all([closeSink(stdoutSink), closeSink(stderrSink)]);
     throw error;
   }
+
 
   let stdoutTail = '';
   let stderrTail = '';
@@ -70,7 +81,12 @@ export async function runProcess(command, args, {
     terminateProcessTree(child, 'SIGKILL');
     closeChildOutputStreams(child);
   };
-  if (onMessage) child.on('message', (message) => invokeCallback(onMessage, message, 'activity', failStream));
+  if (onMessage || control) {
+    child.on('message', (message) => {
+      control?.observeActivity(message);
+      if (onMessage) invokeCallback(onMessage, message, 'activity', failStream);
+    });
+  }
 
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
@@ -96,36 +112,246 @@ export async function runProcess(command, args, {
   });
   child.once('error', (error) => { spawnError = error; });
 
-  const timeout = timeoutMs > 0 ? setTimeout(() => {
-    timedOut = true;
-    terminateProcessTree(child, 'SIGTERM');
+  // Signals are sent only while the owned child has not been observed to
+  // close: after close its process-group ID may belong to someone else.
+  let childClosed = false;
+  const terminate = (signal) => {
+    if (!childClosed) terminateProcessTree(child, signal);
+  };
+  const startTermination = () => {
+    terminate('SIGTERM');
+    if (terminationTimer) return;
     terminationTimer = setTimeout(() => {
-      terminateProcessTree(child, 'SIGKILL');
+      terminate('SIGKILL');
       closeChildOutputStreams(child);
     }, 2_000);
     terminationTimer.unref?.();
+  };
+  const timeout = timeoutMs > 0 && !control ? setTimeout(() => {
+    timedOut = true;
+    startTermination();
   }, timeoutMs) : null;
   timeout?.unref?.();
+  control?.start({ onCancel: () => { timedOut = control.decision?.primaryReason === 'job-deadline' || timedOut; startTermination(); } });
 
   const result = await new Promise((resolve) => {
-    child.once('close', (status, signal) => resolve({ status, signal }));
+    child.once('close', (status, signal) => {
+      childClosed = true;
+      resolve({ status, signal });
+    });
   });
+  control?.stop();
 
   if (timeout) clearTimeout(timeout);
   if (terminationTimer) clearTimeout(terminationTimer);
-  await Promise.all([closeSink(stdoutSink), closeSink(stderrSink)]);
+  const drainTimedOut = await closeSinksWithin([stdoutSink, stderrSink], control?.drainTimeoutMs ?? null);
+  const terminal = control
+    ? await control.finalize({ status: result.status, signal: result.signal, drainTimedOut, streamFailed: Boolean(spawnError || sinkError || streamError) })
+    : null;
 
   if (spawnError) throw spawnError;
   if (sinkError) throw new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError });
   if (streamError) throw streamError;
   return {
     ...result,
+    ...(terminal ? { terminal } : {}),
     timedOut,
     stdout: stdoutTail,
     stderr: stderrTail,
     stdoutFile: stdoutFile ? path.resolve(stdoutFile) : null,
     stderrFile: stderrFile ? path.resolve(stderrFile) : null,
   };
+}
+
+async function closeSinksWithin(sinks, drainTimeoutMs) {
+  const closing = Promise.all(sinks.map(closeSink));
+  if (!drainTimeoutMs) {
+    await closing;
+    return false;
+  }
+  let timer;
+  const timedOut = await Promise.race([
+    closing.then(() => false),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(true), drainTimeoutMs); timer.unref?.(); }),
+  ]);
+  clearTimeout(timer);
+  if (timedOut) for (const sink of sinks) sink?.destroy?.();
+  return timedOut;
+}
+
+const SUPPORTED_POLICIES = new Set(['job-deadline', 'environment-progress-idle', 'operator-cancel']);
+
+/**
+ * One cancellation decision per execution (#346). Policies are declared up
+ * front with their activity source and monotonic clock domain; the first
+ * accepted decision fixes the cancellation ID and primary reason, later
+ * reasons are only recorded. Durations use the monotonic clock only.
+ * transport-idle is refused: a parent cannot observe its child's network
+ * activity, and job or progress time must never stand in for it.
+ */
+function createCancellationControl(config, { timeoutMs }) {
+  if (!config) return null;
+  const clock = config.clock ?? {
+    monotonicMs: () => performance.now(),
+    wallIso: () => new Date().toISOString(),
+    domain: `process:${process.pid}:${Math.round(performance.timeOrigin)}`,
+  };
+  const policies = [];
+  for (const policy of Array.isArray(config.policies) ? config.policies : []) {
+    if (!SUPPORTED_POLICIES.has(policy?.kind)) {
+      throw new Error(`cancellation policy ${String(policy?.kind)} is not observable by this runner`);
+    }
+    if (policy.kind !== 'operator-cancel' && (!Number.isSafeInteger(policy.thresholdMs) || policy.thresholdMs < 1)) {
+      throw new Error(`cancellation policy ${policy.kind} requires a positive thresholdMs`);
+    }
+    if (policy.kind === 'environment-progress-idle' && typeof policy.isActivity !== 'function') {
+      throw new Error('environment-progress-idle requires an explicit committed-progress activity predicate');
+    }
+    policies.push({ ...policy, clockDomain: clock.domain });
+  }
+  if (timeoutMs > 0 && !policies.some((policy) => policy.kind === 'job-deadline')) {
+    policies.push({ kind: 'job-deadline', thresholdMs: timeoutMs, activitySource: 'none', clockDomain: clock.domain, configuredSource: 'timeoutMs' });
+  }
+  const executionId = config.executionId;
+  if (typeof executionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(executionId)) {
+    throw new Error('cancellation requires a safe executionId');
+  }
+  const startedMonotonic = clock.monotonicMs();
+  let lastProgressMonotonic = startedMonotonic;
+  let state = 'RUNNING';
+  let decision = null;
+  let interval = null;
+  let onCancel = null;
+  const additionalReasons = new Set();
+  const request = (reason, observed = {}) => {
+    if (state !== 'RUNNING') {
+      if (decision && reason !== decision.primaryReason) additionalReasons.add(reason);
+      return;
+    }
+    state = 'CANCEL_REQUESTED';
+    const policy = policies.find((item) => item.kind === reason) ?? null;
+    decision = {
+      id: `cancel-${crypto.randomBytes(8).toString('hex')}`,
+      primaryReason: reason,
+      additionalReasons: [],
+      requestedAt: clock.wallIso(),
+      requestedMonotonic: clock.monotonicMs(),
+      clockDomain: clock.domain,
+      deadline: policy ? { kind: policy.kind, thresholdMs: policy.thresholdMs ?? null } : null,
+      observed,
+    };
+    // The request is recorded before draining, so a lost final record still
+    // leaves evidence that only a cancellation request exists.
+    if (config.cancelRequestFile) {
+      try {
+        writeJsonAtomic(config.cancelRequestFile, { schema: 'avo.execution-cancel-request.v1', executionId, cancellation: decision },
+          { root: config.terminalRoot ?? path.dirname(config.cancelRequestFile), exclusive: true, maxBytes: 64 * 1024 });
+      } catch (error) {
+        decision.requestRecordError = error?.code || 'write-failed';
+      }
+    }
+    state = 'DRAINING';
+    onCancel?.();
+  };
+  const check = () => {
+    const now = clock.monotonicMs();
+    for (const policy of policies) {
+      if (policy.kind === 'job-deadline' && now - startedMonotonic >= policy.thresholdMs) {
+        request('job-deadline', { elapsedMs: Math.round(now - startedMonotonic) });
+      } else if (policy.kind === 'environment-progress-idle' && now - lastProgressMonotonic >= policy.thresholdMs) {
+        request('environment-progress-idle', { idleMs: Math.round(now - lastProgressMonotonic) });
+      }
+    }
+  };
+  return {
+    drainTimeoutMs: Number.isSafeInteger(config.drainTimeoutMs) && config.drainTimeoutMs > 0 ? config.drainTimeoutMs : null,
+    get decision() { return decision; },
+    start({ onCancel: callback }) {
+      onCancel = callback;
+      interval = setInterval(check, Math.max(5, Number(config.checkIntervalMs) || 1_000));
+      interval.unref?.();
+      if (config.signal) {
+        if (config.signal.aborted) request('operator-cancel', { source: 'abort-signal' });
+        else config.signal.addEventListener('abort', () => request('operator-cancel', { source: 'abort-signal' }), { once: true });
+      }
+    },
+    requestCancel: request,
+    observeActivity(message) {
+      for (const policy of policies) {
+        if (policy.kind === 'environment-progress-idle' && policy.isActivity(message)) lastProgressMonotonic = clock.monotonicMs();
+      }
+    },
+    stop() {
+      if (interval) clearInterval(interval);
+      interval = null;
+      if (state === 'RUNNING') state = 'DRAINING';
+    },
+    async finalize({ status, signal, drainTimedOut, streamFailed }) {
+      if (decision) decision.additionalReasons = [...additionalReasons].sort();
+      const exitCode = Number.isSafeInteger(status) ? status : null;
+      let executionOutcome;
+      let reasonCode = null;
+      if (exitCode === 0 && !signal && !streamFailed) executionOutcome = 'completed';
+      else if (decision) executionOutcome = 'censored';
+      else if (exitCode !== null && exitCode !== 0) executionOutcome = 'error';
+      else {
+        executionOutcome = 'unknown';
+        reasonCode = 'EXIT_CAUSE_UNKNOWN';
+      }
+      const gaps = [];
+      let accounting = null;
+      try {
+        accounting = config.reconcile ? await config.reconcile() : null;
+      } catch {
+        gaps.push('ACCOUNTING_RECONCILE_FAILED');
+      }
+      if (!accounting) gaps.push('ACCOUNTING_UNAVAILABLE');
+      else if (accounting.coverage !== 'complete') gaps.push('ACCOUNTING_PARTIAL');
+      if (drainTimedOut) gaps.push('DRAIN_TIMEOUT');
+      if (decision?.requestRecordError) gaps.push('CANCEL_REQUEST_RECORD_FAILED');
+      const unfinished = config.unfinished ? config.unfinished() : null;
+      if (!config.usage) gaps.push('USAGE_UNAVAILABLE');
+      const receipt = buildExecutionTerminal({
+        executionId,
+        scope: config.scope ?? {},
+        policies,
+        cancellation: decision,
+        process: { exitCode, signal: signal ?? null, closedAt: clock.wallIso(), closeObserved: true },
+        drain: { complete: !drainTimedOut, timeoutObserved: drainTimedOut },
+        executionOutcome,
+        reasonCode,
+        accounting,
+        usage: config.usage ? config.usage() : null,
+        unfinished,
+        auditGaps: gaps,
+      });
+      state = 'FINALIZED';
+      return { receipt, commit: commitTerminal(config, receipt) };
+    },
+  };
+}
+
+// One execution maps to one final file: an identical existing record is
+// returned unchanged, a different one is a conflict and is never overwritten,
+// and a post-rename confirmation failure is reported as committed.
+function commitTerminal(config, receipt) {
+  if (!config.terminalFile) return { state: 'not-configured' };
+  const root = config.terminalRoot ?? path.dirname(config.terminalFile);
+  const comparable = (value) => canonicalJson({ ...value, process: { ...value.process, closedAt: null } });
+  try {
+    writeJsonAtomic(config.terminalFile, receipt, { root, exclusive: true, maxBytes: REPORT_LIMITS.maxReportBytes });
+    return { state: 'committed' };
+  } catch (error) {
+    if (wasAtomicWriteCommitted(error)) return { state: 'committed-unconfirmed' };
+    if (!fs.existsSync(config.terminalFile)) return { state: 'not-committed', error: error?.code || 'write-failed' };
+    try {
+      const existing = readJsonFileEvidence(config.terminalFile, { root, purpose: 'execution terminal record' }).value;
+      if (existing?.executionId === receipt.executionId && comparable(existing) === comparable(receipt)) {
+        return { state: 'already-committed' };
+      }
+    } catch {}
+    return { state: 'conflict' };
+  }
 }
 
 function createSink(file, { root, append = false }) {

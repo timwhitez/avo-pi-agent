@@ -13,6 +13,7 @@ import {
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
 import { runProcess, openLogFile } from '../src/benchmark/process-runner.mjs';
+import { reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
@@ -268,6 +269,22 @@ try {
       },
     }),
     timeoutMs,
+    // #346: one cancellation decision and one exclusive final record per
+    // execution. The job deadline is the existing timeoutMs; a progress-idle
+    // policy exists only when explicitly configured. Final accounting is read
+    // from the committed durable ledger after the child is drained.
+    cancellation: {
+      executionId: `exec-${invocationId}`,
+      scope: { runId },
+      terminalRoot: privateDir,
+      terminalFile: path.join(privateDir, `execution-terminal.${invocationId}.json`),
+      cancelRequestFile: path.join(privateDir, `execution-cancel-request.${invocationId}.json`),
+      policies: progressIdlePolicies(),
+      reconcile: () => reconcileLedgerAccounting({
+        memoryDir: runState.memoryDir,
+        gameIds: games.map((game) => String(game.versionedGameId).split('-')[0]),
+      }),
+    },
     appendLogs: resuming,
     logRoot: privateDir,
     stdoutFile,
@@ -484,6 +501,29 @@ try {
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
   process.exitCode = 1;
+}
+
+function progressIdlePolicies() {
+  const raw = process.env.AVO_PROGRESS_IDLE_MS;
+  if (raw === undefined || raw === '') return [];
+  const thresholdMs = Number(raw);
+  if (!Number.isSafeInteger(thresholdMs) || thresholdMs < 60_000) {
+    throw new Error('AVO_PROGRESS_IDLE_MS must be an integer of at least 60000');
+  }
+  const lastActions = new Map();
+  return [{
+    kind: 'environment-progress-idle',
+    thresholdMs,
+    activitySource: 'game.progress committed action count increase',
+    configuredSource: 'AVO_PROGRESS_IDLE_MS',
+    isActivity(message) {
+      if (message?.type !== 'game.progress' || !Number.isSafeInteger(message.actions)) return false;
+      const key = String(message.gameId);
+      const increased = message.actions > (lastActions.get(key) ?? -1);
+      lastActions.set(key, Math.max(message.actions, lastActions.get(key) ?? -1));
+      return increased;
+    },
+  }];
 }
 
 function benchmarkTimeout() {

@@ -134,6 +134,7 @@ function normalizeRun(run, sourceRoot, recordSource) {
   if (receipts.availability === 'missing') gaps.push('RECEIPTS_MISSING');
   const terminals = executionTerminals(receipts.value, gaps);
   const receiptSummary = summarizeReceipts(receipts.value, adapted.games, gaps);
+  const terminalSummary = summarizeTerminals(terminals, adapted.games, gaps);
   const games = adapted.games.map((game) => normalizeGame(game, attemptIndex.get(game.versionedGameId) ?? [], finishedByScope.get(game.versionedGameId) ?? [], terminals, gaps));
   for (const [versionedGameId] of attemptIndex) {
     if (!adapted.games.some((game) => game.versionedGameId === versionedGameId)) gaps.push('ATTEMPT_WITHOUT_GAME');
@@ -156,6 +157,7 @@ function normalizeRun(run, sourceRoot, recordSource) {
     metrics,
     score,
     receipts: receiptSummary,
+    executionTerminals: terminalSummary,
     games,
     audit: { ready: uniqueGaps.length === 0, gaps: uniqueGaps },
   };
@@ -246,6 +248,7 @@ function adaptReport(report, gaps) {
         metrics: game.mechanismMetrics ?? null,
         legacyReportedFields: game.mechanismMetrics ? null : legacyFields(rawGames[index]),
         executions: game.executions,
+        reportedActions: Number.isSafeInteger(game.actions) ? game.actions : null,
         terminal: { won: game.won, error: game.error, terminationReason: game.terminationReason, state: game.state },
         // winLevels is an ambiguous legacy field: kept raw, never a denominator.
         levels: {
@@ -598,6 +601,44 @@ function summarizeReceipts(receipts, games, gaps) {
   };
 }
 
+// Execution terminal records (#346): projected without private fields, and
+// their ledger accounting is cross-checked against the report's per-game
+// action counts. A record whose own audit gaps are non-empty keeps the run
+// from being audit-ready.
+function summarizeTerminals(terminals, games, gaps) {
+  if (!terminals.length) return [];
+  const ids = new Map();
+  for (const record of terminals) {
+    const prior = ids.get(record.executionId);
+    if (prior && canonicalJson(prior) !== canonicalJson(record)) gaps.push('TERMINAL_RECORD_CONFLICT');
+    ids.set(record.executionId, record);
+  }
+  const out = [];
+  for (const record of ids.values()) {
+    if (Array.isArray(record.auditGaps) && record.auditGaps.length) gaps.push('TERMINAL_RECORD_GAPS');
+    const discrepancies = [];
+    for (const accounted of Array.isArray(record.accounting?.games) ? record.accounting.games : []) {
+      const game = games.find((item) => item.gameId === String(accounted.gameId).toLowerCase());
+      const reported = game?.reportedActions;
+      if (Number.isSafeInteger(reported) && Number.isSafeInteger(accounted.environmentActions) && reported !== accounted.environmentActions) {
+        discrepancies.push({ gameId: accounted.gameId, reportedActions: reported, ledgerEnvironmentActions: accounted.environmentActions });
+      }
+    }
+    if (discrepancies.length) gaps.push('TERMINAL_ACCOUNTING_MISMATCH');
+    out.push({
+      executionId: record.executionId ?? null,
+      executionOutcome: record.executionOutcome ?? null,
+      primaryReason: record.cancellation?.primaryReason ?? null,
+      additionalReasons: record.cancellation?.additionalReasons ?? [],
+      drain: record.drain ?? null,
+      accountingCoverage: record.accounting?.coverage ?? null,
+      auditGaps: record.auditGaps ?? [],
+      discrepancies,
+    });
+  }
+  return out;
+}
+
 function cancellationFor(terminals, versionedGameId) {
   return terminals.some((record) => record.cancellation && typeof record.cancellation === 'object'
     && (record.scope.versionedGameId === null || record.scope.versionedGameId === undefined
@@ -917,6 +958,9 @@ function deriveGaps(run) {
   if (run.artifactAvailability?.receipts !== 'present') gaps.push('RECEIPTS_NOT_PRESENT');
   if (run.receipts && (run.receipts.conflicts?.length || run.receipts.countDiscrepancies?.length
       || run.receipts.incompleteContextReceipts > 0)) gaps.push('RECEIPTS_NOT_CONSISTENT');
+  if ((run.executionTerminals ?? []).some((record) => record.auditGaps?.length || record.discrepancies?.length)) {
+    gaps.push('TERMINALS_NOT_CONSISTENT');
+  }
   if (run.metrics?.coverage?.complete !== true || run.metrics?.coverage?.expectedUnits == null) gaps.push('RUN_METRICS_INCOMPLETE');
   if (run.metrics?.discrepancies?.length) gaps.push('AGGREGATE_MISMATCH');
   if (games.some((game) => !game.metrics || game.conflicts?.length || game.discrepancies?.length)) gaps.push('GAME_METRICS_INCOMPLETE');
@@ -932,6 +976,7 @@ const GAP_CLASSES = Object.freeze({
   TRAJECTORY_NOT_PRESENT: ['TRAJECTORY_MISSING', 'TRAJECTORY_PARTIAL'],
   RECEIPTS_NOT_PRESENT: ['RECEIPTS_MISSING'],
   RECEIPTS_NOT_CONSISTENT: ['RECEIPT_ID_CONFLICT', 'RECEIPTS_COUNT_MISMATCH', 'CONTEXT_COVERAGE_INCOMPLETE'],
+  TERMINALS_NOT_CONSISTENT: ['TERMINAL_RECORD_CONFLICT', 'TERMINAL_RECORD_GAPS', 'TERMINAL_ACCOUNTING_MISMATCH'],
   RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN'],
   AGGREGATE_MISMATCH: ['AGGREGATE_MISMATCH'],
   GAME_METRICS_INCOMPLETE: ['GAME_METRICS_INCOMPLETE', 'ATTEMPT_ID_CONFLICT', 'ATTEMPT_GAME_MISMATCH'],

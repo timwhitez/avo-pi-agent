@@ -263,6 +263,65 @@ function byteLength(value) {
 }
 
 /**
+ * Final execution record (#346). null always means "no such fact", never zero
+ * or false; the record never carries rationale, thinking, provider identity,
+ * endpoints or host paths.
+ */
+export function buildExecutionTerminal({
+  executionId,
+  scope,
+  policies = [],
+  cancellation = null,
+  process: processFacts,
+  drain,
+  executionOutcome,
+  reasonCode = null,
+  terminalEvidenceRefs = [],
+  finalErrorObserved = null,
+  accounting = null,
+  usage = null,
+  unfinished = null,
+  auditGaps = [],
+}) {
+  const list = (values) => (Array.isArray(values) ? values : []);
+  const unfinishedRequests = list(unfinished?.requestKeys);
+  const unfinishedTools = list(unfinished?.toolKeys);
+  const keep = 256;
+  return bound({
+    schema: EXECUTION_TERMINAL_SCHEMA,
+    executionId: identifier(executionId),
+    scope: auditScope(scope ?? {}),
+    policies: list(policies).map((policy) => ({
+      kind: policy.kind,
+      thresholdMs: Number.isSafeInteger(policy.thresholdMs) ? policy.thresholdMs : null,
+      activitySource: policy.activitySource ?? null,
+      clockDomain: policy.clockDomain ?? null,
+      configuredSource: policy.configuredSource ?? null,
+    })),
+    cancellation,
+    process: {
+      exitCode: Number.isSafeInteger(processFacts?.exitCode) ? processFacts.exitCode : null,
+      signal: typeof processFacts?.signal === 'string' ? processFacts.signal : null,
+      closedAt: processFacts?.closedAt ?? null,
+      closeObserved: processFacts?.closeObserved === true,
+    },
+    drain: { complete: drain?.complete === true, timeoutObserved: drain?.timeoutObserved === true },
+    executionOutcome,
+    reasonCode,
+    terminalEvidenceRefs: list(terminalEvidenceRefs).slice(0, keep),
+    finalErrorObserved: typeof finalErrorObserved === 'boolean' ? finalErrorObserved : null,
+    accounting,
+    usage,
+    unfinished: {
+      requestKeys: unfinishedRequests.slice(0, keep),
+      toolKeys: unfinishedTools.slice(0, keep),
+      omittedCount: Math.max(0, unfinishedRequests.length - keep) + Math.max(0, unfinishedTools.length - keep),
+    },
+    auditGaps: [...new Set(list(auditGaps))].sort(),
+  });
+}
+
+/**
  * The CLI binds its run, versioned game and own attempt ordinal (distinct from
  * the Agent's attemptId) to an adapter receipt and re-applies the byte bound.
  */

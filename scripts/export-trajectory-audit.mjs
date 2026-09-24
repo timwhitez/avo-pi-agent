@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { exportTrajectoryAudit, validateTrajectoryAudit } from '../src/trajectory/audit-export.mjs';
 import { receiptsFromPrivateLog } from '../src/trajectory/audit-events.mjs';
-import { readRegularFileEvidence } from '../src/local/regular-file-evidence.mjs';
+import { readJsonFileEvidence, readRegularFileEvidence } from '../src/local/regular-file-evidence.mjs';
 import { writeJsonAtomic } from '../src/benchmark/report-safe-files.mjs';
 
 // Single entry for trajectory audit exports (#343). Exit codes: 0 export (or
@@ -22,6 +22,11 @@ try {
     if (!args.receiptsOut) throw new Error('--extract-receipts requires --receipts-out <new-file>');
     const log = readRegularFileEvidence(path.resolve(args.extractReceipts), { maxBytes: 512 * 1024 * 1024, purpose: 'private run log' });
     const receipts = receiptsFromPrivateLog(log.buffer.toString('utf8'));
+    // Execution terminal records are separate exclusive files next to the log.
+    for (const file of args.terminal ?? []) {
+      const record = readJsonFileEvidence(path.resolve(file), { purpose: 'execution terminal record' }).value;
+      receipts.executionTerminals.push(record);
+    }
     const out = path.resolve(args.receiptsOut);
     writeJsonAtomic(out, receipts, { root: path.dirname(out), maxBytes: 256 * 1024 * 1024, exclusive: true });
     console.log(JSON.stringify({
@@ -63,6 +68,13 @@ function parseArgs(values) {
     if (value === '--require-audit-ready') { result.requireAuditReady = true; continue; }
     if (!value.startsWith('--')) throw new Error(`unexpected argument: ${value}`);
     const name = value.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    if (name === 'terminal') {
+      const next = values[index + 1];
+      if (next === undefined || next.startsWith('--')) throw new Error('missing value for --terminal');
+      (result.terminal ??= []).push(next);
+      index += 1;
+      continue;
+    }
     if (!['inputManifest', 'outputDir', 'validateOutput', 'extractReceipts', 'receiptsOut'].includes(name)) throw new Error(`unknown option: ${value}`);
     const next = values[index + 1];
     if (next === undefined || next.startsWith('--')) throw new Error(`missing value for ${value}`);
