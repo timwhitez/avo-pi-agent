@@ -219,13 +219,16 @@ test('GAME_OVER is episode-terminal but still permits finish without spending th
     await agent.initialize();
     assert.equal(episodeState(agent.frame), 'GAME_OVER');
     assert.equal(agent.isDone(), false, 'run stays open so reset or finish remains reachable');
-    assert.deepEqual(agent.runtimeStatus(), {
+    // #340 adds the host's current observation anchor to the runtime status.
+    const { currentObservation, ...status } = agent.runtimeStatus();
+    assert.deepEqual(status, {
       state: 'GAME_OVER',
       environmentActions: 0,
       maxActions: 10,
       terminalReason: 'game_over',
       allowedNext: 'reset with a new plan or finish; gameplay actions are forbidden',
     });
+    assert.equal(currentObservation.observationRef, agent.currentObservationRef);
     const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
     const finished = await tools.finish.execute({ summary: 'terminal episode; stop this run' });
     assert.equal(finished.terminate, true);

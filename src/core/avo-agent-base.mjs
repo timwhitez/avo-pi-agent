@@ -20,6 +20,8 @@ import {
   EPISODE_OBSERVATION_SCHEMA,
   TRANSITION_SCHEMA,
   describeFrame,
+  exactObservation,
+  formatObservation,
   frameHash,
   gridDelta,
   normalizeFrame,
@@ -28,6 +30,8 @@ import {
 } from './observation.mjs';
 
 const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
+export const CURRENT_OBSERVATION_ANCHOR_SCHEMA = 'avo.current-observation-anchor.v1';
+export const OBSERVATION_VIEW_SCHEMA = 'avo.observation-view.v1';
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
 const MAX_ACTION_SEQUENCE = 20;
 const MAX_TRAJECTORY_DIFF_CELLS = 128;
@@ -188,6 +192,95 @@ export class AvoArcAgent {
   }
 
   runtimeStatus() {
+    return { ...this.runtimeStatusCore(), currentObservation: this.currentObservationAnchor() };
+  }
+
+  /**
+   * Read-only anchor for the current observation, derived from the existing
+   * currentObservationRef and verified against its committed evidence event.
+   * It is never taken from model text or from the most recently read ref.
+   */
+  currentObservationAnchor() {
+    const ref = this.currentObservationRef;
+    if (!ref || !this.frame) return null;
+    let event = null;
+    for (let index = this.evidenceLedger.length - 1; index >= 0; index -= 1) {
+      if (this.evidenceLedger[index].id === ref) { event = this.evidenceLedger[index]; break; }
+    }
+    if (!event) throw new Error('current observation ref is not a committed evidence event');
+    const current = exactObservation(this.frame);
+    const committed = canonicalJson(event.observation) === canonicalJson(current)
+      && event.attemptId === this.attemptId
+      && event.episodeId === this.episodeId();
+    if (!committed) {
+      // After an execution error the in-memory frame may be an uncommitted
+      // observation: there is no verified current anchor, and a production
+      // request must fail rather than name either state as current.
+      if (this.executionError) return null;
+      throw new Error('current observation differs from its committed evidence event');
+    }
+    return Object.freeze({
+      schema: CURRENT_OBSERVATION_ANCHOR_SCHEMA,
+      gameId: this.gameId,
+      attemptId: event.attemptId,
+      episodeId: event.episodeId,
+      observationRef: ref,
+      payloadSha256: sha256Hex(canonicalJson(current)),
+      recovery: this.currentObservationRecovery(event),
+    });
+  }
+
+  // The exact after read is advertised only when it fits the tool output bound;
+  // otherwise the largest fitting region read from the existing region view is
+  // advertised as a partitioned recovery. null means no readable entry exists.
+  currentObservationRecovery(event) {
+    const maxChars = this.toolResultMaxChars;
+    if (JSON.stringify(trajectoryView(event, 'after')).length <= maxChars) {
+      return Object.freeze({ tool: 'trajectory_read', arguments: { ref: event.id, part: 'after' }, mode: 'complete' });
+    }
+    let grid;
+    try {
+      grid = exactEventGrid(event);
+    } catch {
+      return null;
+    }
+    const gridHeight = grid.length;
+    const gridWidth = grid[0].length;
+    let width = Math.min(gridWidth, 64);
+    let height = Math.min(gridHeight, 64);
+    for (;;) {
+      const region = { ref: event.id, part: 'region', x: 0, y: 0, width, height };
+      if (JSON.stringify(trajectoryRegion(event, region)).length <= maxChars) {
+        return Object.freeze({
+          tool: 'trajectory_read',
+          arguments: region,
+          mode: 'partitioned',
+          gridShape: [gridHeight, gridWidth],
+        });
+      }
+      if (width === 1 && height === 1) return null;
+      if (width >= height) width = Math.max(1, Math.floor(width / 2));
+      else height = Math.max(1, Math.floor(height / 2));
+    }
+  }
+
+  observationView(representation, { observationRef = this.currentObservationRef, part = 'current', payloadSha256 = null, scope = null } = {}) {
+    return {
+      schema: OBSERVATION_VIEW_SCHEMA,
+      observationRef,
+      part,
+      scope: scope ?? { gameId: this.gameId, attemptId: this.attemptId, episodeId: this.episodeId() },
+      representation,
+      delivery: 'complete',
+      payloadSha256,
+    };
+  }
+
+  describeView(previousFrame = this.previousFrame, evidenceRef = this.currentObservationRef, options = {}) {
+    return formatObservation(this.frame, previousFrame, evidenceRef, options);
+  }
+
+  runtimeStatusCore() {
     const state = episodeState(this.frame);
     const levelBudget = this.perLevelBudgets[this.currentLevel];
     if (this.executionError) {
@@ -265,9 +358,15 @@ export class AvoArcAgent {
         execute: async () => {
           const evidenceRef = this.currentObservationRef;
           if (!evidenceRef) throw new Error('current observation has no durable evidence reference');
+          const formatted = this.describeView(this.frame, evidenceRef);
           return this.withRelevantMemory(this.toolResult(
-            `${this.describe(this.frame, evidenceRef)}\nEVIDENCE_REF: ${evidenceRef}`,
-            { frame: this.frame, evidenceRef, contextExactEvidence: false },
+            `${formatted.text}\nEVIDENCE_REF: ${evidenceRef}`,
+            {
+              frame: this.frame,
+              evidenceRef,
+              contextExactEvidence: false,
+              observationView: this.observationView(formatted.representation),
+            },
           ), 'current observation');
         },
       },
@@ -701,6 +800,9 @@ export class AvoArcAgent {
     this.sequenceActionsSkipped += skipped.length;
     if (skipped.length) this.sequenceCancellations += 1;
     const expectationFailed = executed.some((entry) => entry.expectationMismatches.length > 0);
+    const finalFrame = lastExecutedBeforeFrame
+      ? this.describeView(lastExecutedBeforeFrame, this.currentObservationRef, { includeExactGrid: true })
+      : null;
     const details = {
       ok: !['ACTION_REJECTED', 'RUN_COMPLETE', 'ENVIRONMENT_ERROR', 'INTERNAL_ERROR'].includes(stopReason)
         && !expectationFailed,
@@ -714,16 +816,18 @@ export class AvoArcAgent {
         ?? skipped.find((entry) => entry.evidenceRef)?.evidenceRef
         ?? this.currentObservationRef,
       contextExactEvidence: false,
-      ...(lastExecutedBeforeFrame
-        ? { finalFrameText: this.describe(lastExecutedBeforeFrame, this.currentObservationRef, { includeExactGrid: true }) }
-        : {}),
+      ...(finalFrame ? { finalFrameText: finalFrame.text } : {}),
       telemetry: this.commandTelemetry(),
     };
-    return this.withRelevantMemory(
+    const result = this.withRelevantMemory(
       this.toolResult('', details, terminate),
       requested.map((step) => step.reasoning).filter(Boolean).join(' '),
       'ACTION_SEQUENCE',
     );
+    // Host-only metadata: attached after the JSON text is rendered.
+    return finalFrame
+      ? { ...result, details: { ...result.details, observationView: this.observationView(finalFrame.representation) } }
+      : result;
   }
 
   async reset({ rationale = '' } = {}) {
@@ -811,13 +915,15 @@ export class AvoArcAgent {
         ? `\nSUPERVISOR_INTERVENTION ${stall.id}:\n${stall.directions.map((direction, index) => `${index + 1}. ${direction.rationale} Next: ${direction.nextExperiment}`).join('\n')}`
         : '';
     }
+    const formatted = this.describeView(previousFrame, this.currentObservationRef, { includeExactGrid: true });
     return this.toolResult(
-      `${this.describe(previousFrame, this.currentObservationRef, { includeExactGrid: true })}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
+      `${formatted.text}\nEVIDENCE_REF: ${evidence.id}\nOBJECTIVE: progressed=${progressed} novel_state=${wasNew} actions=${this.actions}/${this.config.maxActions}${supervisorText}`,
       {
         ok: true,
         frame: this.frame,
         evidenceRef: evidence.id,
         contextExactEvidence: false,
+        observationView: this.observationView(formatted.representation),
         progressed,
         currentLevelDelta,
         novelState: wasNew,
@@ -1118,9 +1224,11 @@ export class AvoArcAgent {
 
     let value;
     let contextExactEvidence = false;
+    let readEvent = null;
     if (hasRef) {
       const event = this.evidenceLedger.find((entry) => entry.id === ref);
       if (!event) throw new Error(`trajectory evidence not found: ${ref}`);
+      readEvent = event;
       if (view === 'region') {
         value = trajectoryRegion(event, { x, y, width, height });
       } else if (view === 'diff') {
@@ -1164,6 +1272,7 @@ export class AvoArcAgent {
       startSequence: hasRef ? null : effectiveStartSequence,
       part: view,
       characters: text.length,
+      observationView: trajectoryObservationView(this, hasRef ? readEvent : null, view),
     });
   }
 
@@ -1289,6 +1398,7 @@ export class AvoArcAgent {
       initialPrompt,
       shouldStop: () => this.isDone(),
       runtimeStatus: () => this.runtimeStatus(),
+      currentObservationRequired: true,
     });
     const forwardingLifecycle = await this.forwardingLifecycleTelemetry();
     const mechanismMetrics = this.lastResult?.mechanismMetrics
@@ -1471,6 +1581,29 @@ function appendSkipped(output, requested, start, reason, evidenceRef = null) {
       evidenceRef: index === start ? evidenceRef ?? null : null,
     });
   }
+}
+
+// Only an after/event read carries the referenced after observation. A before
+// read is a past state even for the current ref; region/diff/summary pages are
+// never complete observations.
+function trajectoryObservationView(agent, event, part) {
+  if (!event) return agent.observationView('summary', { observationRef: null, part: 'summary-page' });
+  const scope = { gameId: agent.gameId, attemptId: event.attemptId, episodeId: event.episodeId };
+  if (part === 'after' || part === 'event') {
+    return agent.observationView('full-observation', {
+      observationRef: event.id,
+      part,
+      scope,
+      payloadSha256: sha256Hex(canonicalJson(event.observation)),
+    });
+  }
+  const representation = part === 'region' ? 'region' : part === 'diff' ? 'diff'
+    : part === 'before' ? 'full-observation' : 'summary';
+  return agent.observationView(representation, { observationRef: null, part, scope });
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function trajectoryView(event, part) {

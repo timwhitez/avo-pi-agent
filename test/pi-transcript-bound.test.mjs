@@ -4,7 +4,7 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { convertResponsesMessages } from '@earendil-works/pi-ai/api/openai-responses-shared';
 
 import {
-  COMPACTION_NOTICE_TEMPLATE_SHA256,
+  LEGACY_COMPACTION_NOTICE_TEMPLATE_SHA256,
   THINKING_ELISION_POLICY_SHA256,
   TOOL_RESULT_ELISION_TEMPLATE_SHA256,
   boundTranscript,
@@ -63,10 +63,10 @@ test('multi-tool hard compaction retains complete successful turns through pinne
       if (outputs.length) {
         assert.ok(bounded.includes(write));
         assert.ok(bounded.includes(read));
-        assert.equal(events.at(-1).exactLatestEvidenceRetained, true);
+        assert.equal(events.at(-1).lastConsultedEvidenceRetained, true);
       } else {
         assert.ok(JSON.stringify(bounded).includes(`latest_evidence_ref=${ref}`));
-        assert.equal(events.at(-1).exactLatestEvidenceRetained, false);
+        assert.equal(events.at(-1).lastConsultedEvidenceRetained, false);
       }
     }
   }
@@ -227,11 +227,11 @@ test('soft elision preserves the latest exact environment evidence behind newer 
   assert.ok(bounded.some((message) => message.role === 'assistant'
     && message.content.some((block) => block.id === 'call-1')));
   assert.ok(compactions.some((event) => event.mode === 'soft'
-    && event.latestEvidenceRef === ref
-    && event.exactLatestEvidenceRetained === true));
+    && event.lastConsultedEvidenceRef === ref
+    && event.lastConsultedEvidenceRetained === true));
   assert.ok(compactions.some((event) => event.mode === 'hard'
-    && event.latestEvidenceRef === ref
-    && event.exactLatestEvidenceRetained === true));
+    && event.lastConsultedEvidenceRef === ref
+    && event.lastConsultedEvidenceRetained === true));
 });
 
 test('hard message cap applies across roles and discloses the compaction', () => {
@@ -257,7 +257,7 @@ test('hard message cap applies across roles and discloses the compaction', () =>
   assert.deepEqual(recentIds.slice(-2), ['call-39', 'call-40']);
   assert.deepEqual(compactions.map((event) => event.mode), ['soft', 'hard']);
   const hardCompaction = compactions.find((event) => event.mode === 'hard');
-  assert.equal(hardCompaction.templateSha256, COMPACTION_NOTICE_TEMPLATE_SHA256);
+  assert.equal(hardCompaction.templateSha256, LEGACY_COMPACTION_NOTICE_TEMPLATE_SHA256);
   assert.equal(hardCompaction.noticeIncluded, true);
   for (const message of bounded) {
     if (message.role === 'toolResult' && message.content[0].text.includes('elided')) {
@@ -301,12 +301,12 @@ test('latest exact evidence outranks the synthetic compaction notice under a tig
   assert.ok(bounded.some((message) => message.content?.[0]?.text?.startsWith('[AVO_RUNTIME_STATUS v1]')));
   assert.equal(bounded.some((message) => message.content?.[0]?.text?.includes('transcript compaction')), false);
   assert.deepEqual(compactions.map((event) => ({
-    latestEvidenceRef: event.latestEvidenceRef,
-    exactLatestEvidenceRetained: event.exactLatestEvidenceRetained,
+    lastConsultedEvidenceRef: event.lastConsultedEvidenceRef,
+    lastConsultedEvidenceRetained: event.lastConsultedEvidenceRetained,
     noticeIncluded: event.noticeIncluded,
   })), [{
-    latestEvidenceRef: 'evidence-000004-aaaaaaaaaaaa',
-    exactLatestEvidenceRetained: true,
+    lastConsultedEvidenceRef: 'evidence-000004-aaaaaaaaaaaa',
+    lastConsultedEvidenceRetained: true,
     noticeIncluded: false,
   }]);
 

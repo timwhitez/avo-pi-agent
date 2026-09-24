@@ -240,7 +240,7 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     assert.doesNotMatch(statuses[0].content[0].text, /continue|exhaust/i);
     const statusEvents = events.filter((event) => event.type === 'avo_runtime_status');
     assert.equal(statusEvents.length, 1000);
-    assert.ok(statusEvents.every((event) => event.templateSha256 === module.RUNTIME_STATUS_TEMPLATE_SHA256));
+    assert.ok(statusEvents.every((event) => event.templateSha256 === module.legacyRuntimeStatusTemplateSha256('current-v1')));
     assert.equal(result.exhaustedOuterTurns, true);
     assert.equal(result.error, null);
     assert.equal(result.terminationReason, 'outer-turn-budget');

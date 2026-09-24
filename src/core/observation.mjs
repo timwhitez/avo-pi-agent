@@ -183,7 +183,17 @@ export function gridDelta(previous, current) {
   return { changed: changes, exact: gridToExactText(current) };
 }
 
-export function describeFrame(
+export function describeFrame(frame, previousFrame = null, observationRef = null, options = {}) {
+  return formatObservation(frame, previousFrame, observationRef, options).text;
+}
+
+/**
+ * Formats one observation and reports what the text actually represents:
+ * `grid-and-header` when GRID_EXACT is included, otherwise `summary` (header,
+ * palette and bounded changed cells only). The inline grid is not claimed to
+ * be the complete normalized observation.
+ */
+export function formatObservation(
   frame,
   previousFrame = null,
   observationRef = null,
@@ -232,9 +242,10 @@ export function describeFrame(
     exact_grid_included: gridShown,
   };
   const preview = JSON.stringify(header, null, 2);
-  return inlineGrid || view === 'exact_initial'
-    ? `${preview}\nGRID_EXACT:\n${delta.exact}`
-    : preview;
+  return {
+    text: gridShown ? `${preview}\nGRID_EXACT:\n${delta.exact}` : preview,
+    representation: gridShown ? 'grid-and-header' : 'summary',
+  };
 }
 
 function paletteSummary(grid) {
