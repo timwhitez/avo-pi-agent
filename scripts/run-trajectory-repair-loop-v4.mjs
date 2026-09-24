@@ -27,6 +27,7 @@ import {
   applyRepairPlan,
   buildRepairPlan,
   redactedRepairPlan,
+  summarizeRepairOutcomes,
 } from '../src/trajectory/repairs.mjs';
 import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
@@ -217,13 +218,26 @@ try {
       };
       break;
     }
-    const applied = outcomes.filter((outcome) => outcome.applied === true).length;
-    if (applied === 0) {
+    const repairSummary = summarizeRepairOutcomes(outcomes);
+    if (repairSummary.stop) {
+      // Committed files are not rolled back; a committed-but-unconfirmed file
+      // needs reconciliation and must not be replayed automatically.
+      summary.status = 'failed';
+      summary.failure = {
+        stage: repairSummary.replaySafe ? 'repair-guidance-application' : 'repair-post-commit-failure',
+        round,
+        message: repairSummary.replaySafe
+          ? 'Repair guidance could not be committed for every game; later games were not attempted.'
+          : 'A repair memory file was committed but its persistence was not confirmed; reconcile before any replay.',
+      };
+      break;
+    }
+    if (repairSummary.changedCommitted === 0) {
       summary.status = 'failed';
       summary.failure = {
         stage: 'repair-guidance-application',
         round,
-        message: 'Authoritative dirty round produced no durable per-game repair guidance.',
+        message: 'Authoritative dirty round produced no changed durable per-game repair guidance.',
       };
       break;
     }

@@ -12,6 +12,7 @@ import {
 import {
   applyRepairPlan,
   buildRepairPlan,
+  summarizeRepairOutcomes,
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
 import { extractPublishedOfficialScore } from '../src/benchmark/scorecard-evidence.mjs';
@@ -55,8 +56,10 @@ const infrastructureFailure = !benchmarkComplete || plan.infrastructureFindingCo
 const repairOutcomes = !analysis.clean && !infrastructureFailure
   ? applyRepairPlan(memoryDir, plan)
   : [];
-const appliedCount = repairOutcomes.filter((entry) => entry.applied).length;
-const shouldContinue = !analysis.clean && !infrastructureFailure && plan.agentRepairableFindingCount > 0 && appliedCount > 0;
+const repairSummary = summarizeRepairOutcomes(repairOutcomes);
+const appliedCount = repairSummary.changedCommitted;
+const shouldContinue = !analysis.clean && !infrastructureFailure && plan.agentRepairableFindingCount > 0
+  && !repairSummary.stop && appliedCount > 0;
 const status = analysis.clean
   ? 'complete'
   : infrastructureFailure
