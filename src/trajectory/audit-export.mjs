@@ -127,12 +127,14 @@ function normalizeRun(run, sourceRoot, recordSource) {
   const adapted = adaptReport(report.value, gaps);
   if (report.value && String(report.value.runId ?? run.runId) !== run.runId) gaps.push('RUN_ID_MISMATCH');
   const attemptIndex = indexAttempts(attempts.value, gaps);
-  const games = adapted.games.map((game) => normalizeGame(game, attemptIndex.get(game.versionedGameId) ?? [], trajectory.events, receipts.value, gaps));
+  const finishedByScope = indexFinished(trajectory.events, adapted.games);
+  const terminals = executionTerminals(receipts.value, gaps);
+  const games = adapted.games.map((game) => normalizeGame(game, attemptIndex.get(game.versionedGameId) ?? [], finishedByScope.get(game.versionedGameId) ?? [], terminals, gaps));
   for (const [versionedGameId] of attemptIndex) {
     if (!adapted.games.some((game) => game.versionedGameId === versionedGameId)) gaps.push('ATTEMPT_WITHOUT_GAME');
   }
   const metrics = runMetrics(games, adapted, gaps);
-  const executionOutcome = runOutcome(games, receipts.value, gaps);
+  const executionOutcome = runOutcome(games, terminals, gaps);
   const progress = runProgress(games, adapted.sourceSchema);
   if (progress.ambiguities.length) gaps.push(...progress.ambiguities);
   const score = runScore(report.value, adapted);
@@ -187,6 +189,12 @@ function readTrajectory(input, recordSource) {
   const loaded = loadTrajectoryEvents(input.absolute);
   for (const file of loaded.files) {
     const evidence = readRegularFileEvidence(file, { root: input.absolute, maxBytes: 64 * 1024 * 1024, purpose: 'trajectory file' });
+    // The recorded hash must describe the parsed bytes: reject a file that
+    // changed between parsing and hashing.
+    const stat = fs.statSync(file, { bigint: true });
+    if (Number(stat.size) !== evidence.bytes || stat.mtimeNs.toString() !== evidence.identity.mtimeNs) {
+      throw new Error('trajectory file changed while it was being exported');
+    }
     recordSource(evidence, `${input.relative}/${evidence.relativeFile.split(path.sep).join('/')}`);
   }
   return {
@@ -202,20 +210,30 @@ function readTrajectory(input, recordSource) {
 function adaptReport(report, gaps) {
   if (!report) return { sourceSchema: 'missing', games: [], reportedAggregate: null, expectedGames: null };
   const rawGames = Array.isArray(report.games) ? report.games : [];
-  const expectedGames = Number.isSafeInteger(report.completeness?.expectedCount) ? report.completeness.expectedCount : null;
+  const expectedGames = Number.isSafeInteger(report.completeness?.expectedCount)
+    ? report.completeness.expectedCount
+    : Array.isArray(report.completeness?.gameIds) ? report.completeness.gameIds.length : null;
   const reportedAggregateRaw = report.aggregates?.mechanismMetrics ?? report.mechanismMetrics ?? null;
-  let current = null;
-  try {
-    current = rawGames.map((game, index) => normalizeGameRecord(game, `$.games[${index}]`));
-  } catch {
-    current = null;
+  const attempted = rawGames.map((game, index) => {
+    try {
+      return normalizeGameRecord(game, `$.games[${index}]`);
+    } catch {
+      return null;
+    }
+  });
+  const invalid = attempted.map((value, index) => (value ? null : index)).filter((index) => index !== null);
+  // A report whose records mostly validate is a current report with invalid
+  // records at known paths, not a legacy report.
+  if (attempted.some(Boolean) && invalid.length) {
+    for (const index of invalid) gaps.push(`INVALID_GAME_RECORD:$.games[${index}]`);
   }
+  const current = attempted.some(Boolean) ? attempted.filter(Boolean) : null;
   if (current) {
     return {
       sourceSchema: 'avo.benchmark-report',
       expectedGames,
       reportedAggregateRaw,
-      games: current.map((game, index) => ({
+      games: current.map((game) => ({ game, index: attempted.indexOf(game) })).map(({ game, index }) => ({
         versionedGameId: game.versionedGameId,
         gameId: game.gameId,
         sourceRef: `$.games[${index}]`,
@@ -328,7 +346,7 @@ function indexAttempts(value, gaps) {
   return byGame;
 }
 
-function normalizeGame(game, attempts, events, receipts, gaps) {
+function normalizeGame(game, attempts, finished, terminals, gaps) {
   const attemptMetrics = attempts.map((entry) => ({
     attemptId: entry.item.attemptId,
     metrics: completeMetrics(entry.item.mechanismMetrics),
@@ -371,7 +389,7 @@ function normalizeGame(game, attempts, events, receipts, gaps) {
   }
   if (conflicts.length) gaps.push('ATTEMPT_ID_CONFLICT');
   if (discrepancies.length) gaps.push('ATTEMPT_GAME_MISMATCH');
-  const outcome = gameOutcome(game, events, receipts);
+  const outcome = gameOutcome(game, finished, terminals);
   return {
     versionedGameId: game.versionedGameId,
     sourceRef: game.sourceRef,
@@ -400,17 +418,19 @@ function completeMetrics(value) {
 // summary; game.finished events are ordered only within one recorder file.
 // An error that is followed by a proven later completion in the same ordered
 // stream is kept as an incident, not as the final outcome.
-function gameOutcome(game, events, receipts) {
-  const finished = events.filter((event) => event.kind === 'game.finished'
-    && String(event.game_id ?? event.gameId ?? '').toLowerCase().startsWith(game.gameId)
-    && versionMatches(event, game.versionedGameId));
+function gameOutcome(game, finished, terminals) {
   const files = new Set(finished.map((event) => event.sourceFile));
   const conflicts = [];
   let trajectoryFinal = null;
   let incidents = 0;
   if (finished.length) {
-    if (files.size > 1 && new Set(finished.map((event) => finishedError(event))).size > 1) {
-      conflicts.push('TERMINAL_CONFLICT');
+    if (files.size > 1) {
+      // Several recorder files are several clock domains: no cross-file order.
+      if (new Set(finished.map((event) => finishedError(event))).size > 1) conflicts.push('TERMINAL_CONFLICT');
+      else {
+        trajectoryFinal = finished[0];
+        incidents = null;
+      }
     } else {
       const ordered = finished.toSorted((a, b) => a.sequence - b.sequence);
       trajectoryFinal = ordered.at(-1);
@@ -424,7 +444,7 @@ function gameOutcome(game, events, receipts) {
   // Both sources describe the same final scope: they must agree.
   if (reportError === null && reportCompleted && trajectoryError === true) conflicts.push('TERMINAL_CONFLICT');
   if (reportError !== null && trajectoryError === false) conflicts.push('TERMINAL_CONFLICT');
-  const cancelled = cancellationFor(receipts, game.versionedGameId);
+  const cancelled = cancellationFor(terminals, game.versionedGameId);
   let status;
   let errorObserved;
   let reasonCode = null;
@@ -463,9 +483,27 @@ function gameOutcome(game, events, receipts) {
   };
 }
 
-function versionMatches(event, versionedGameId) {
-  const raw = String(event.game_id ?? event.gameId ?? '').toLowerCase();
-  return !raw.includes('-') || raw === versionedGameId;
+// game.finished events belong to a game only by exact identity: a versioned
+// id must equal the game's versioned id; a short id applies only when exactly
+// one version of that short id exists in the report.
+function indexFinished(events, games) {
+  const versionsByShort = new Map();
+  for (const game of games) {
+    if (!versionsByShort.has(game.gameId)) versionsByShort.set(game.gameId, []);
+    versionsByShort.get(game.gameId).push(game.versionedGameId);
+  }
+  const byScope = new Map();
+  for (const event of events) {
+    if (event.kind !== 'game.finished') continue;
+    const raw = String(event.game_id ?? event.gameId ?? '').trim().toLowerCase();
+    let target = null;
+    if (raw.includes('-')) target = games.some((game) => game.versionedGameId === raw) ? raw : null;
+    else if (versionsByShort.get(raw)?.length === 1) target = versionsByShort.get(raw)[0];
+    if (!target) continue;
+    if (!byScope.has(target)) byScope.set(target, []);
+    byScope.get(target).push(event);
+  }
+  return byScope;
 }
 
 function finishedError(event) {
@@ -474,15 +512,35 @@ function finishedError(event) {
   return null;
 }
 
-function cancellationFor(receipts, versionedGameId) {
-  const list = Array.isArray(receipts?.cancellations) ? receipts.cancellations : [];
-  return list.some((entry) => entry?.cancelRequested === true
-    && (entry.versionedGameId === undefined || String(entry.versionedGameId).toLowerCase() === versionedGameId));
+// Execution terminal receipts (avo.execution-terminal.v1, produced by #346).
+// Any other shape is an explicit gap, never an implicit cancellation.
+export const AUDIT_RECEIPTS_SCHEMA = 'avo.trajectory-audit-receipts.v1';
+
+function executionTerminals(receipts, gaps) {
+  if (receipts === null) return [];
+  if (receipts?.schema !== AUDIT_RECEIPTS_SCHEMA || !Array.isArray(receipts.executionTerminals)) {
+    gaps.push('RECEIPTS_SCHEMA_UNKNOWN');
+    return [];
+  }
+  return receipts.executionTerminals.filter((record) => {
+    const valid = record?.schema === 'avo.execution-terminal.v1' && record.scope && typeof record.scope === 'object';
+    if (!valid) gaps.push('RECEIPT_INVALID');
+    return valid;
+  });
+}
+
+function cancellationFor(terminals, versionedGameId) {
+  return terminals.some((record) => record.cancellation && typeof record.cancellation === 'object'
+    && (record.scope.versionedGameId === null || record.scope.versionedGameId === undefined
+      || String(record.scope.versionedGameId).toLowerCase() === versionedGameId));
 }
 
 function runMetrics(games, adapted, gaps) {
   const complete = games.filter((game) => game.metrics);
-  const expectedUnits = adapted.expectedGames ?? (adapted.sourceSchema === 'avo.benchmark-report' ? games.length : null);
+  // Completeness is proven only by the report's own expected game set, never
+  // by counting the records that happen to be present.
+  const expectedUnits = adapted.expectedGames;
+  if (expectedUnits === null) gaps.push('EXPECTED_UNITS_UNKNOWN');
   const selectedSourceRefs = complete.map((game) => `${game.sourceRef}:${game.meteringLayer}`);
   const coverage = {
     expectedUnits,
@@ -535,7 +593,7 @@ function legacyFieldSubtotal(games) {
   return fields;
 }
 
-function runOutcome(games, receipts, gaps) {
+function runOutcome(games, terminals, gaps) {
   const statuses = games.map((game) => game.outcome.status);
   const conflicts = [...new Set(games.flatMap((game) => game.outcome.conflicts))];
   let status;
@@ -556,7 +614,7 @@ function runOutcome(games, receipts, gaps) {
     errorObserved,
     reasonCode: conflicts.length ? 'TERMINAL_CONFLICT' : status === 'unknown' ? 'TERMINAL_EVIDENCE_MISSING' : null,
     conflicts,
-    cancelRequested: Array.isArray(receipts?.cancellations) && receipts.cancellations.some((entry) => entry?.cancelRequested === true),
+    cancelRequested: terminals.some((record) => record.cancellation && typeof record.cancellation === 'object'),
   };
 }
 
@@ -609,11 +667,14 @@ function exporterIdentity(repositoryRoot) {
     }
     components.push({ path: relative, sha256: sha256(fs.readFileSync(file)) });
   }
+  const missingComponents = components.filter((component) => component.sha256 === null).length;
   return {
     gitCommit: null,
     components,
-    componentSetSha256: sha256(canonicalJson(components)),
-    componentScope: 'listed local modules of the exporter; not a verified complete dependency closure',
+    componentSetSha256: missingComponents ? null : sha256(canonicalJson(components)),
+    componentScope: missingComponents
+      ? `incomplete: ${missingComponents} listed exporter module(s) were not found under the repository root`
+      : 'listed local modules of the exporter; not a verified complete dependency closure',
   };
 }
 
@@ -717,7 +778,13 @@ export function validateTrajectoryAudit(outputDir) {
       continue;
     }
     if (evidence.bytes !== entry.bytes || evidence.sha256 !== entry.sha256) fail(entry.path, null, 'FILE_HASH_MISMATCH');
-    if (entry.path.startsWith('runs/')) runs.set(entry.path, JSON.parse(evidence.buffer.toString('utf8')));
+    if (entry.path.startsWith('runs/')) {
+      try {
+        runs.set(entry.path, JSON.parse(evidence.buffer.toString('utf8')));
+      } catch {
+        fail(entry.path, null, 'FILE_JSON_INVALID');
+      }
+    }
   }
   for (const name of walk(root)) {
     if (name !== 'MANIFEST.json' && !listed.has(name)) fail(name, null, 'UNLISTED_FILE');
@@ -741,12 +808,11 @@ export function validateTrajectoryAudit(outputDir) {
     if (run.metrics?.coverage?.complete && complete.length !== games.length) fail(file, 'metrics.coverage.complete', 'COVERAGE_INCONSISTENT');
     const gaps = Array.isArray(run.audit?.gaps) ? run.audit.gaps : null;
     if (!gaps) fail(file, 'audit.gaps', 'GAPS_MISSING');
-    const derivedReady = Boolean(gaps) && gaps.length === 0
-      && run.metrics?.coverage?.complete === true
-      && run.metrics?.discrepancies?.length === 0
-      && ['completed', 'error'].includes(run.executionOutcome?.status)
-      && run.progress?.ambiguities?.length === 0
-      && run.artifactAvailability?.report === 'present';
+    const derived = deriveGaps(run);
+    for (const code of derived) {
+      if (!gaps?.includes(code)) fail(file, 'audit.gaps', `GAP_OMITTED:${code}`);
+    }
+    const derivedReady = Boolean(gaps) && gaps.length === 0 && derived.length === 0;
     if (run.audit?.ready !== derivedReady) fail(file, 'audit.ready', 'READY_FLAG_INCONSISTENT');
   }
   try {
@@ -772,6 +838,33 @@ export function validateTrajectoryAudit(outputDir) {
     runs: [...runIds.values()].map((run) => ({ runId: run.runId, auditReady: run.audit.ready, gaps: run.audit.gaps })),
   };
 }
+
+// Readiness conditions re-derived from the projected facts themselves.
+function deriveGaps(run) {
+  const gaps = [];
+  const games = Array.isArray(run.games) ? run.games : [];
+  if (run.artifactAvailability?.report !== 'present') gaps.push('REPORT_MISSING');
+  if (run.artifactAvailability?.trajectory !== 'present') gaps.push('TRAJECTORY_NOT_PRESENT');
+  if (run.metrics?.coverage?.complete !== true || run.metrics?.coverage?.expectedUnits == null) gaps.push('RUN_METRICS_INCOMPLETE');
+  if (run.metrics?.discrepancies?.length) gaps.push('AGGREGATE_MISMATCH');
+  if (games.some((game) => !game.metrics || game.conflicts?.length || game.discrepancies?.length)) gaps.push('GAME_METRICS_INCOMPLETE');
+  if (!['completed', 'error'].includes(run.executionOutcome?.status)) gaps.push('OUTCOME_NOT_FINAL');
+  if (run.progress?.ambiguities?.length) gaps.push('AMBIGUOUS_LEGACY_LEVEL_FIELD');
+  if (run.progress?.sourceSchema !== 'avo.benchmark-report') gaps.push('LEGACY_REPORT_SCHEMA');
+  // The derived codes are summaries; they are checked for presence by class.
+  return gaps.filter((code) => !(run.audit?.gaps ?? []).some((reported) => GAP_CLASSES[code]?.includes(reported.split(':')[0])));
+}
+
+const GAP_CLASSES = Object.freeze({
+  REPORT_MISSING: ['REPORT_MISSING'],
+  TRAJECTORY_NOT_PRESENT: ['TRAJECTORY_MISSING', 'TRAJECTORY_PARTIAL'],
+  RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN'],
+  AGGREGATE_MISMATCH: ['AGGREGATE_MISMATCH'],
+  GAME_METRICS_INCOMPLETE: ['GAME_METRICS_INCOMPLETE', 'ATTEMPT_ID_CONFLICT', 'ATTEMPT_GAME_MISMATCH'],
+  OUTCOME_NOT_FINAL: ['OUTCOME_UNKNOWN', 'OUTCOME_CENSORED', 'TERMINAL_CONFLICT'],
+  AMBIGUOUS_LEGACY_LEVEL_FIELD: ['AMBIGUOUS_LEGACY_LEVEL_FIELD'],
+  LEGACY_REPORT_SCHEMA: ['LEGACY_REPORT_SCHEMA'],
+});
 
 function walk(root, prefix = '') {
   const out = [];

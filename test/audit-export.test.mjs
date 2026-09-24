@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -72,6 +73,8 @@ function setup(runs) {
   return { root, source, manifestFile, output: path.join(root, 'out') };
 }
 
+const complete = (games) => ({ expectedCount: games.length });
+
 const finished = (sequence, gameId, error) => ({ run_id: 'r', sequence, kind: 'game.finished', game_id: gameId, error });
 
 function normalize(runs) {
@@ -86,8 +89,8 @@ function normalize(runs) {
 test('E01 game totals sum through the shared aggregator, zero is legal and input order is irrelevant', () => {
   const games = [1, 2, 3].map((calls, index) => game(`g${index}-v1`, metrics({ modelCalls: calls })));
   const zero = game('gz-v1', metrics());
-  const forward = normalize([{ runId: 'run-a', report: { runId: 'run-a', games: [...games, zero] }, trajectory: [finished(1, 'g0-v1', false)] }]);
-  const reversed = normalize([{ runId: 'run-a', report: { runId: 'run-a', games: [zero, ...games].reverse() }, trajectory: [finished(1, 'g0-v1', false)] }]);
+  const forward = normalize([{ runId: 'run-a', report: { runId: 'run-a', completeness: complete([...games, zero]), games: [...games, zero] }, trajectory: [finished(1, 'g0-v1', false)] }]);
+  const reversed = normalize([{ runId: 'run-a', report: { runId: 'run-a', completeness: complete([...games, zero]), games: [zero, ...games].reverse() }, trajectory: [finished(1, 'g0-v1', false)] }]);
   assert.equal(forward.runs[0].metrics.recomputedAggregate.modelCalls, 6);
   assert.deepEqual(forward.runs[0].metrics.recomputedAggregate, reversed.runs[0].metrics.recomputedAggregate);
   assert.equal(forward.runs[0].games.find((item) => item.versionedGameId === 'gz-v1').metrics.modelCalls, 0);
@@ -98,7 +101,7 @@ test('E02 a first-game "run total" is kept verbatim and reported as AGGREGATE_MI
   const second = metrics({ modelCalls: 293, toolCalls: 416, trajectoryReadCalls: 222, totalTokens: 12_827_769, contextCompactions: 452, actionBudgetExhaustions: 1 });
   const out = normalize([{
     runId: 'r1',
-    report: { runId: 'r1', aggregates: { mechanismMetrics: first }, games: [game('ft09-v1', first), game('ls20-v1', second)] },
+    report: { runId: 'r1', completeness: { expectedCount: 2 }, aggregates: { mechanismMetrics: first }, games: [game('ft09-v1', first), game('ls20-v1', second)] },
     trajectory: [finished(1, 'ft09-v1', false)],
   }]);
   const run = out.runs[0];
@@ -146,7 +149,9 @@ test('E04 recovered errors, a final error and a missing terminal are separate ou
   assert.equal(none.executionOutcome.errorObserved, null);
 
   const cancelled = normalize([{ runId: 'r7', report: { runId: 'r7', games: [game('a-v1', metrics(), { state: 'NOT_FINISHED' })] },
-    receipts: { cancellations: [{ cancelRequested: true, versionedGameId: 'a-v1' }] } }]).runs[0];
+    receipts: { schema: 'avo.trajectory-audit-receipts.v1', executionTerminals: [
+      { schema: 'avo.execution-terminal.v1', scope: { versionedGameId: 'a-v1' }, cancellation: { id: 'cancel-1', primaryReason: 'operator-cancel' } },
+    ] } }]).runs[0];
   assert.equal(cancelled.executionOutcome.status, 'censored');
   assert.equal(cancelled.executionOutcome.cancelRequested, true);
 
@@ -159,7 +164,7 @@ test('E04 recovered errors, a final error and a missing terminal are separate ou
 test('E05 game totals win over attempt detail, resume aliases count once, local IDs stay per attempt', () => {
   const a1 = { versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 2 }) };
   const a2 = { versionedGameId: 'a-v1', attemptId: 'attempt-000002', mechanismMetrics: metrics({ modelCalls: 3 }) };
-  const withGame = normalize([{ runId: 'r9', report: { runId: 'r9', games: [game('a-v1', metrics({ modelCalls: 5 }))] }, attempts: [a1, a2, a1] }]).runs[0];
+  const withGame = normalize([{ runId: 'r9', report: { runId: 'r9', completeness: { expectedCount: 1 }, games: [game('a-v1', metrics({ modelCalls: 5 }))] }, attempts: [a1, a2, a1] }]).runs[0];
   assert.equal(withGame.games[0].meteringLayer, 'game');
   assert.equal(withGame.metrics.recomputedAggregate.modelCalls, 5, 'attempt detail is a cross-check, not added');
   assert.equal(withGame.games[0].coverage.duplicateCount, 1, 'the resume alias is counted once');
@@ -168,7 +173,7 @@ test('E05 game totals win over attempt detail, resume aliases count once, local 
     { versionedGameId: 'b-v1', executionIdSha256: 'a'.repeat(64), executionOccurrence: 0 },
     { versionedGameId: 'b-v1', executionIdSha256: 'b'.repeat(64), executionOccurrence: 0 },
   ];
-  const attemptsOnly = normalize([{ runId: 'r10', report: { runId: 'r10', games: [game('b-v1', undefined, { executions })] },
+  const attemptsOnly = normalize([{ runId: 'r10', report: { runId: 'r10', completeness: { expectedCount: 1 }, games: [game('b-v1', undefined, { executions })] },
     attempts: [
       { versionedGameId: 'b-v1', attemptId: 'attempt-000001', localToolCallId: 'call-1', mechanismMetrics: metrics({ modelCalls: 4 }) },
       { versionedGameId: 'b-v1', attemptId: 'attempt-000002', localToolCallId: 'call-1', mechanismMetrics: metrics({ modelCalls: 6 }) },
@@ -193,7 +198,7 @@ test('E06 ambiguous legacy level fields keep raw values and a null denominator',
 });
 
 test('E07 tampered files, INDEX disagreement and conflicting attempt IDs fail validation with field locations', () => {
-  const fixture = setup([{ runId: 'r11', report: { runId: 'r11', games: [game('a-v1', metrics({ modelCalls: 1 }))] }, trajectory: [finished(1, 'a-v1', false)] }]);
+  const fixture = setup([{ runId: 'r11', report: { runId: 'r11', completeness: { expectedCount: 1 }, games: [game('a-v1', metrics({ modelCalls: 1 }))] }, trajectory: [finished(1, 'a-v1', false)] }]);
   try {
     exportTrajectoryAudit({ manifestFile: fixture.manifestFile, outputDir: fixture.output });
     assert.equal(validateTrajectoryAudit(fixture.output).ok, true);
@@ -261,7 +266,7 @@ test('E09 identified duplicates dedupe by ID; different events with equal bodies
     { versionedGameId: 'a-v1', executionIdSha256: 'c'.repeat(64), executionOccurrence: 0 },
     { versionedGameId: 'a-v1', executionIdSha256: 'd'.repeat(64), executionOccurrence: 0 },
   ];
-  const run = normalize([{ runId: 'r14', report: { runId: 'r14', games: [game('a-v1', undefined, { executions })] }, attempts: [
+  const run = normalize([{ runId: 'r14', report: { runId: 'r14', completeness: { expectedCount: 1 }, games: [game('a-v1', undefined, { executions })] }, attempts: [
     { ...body, attemptId: 'attempt-000001' },
     { ...body, attemptId: 'attempt-000001' },
     { ...body, attemptId: 'attempt-000002' },
@@ -284,7 +289,7 @@ test('E10 partial legacy fields and cumulative usage snapshots are never zero-fi
   assert.equal(legacy.metrics.legacyFieldSubtotal.totalTokens.observedSubtotal, null, 'missing is not zero');
 
   const executions = [{ versionedGameId: 'a-v1', executionIdSha256: 'e'.repeat(64), executionOccurrence: 0 }];
-  const snapshots = normalize([{ runId: 'r16', report: { runId: 'r16', games: [game('a-v1', undefined, { executions })] }, attempts: [
+  const snapshots = normalize([{ runId: 'r16', report: { runId: 'r16', completeness: { expectedCount: 1 }, games: [game('a-v1', undefined, { executions })] }, attempts: [
     { versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 1, mechanismMetrics: metrics({ modelCalls: 2 }) },
     { versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 2, mechanismMetrics: metrics({ modelCalls: 5 }) },
   ] }]).runs[0];
@@ -312,7 +317,7 @@ test('E11 a crash before MANIFEST leaves an incomplete export and existing outpu
 });
 
 test('E12 the real CLI exports, validates and reads back; exit codes follow audit readiness', () => {
-  const complete = setup([{ runId: 'r18', report: { runId: 'r18', aggregates: { mechanismMetrics: metrics({ modelCalls: 3 }) }, games: [game('a-v1', metrics({ modelCalls: 3 }))] },
+  const complete = setup([{ runId: 'r18', report: { runId: 'r18', completeness: { expectedCount: 1 }, aggregates: { mechanismMetrics: metrics({ modelCalls: 3 }) }, games: [game('a-v1', metrics({ modelCalls: 3 }))] },
     trajectory: [finished(1, 'a-v1', false)] }]);
   const incomplete = setup([{ runId: 'r19', report: { runId: 'r19', games: [game('a-v1', undefined)] } }]);
   try {
@@ -340,5 +345,55 @@ test('E12 the real CLI exports, validates and reads back; exit codes follow audi
   } finally {
     fs.rmSync(complete.root, { recursive: true, force: true });
     fs.rmSync(incomplete.root, { recursive: true, force: true });
+  }
+});
+
+test('E13 review regressions: exact game identity, unknown expected set, invalid current records, re-derived readiness', () => {
+  // Short ids that prefix one another never share terminal events.
+  const prefixed = normalize([{ runId: 'r20', report: { runId: 'r20', completeness: { expectedCount: 2 }, games: [game('a-v1', metrics()), game('ab-v1', metrics(), { state: 'NOT_FINISHED' })] },
+    trajectory: [finished(1, 'ab-v1', true)] }]).runs[0];
+  assert.equal(prefixed.games.find((item) => item.versionedGameId === 'a-v1').outcome.status, 'completed');
+  assert.equal(prefixed.games.find((item) => item.versionedGameId === 'ab-v1').outcome.status, 'error');
+
+  // Without the report's expected set, present records never prove completeness.
+  const unknown = normalize([{ runId: 'r21', report: { runId: 'r21', games: [game('a-v1', metrics({ modelCalls: 2 }))] } }]).runs[0];
+  assert.equal(unknown.metrics.recomputedAggregate, null);
+  assert.ok(unknown.audit.gaps.includes('EXPECTED_UNITS_UNKNOWN'));
+
+  // One malformed record in a current report is located, not a legacy downgrade.
+  const mixed = normalize([{ runId: 'r22', report: { runId: 'r22', completeness: { expectedCount: 2 }, games: [game('a-v1', metrics()), { gameId: 'b-v1', state: 42 }] } }]).runs[0];
+  assert.equal(mixed.progress.sourceSchema, 'avo.benchmark-report');
+  assert.ok(mixed.audit.gaps.includes('INVALID_GAME_RECORD:$.games[1]'));
+
+  // Unknown receipt shapes are a gap, never a cancellation.
+  const oddReceipts = normalize([{ runId: 'r23', report: { runId: 'r23', completeness: { expectedCount: 1 }, games: [game('a-v1', metrics(), { state: 'NOT_FINISHED' })] },
+    receipts: { cancellations: [{ cancelRequested: true }] } }]).runs[0];
+  assert.equal(oddReceipts.executionOutcome.status, 'unknown');
+  assert.ok(oddReceipts.audit.gaps.includes('RECEIPTS_SCHEMA_UNKNOWN'));
+
+  // The validator re-derives readiness: clearing gaps and forcing ready fails even with rewritten hashes.
+  const fixture = setup([{ runId: 'r24', report: { runId: 'r24', completeness: { expectedCount: 1 }, games: [game('a-v1', metrics())] } }]);
+  try {
+    exportTrajectoryAudit({ manifestFile: fixture.manifestFile, outputDir: fixture.output });
+    const runFile = path.join(fixture.output, 'runs', 'r24.json');
+    const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    assert.equal(run.artifactAvailability.trajectory, 'missing');
+    run.audit = { ready: true, gaps: [] };
+    fs.writeFileSync(runFile, JSON.stringify(run));
+    const manifestFile = path.join(fixture.output, 'MANIFEST.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    const bytes = fs.readFileSync(runFile);
+    manifest.files = manifest.files.map((entry) => (entry.path === 'runs/r24.json'
+      ? { ...entry, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }
+      : entry));
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    const result = validateTrajectoryAudit(fixture.output);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.reason === 'GAP_OMITTED:TRAJECTORY_NOT_PRESENT'));
+    assert.ok(result.errors.some((error) => error.reason === 'READY_FLAG_INCONSISTENT'));
+    fs.writeFileSync(runFile, '{"truncated":');
+    assert.ok(validateTrajectoryAudit(fixture.output).errors.some((error) => error.reason === 'FILE_JSON_INVALID'));
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
   }
 });
