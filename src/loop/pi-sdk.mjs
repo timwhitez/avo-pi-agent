@@ -237,7 +237,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
   // that produced its call. Nothing here feeds back into stopping, counting or
   // the model context; the read history is bounded and declares eviction.
   const MAX_READ_HISTORY = 4096;
-  const MAX_PREPARED = 256;
+  // Only the request that produced the next calls is ever an origin.
+  const MAX_PREPARED = 16;
   const MAX_READ_WINDOW = 64;
   const classifyReadReceipt = (state, receipt) => {
     if (!state || !receipt || !READ_TOOLS.has(receipt.toolName)) return;
@@ -249,10 +250,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     // The key becomes "seen" only when a later prepared request delivers it.
     if (classification.readKey && receipt.outcome === 'success' && receipt.delivery === 'complete') {
       state.readKeyByCall.set(String(receipt.toolCallId).split('|')[0], classification.readKey);
-      if (state.readKeyByCall.size > MAX_READ_HISTORY) state.readKeyByCall.delete(state.readKeyByCall.keys().next().value);
+      if (state.readKeyByCall.size > MAX_READ_HISTORY) {
+        state.readKeyByCall.delete(state.readKeyByCall.keys().next().value);
+        state.readHistoryEvicted = true;
+      }
     }
     emitReceipt(state, (timing) => buildReadVisibility({ receipt, classification, ...timing }));
-    state.readWindow.push({ toolCallId: receipt.toolCallId, toolName: receipt.toolName, classification: classification.classification });
+    state.readWindow.push({
+      toolCallId: receipt.toolCallId,
+      toolName: receipt.toolName,
+      originRequestSequence: receipt.originRequestSequence ?? null,
+      classification: classification.classification,
+    });
     if (state.readWindow.length > MAX_READ_WINDOW) {
       state.readWindow.shift();
       state.readWindowOmitted += 1;
@@ -381,6 +390,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           ...timing,
         }));
         if (receipts && preparedReceipt) {
+          // A byte-bounded visible list cannot prove what else was delivered.
+          if ((preparedReceipt.coverage?.omittedCount ?? 0) > 0) receipts.readHistoryEvicted = true;
           for (const key of deliveredReadKeys(preparedReceipt, receipts.readKeyByCall)) {
             receipts.readHistory.delete(key);
             receipts.readHistory.add(key);
@@ -746,10 +757,19 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           scope: receiptScope(),
           terminationReason,
           noActionInnerTurns,
-          window: {
-            reads: runTelemetry.receipts.readWindow.slice(),
-            omittedCount: runTelemetry.receipts.readWindowOmitted,
-          },
+          // The triggering window: reads issued by the last no-action turns.
+          window: (() => {
+            const firstRequest = providerRequestSequence - noActionInnerTurns + 1;
+            const reads = runTelemetry.receipts.readWindow.filter((read) => (read.originRequestSequence ?? 0) >= firstRequest);
+            const earliestRetained = runTelemetry.receipts.readWindow[0]?.originRequestSequence ?? null;
+            return {
+              firstRequestSequence: firstRequest,
+              lastRequestSequence: providerRequestSequence,
+              reads,
+              omittedCount: runTelemetry.receipts.readWindowOmitted > 0 && earliestRetained !== null && earliestRetained > firstRequest
+                ? runTelemetry.receipts.readWindowOmitted : 0,
+            };
+          })(),
           remainingActions: Number.isSafeInteger(finalStatus?.maxActions) && Number.isSafeInteger(finalStatus?.environmentActions)
             ? finalStatus.maxActions - finalStatus.environmentActions : null,
           remainingOuterTurns: config.maxOuterTurns - outerTurns,

@@ -50,14 +50,15 @@ export function scripted(turns) {
 }
 
 export async function runAgent({
-  url, root, policyProfile = 'minimal-v1', env = environment(), onPayload, maxOuterTurns = 40, stallWindow = 8, onEvent = null,
+  url, root, policyProfile = 'minimal-v1', env = environment(), onPayload, maxOuterTurns = 40, stallWindow, onEvent = null,
 }) {
   const events = [];
   const loop = await createPiSdkLoop({
     provider: { baseUrl: url, apiKey: process.env.OPENAI_API_KEY, model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max') },
     workspaceMode: 'disabled',
     policyProfile,
-    stallWindow,
+    // Omitted when unset, so the loop's own default is exercised.
+    ...(stallWindow === undefined ? {} : { stallWindow }),
     maxOuterTurns,
     toolResultMaxChars: 24_000,
   }, { onEvent: onEvent ?? ((event) => events.push(event)), ...(onPayload ? { onPayload } : {}) });
@@ -65,7 +66,7 @@ export async function runAgent({
     gameId: 'visibility-v1',
     environment: env,
     loop,
-    config: { maxActions: 100, stallWindow, memoryDir: path.join(root, 'memory'), workspaceMode: 'disabled', policyProfile, toolResultMaxChars: 24_000 },
+    config: { maxActions: 100, stallWindow: stallWindow ?? 8, memoryDir: path.join(root, 'memory'), workspaceMode: 'disabled', policyProfile, toolResultMaxChars: 24_000 },
     captureScorecard: false,
   });
   await agent.initialize();

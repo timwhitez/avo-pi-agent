@@ -434,17 +434,20 @@ export function classifyReadsOffline(toolReceipts, contextReceipts) {
   }
   for (const [stream, list] of byStream) {
     const requests = (prepared.get(stream) ?? []).toSorted((a, b) => a.requestSequence - b.requestSequence);
+    const bySequence = new Map(requests.map((request) => [request.requestSequence, request]));
     const delivered = new Set();
+    let complete = true;
     const lookup = { get: (base) => keyByCall.get(canonicalJson([stream, base])) };
     let cursor = 0;
     for (const receipt of list.toSorted((a, b) => (a.originRequestSequence ?? 0) - (b.originRequestSequence ?? 0) || (a.startSequence ?? 0) - (b.startSequence ?? 0))) {
       while (cursor < requests.length && requests[cursor].requestSequence <= (receipt.originRequestSequence ?? 0)) {
+        if ((requests[cursor].coverage?.omittedCount ?? 0) > 0) complete = false;
         for (const key of deliveredReadKeys(requests[cursor], lookup)) delivered.add(key);
         cursor += 1;
       }
-      const origin = requests.find((request) => request.requestSequence === receipt.originRequestSequence) ?? null;
+      const origin = bySequence.get(receipt.originRequestSequence) ?? null;
       results.push({ toolCallId: receipt.toolCallId, cliAttempt: receipt.cliAttempt ?? null,
-        ...classifyRead(receipt, { origin, history: { has: (key) => delivered.has(key), complete: true } }) });
+        ...classifyRead(receipt, { origin, history: { has: (key) => delivered.has(key), complete } }) });
     }
   }
   return results;

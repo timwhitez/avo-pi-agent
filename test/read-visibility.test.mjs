@@ -261,12 +261,33 @@ test('L11 offline recomputation from exported receipts agrees with the online re
   }
 });
 
-test('L12 phase 1 changes no default: stop guard, stall window, budgets and prompts are untouched', async () => {
-  const { runtimeStatusTemplate } = await import('../src/loop/pi-sdk.mjs');
-  const { policySystemPrompt } = await import('../src/core/policy-profile.mjs');
-  const source = fs.readFileSync(new URL('../src/loop/pi-sdk.mjs', import.meta.url), 'utf8');
-  assert.match(source, /config\.stallWindow >= 2\s*\n?\s*\? config\.stallWindow\s*\n?\s*: 8;/, 'default stall window 8 unchanged');
-  assert.match(source, /if \(!seenToolOutcomes\.has\(outcome\)\) \{/, 'the original novelty guard is still the stop input');
-  assert.equal(/classification[^\n]*noActionInnerTurns|noActionInnerTurns[^\n]*classification/.test(source), false, 'classification never touches the stop counter');
-  assert.ok(runtimeStatusTemplate('minimal-v1').length > 0 && policySystemPrompt('minimal-v1').length > 0);
+test('L12 phase 1 changes no default: without configuration the original guard stops after exactly 8 no-action turns', async () => {
+  const root = tempRoot();
+  try {
+    const reads = Array.from({ length: 12 }, (_, index) => page(`call_same_${index}`, 1));
+    await withLoopback(scripted(reads), async ({ url, bodies }) => {
+      // stallWindow undefined -> the unchanged default applies.
+      const run = await runAgent({ url, root, stallWindow: undefined });
+      assert.equal(run.result.terminationReason, 'repeated-tool-outcome');
+      // First read is novel; the next eight identical reads are no-action turns.
+      assert.equal(run.tool.length, 9);
+      assert.equal(bodies.length, 9);
+      const [record] = run.termination;
+      assert.equal(record.noActionInnerTurns, 8);
+      assert.equal(record.window.reads.length, 8, 'the record lists the triggering window only');
+      assert.ok(record.window.reads.every((read) => read.classification === 'duplicate-visible'));
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('L13 review regressions: a byte-bounded prepared receipt makes history coverage incomplete (unknown, not new)', () => {
+  const read = (id, call) => ({ toolName: 'trajectory_read', toolCallId: call, outcome: 'success', delivery: 'complete', selectorCompleteness: 'complete',
+    selectorSha256: 'a'.repeat(64), deliveredTextSha256: 'b'.repeat(64), scope: {}, cliAttempt: 1, originRequestSequence: id, startSequence: id });
+  const prepared = (sequence, omittedCount) => ({ phase: 'prepared', scope: {}, cliAttempt: 1, requestSequence: sequence, visibleToolResults: [],
+    coverage: { complete: omittedCount === 0, omittedCount } });
+  const [first, second] = classifyReadsOffline([read(1, 'call_1'), read(3, 'call_2')], [prepared(1, 0), prepared(2, 5), prepared(3, 0)]);
+  assert.equal(first.classification, 'new-content');
+  assert.deepEqual([second.seenBefore, second.classification], ['unknown', 'visibility-unknown']);
 });
