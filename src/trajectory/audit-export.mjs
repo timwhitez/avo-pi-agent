@@ -9,7 +9,7 @@ import { normalizeGameRecord } from '../benchmark/report-records.mjs';
 import { REPORT_LIMITS, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 import { evaluateScorecardCoverage } from '../benchmark/scorecard-evidence.mjs';
 import { loadTrajectoryEvents } from './evidence-loader.mjs';
-import { AUDIT_RECEIPTS_SCHEMA, CONTEXT_RECEIPT_SCHEMA, EXECUTION_TERMINAL_SCHEMA, TOOL_RECEIPT_SCHEMA } from './audit-events.mjs';
+import { AUDIT_RECEIPTS_SCHEMA, CONTEXT_RECEIPT_SCHEMA, EXECUTION_TERMINAL_SCHEMA, TOOL_RECEIPT_SCHEMA, classifyReadsOffline } from './audit-events.mjs';
 
 export { AUDIT_RECEIPTS_SCHEMA };
 
@@ -580,7 +580,39 @@ function summarizeReceipts(receipts, games, gaps) {
   const incompleteContext = (context ?? []).filter((receipt) => receipt?.schema !== CONTEXT_RECEIPT_SCHEMA
     || receipt.coverage?.complete !== true);
   if (incompleteContext.length) gaps.push('CONTEXT_COVERAGE_INCOMPLETE');
+  // #345: recompute read visibility offline over the complete exported
+  // history and compare with the online records. Determinate disagreement is
+  // a gap; an online unknown that the complete history resolves stays
+  // reported as resolved offline, not rewritten.
+  const offline = classifyReadsOffline([...calls.values()].map((entry) => entry.receipt), context ?? []);
+  const online = Array.isArray(receipts.readVisibility) ? receipts.readVisibility : [];
+  const onlineByCall = new Map(online.map((record) => [canonicalJson([record.cliAttempt ?? null, record.toolCallId]), record]));
+  const disagreements = [];
+  let resolvedOffline = 0;
+  for (const item of offline) {
+    const record = onlineByCall.get(canonicalJson([item.cliAttempt, item.toolCallId]));
+    if (!record) continue;
+    if (record.classification === 'visibility-unknown' && item.classification !== 'visibility-unknown') resolvedOffline += 1;
+    else if (item.classification !== 'visibility-unknown' && record.classification !== item.classification) {
+      disagreements.push({ toolCallId: item.toolCallId, online: record.classification, offline: item.classification });
+    }
+  }
+  if (disagreements.length) gaps.push('READ_VISIBILITY_DISAGREEMENT');
+  const countBy = (list) => list.reduce((out, item) => ({ ...out, [item.classification]: (out[item.classification] ?? 0) + 1 }), {});
   return {
+    readVisibility: {
+      online: countBy(online),
+      offline: countBy(offline),
+      onlineRecords: online.length,
+      resolvedOffline,
+      disagreements: disagreements.slice(0, 256),
+      loopTerminations: (Array.isArray(receipts.loopTerminations) ? receipts.loopTerminations : []).map((record) => ({
+        terminationReason: record.terminationReason,
+        noActionInnerTurns: record.noActionInnerTurns,
+        window: record.window,
+        coverage: record.coverage,
+      })).slice(0, 64),
+    },
     toolReceiptCount: calls.size,
     duplicateCount,
     conflicts,

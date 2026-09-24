@@ -321,6 +321,165 @@ export function buildExecutionTerminal({
   });
 }
 
+// --- #345 phase 1: read visibility (observation only) -----------------------
+export const READ_VISIBILITY_SCHEMA = 'avo.read-visibility.v1';
+export const LOOP_TERMINATION_SCHEMA = 'avo.loop-termination.v1';
+export const READ_TOOLS = new Set(['trajectory_read', 'memory_read', 'journal_read', 'observe', 'knowledge_read', 'workspace_read', 'workspace_list']);
+
+// The content version of what a read returned, with its domain: the record's
+// own version when the tool reports one, else the observation payload, else
+// the complete delivered text.
+function contentVersion(receipt) {
+  if (receipt.readEnvelope?.contentSha256) return { domain: 'record-content', value: receipt.readEnvelope.contentSha256 };
+  if (receipt.observationView?.payloadSha256) return { domain: 'observation-payload', value: receipt.observationView.payloadSha256 };
+  if (receipt.deliveredTextSha256) return { domain: 'delivered-text', value: receipt.deliveredTextSha256 };
+  return null;
+}
+
+/**
+ * Mechanical read key: scope, tool, normalized selector, content version,
+ * representation and chunk range. Different selectors with equal bodies stay
+ * different keys. An incomplete selector has no key (no identity is made up).
+ */
+export function readKey(receipt) {
+  const version = contentVersion(receipt);
+  if (!version || receipt.selectorCompleteness !== 'complete' || !receipt.selectorSha256) return null;
+  return sha256(canonicalJson({
+    scope: { runId: receipt.scope?.runId ?? null, attemptId: receipt.scope?.attemptId ?? null, cliAttempt: receipt.cliAttempt ?? null },
+    toolName: receipt.toolName,
+    selectorSha256: receipt.selectorSha256,
+    contentVersion: version,
+    representation: receipt.observationView?.representation ?? null,
+    chunkRange: receipt.readEnvelope?.chunkRange ?? null,
+  }));
+}
+
+/**
+ * Classifies one read against the request that produced its call (never the
+ * next request, which already contains this result) and a history of read
+ * keys delivered before. Pure and deterministic; used online and offline.
+ *   history: { has(key): boolean, complete: boolean }
+ */
+export function classifyRead(receipt, { origin = null, history }) {
+  const key = readKey(receipt);
+  const currentOutcome = receipt.outcome;
+  let priorVisibility = 'unknown';
+  if (origin && Array.isArray(origin.visibleToolResults)) {
+    const sameSelector = origin.visibleToolResults.filter((entry) => entry.selectorSha256 && entry.selectorSha256 === receipt.selectorSha256);
+    const full = sameSelector.some((entry) => entry.delivery === 'complete' && entry.contentVersion === receipt.deliveredTextSha256
+      && entry.wireMatchesHost !== false);
+    if (full) priorVisibility = 'full';
+    else if (sameSelector.some((entry) => entry.delivery === 'elided' || entry.delivery === 'truncated')) priorVisibility = 'reduced';
+    else if (origin.coverage?.complete === true) priorVisibility = 'absent';
+  }
+  const seenBefore = key === null ? 'unknown' : history.has(key) ? 'yes' : history.complete ? 'no' : 'unknown';
+  let classification;
+  let reason = null;
+  if (currentOutcome !== 'success' || receipt.delivery !== 'complete') {
+    classification = 'visibility-unknown';
+    reason = currentOutcome !== 'success' ? `outcome-${currentOutcome}` : `delivery-${receipt.delivery}`;
+  } else if (key === null) {
+    classification = 'visibility-unknown';
+    reason = 'read-key-unavailable';
+  } else if (seenBefore === 'no') {
+    classification = 'new-content';
+  } else if (seenBefore === 'yes' && priorVisibility === 'full') {
+    classification = 'duplicate-visible';
+  } else if (seenBefore === 'yes' && (priorVisibility === 'reduced' || priorVisibility === 'absent')) {
+    classification = 'restored-history';
+  } else {
+    classification = 'visibility-unknown';
+    reason = seenBefore === 'unknown' ? 'history-coverage-incomplete' : 'origin-visibility-unknown';
+  }
+  return { readKey: key, seenBefore, priorVisibility, currentOutcome, classification, reason };
+}
+
+/**
+ * Read keys delivered to the model: a key counts as delivered once its tool
+ * result appears complete and wire-matched in a prepared request. Host receipt
+ * of a result is not delivery (a sibling call in the same turn never saw it).
+ */
+export function deliveredReadKeys(prepared, readKeyByCall) {
+  const keys = [];
+  for (const entry of Array.isArray(prepared?.visibleToolResults) ? prepared.visibleToolResults : []) {
+    if (entry.delivery !== 'complete' || entry.wireMatchesHost !== true) continue;
+    const key = readKeyByCall.get(String(entry.toolKey?.toolCallId || '').split('|')[0]);
+    if (key) keys.push(key);
+  }
+  return keys;
+}
+
+/** Offline recomputation over exported receipts with a complete history. */
+export function classifyReadsOffline(toolReceipts, contextReceipts) {
+  const streamOf = (receipt) => canonicalJson([receipt.scope?.runId ?? null, receipt.cliAttempt ?? null]);
+  const prepared = new Map();
+  for (const receipt of Array.isArray(contextReceipts) ? contextReceipts : []) {
+    if (receipt?.phase !== 'prepared') continue;
+    if (!prepared.has(streamOf(receipt))) prepared.set(streamOf(receipt), []);
+    prepared.get(streamOf(receipt)).push(receipt);
+  }
+  const reads = (Array.isArray(toolReceipts) ? toolReceipts : []).filter((receipt) => READ_TOOLS.has(receipt?.toolName));
+  const keyByCall = new Map();
+  for (const receipt of reads) {
+    const key = readKey(receipt);
+    if (key && receipt.outcome === 'success' && receipt.delivery === 'complete') {
+      keyByCall.set(canonicalJson([streamOf(receipt), String(receipt.toolCallId).split('|')[0]]), key);
+    }
+  }
+  const results = [];
+  const byStream = new Map();
+  for (const receipt of reads) {
+    if (!byStream.has(streamOf(receipt))) byStream.set(streamOf(receipt), []);
+    byStream.get(streamOf(receipt)).push(receipt);
+  }
+  for (const [stream, list] of byStream) {
+    const requests = (prepared.get(stream) ?? []).toSorted((a, b) => a.requestSequence - b.requestSequence);
+    const delivered = new Set();
+    const lookup = { get: (base) => keyByCall.get(canonicalJson([stream, base])) };
+    let cursor = 0;
+    for (const receipt of list.toSorted((a, b) => (a.originRequestSequence ?? 0) - (b.originRequestSequence ?? 0) || (a.startSequence ?? 0) - (b.startSequence ?? 0))) {
+      while (cursor < requests.length && requests[cursor].requestSequence <= (receipt.originRequestSequence ?? 0)) {
+        for (const key of deliveredReadKeys(requests[cursor], lookup)) delivered.add(key);
+        cursor += 1;
+      }
+      const origin = requests.find((request) => request.requestSequence === receipt.originRequestSequence) ?? null;
+      results.push({ toolCallId: receipt.toolCallId, cliAttempt: receipt.cliAttempt ?? null,
+        ...classifyRead(receipt, { origin, history: { has: (key) => delivered.has(key), complete: true } }) });
+    }
+  }
+  return results;
+}
+
+export function buildReadVisibility({ receipt, classification, recordSequence, monotonicTime, clockDomain }) {
+  return bound({
+    schema: READ_VISIBILITY_SCHEMA,
+    scope: auditScope(receipt.scope ?? {}),
+    toolCallId: receipt.toolCallId,
+    toolName: receipt.toolName,
+    originRequestSequence: receipt.originRequestSequence ?? null,
+    ...classification,
+    recordSequence,
+    monotonicTime,
+    clockDomain,
+  });
+}
+
+export function buildLoopTermination({ scope, terminationReason, noActionInnerTurns, window, remainingActions, remainingOuterTurns, historyComplete, recordSequence, monotonicTime, clockDomain }) {
+  return bound({
+    schema: LOOP_TERMINATION_SCHEMA,
+    scope: auditScope(scope ?? {}),
+    terminationReason,
+    noActionInnerTurns,
+    window,
+    coverage: { complete: historyComplete === true, omittedCount: 0, reason: historyComplete ? null : 'read-history-evicted' },
+    remainingActions: Number.isSafeInteger(remainingActions) ? remainingActions : null,
+    remainingOuterTurns: Number.isSafeInteger(remainingOuterTurns) ? remainingOuterTurns : null,
+    recordSequence,
+    monotonicTime,
+    clockDomain,
+  }, 'window');
+}
+
 /**
  * The CLI binds its run, versioned game and own attempt ordinal (distinct from
  * the Agent's attemptId) to an adapter receipt and re-applies the byte bound.
@@ -330,7 +489,7 @@ export function bindCliReceipt(receipt, { runId = null, versionedGameId = null, 
     ...receipt,
     scope: { ...auditScope(receipt.scope ?? {}), runId: identifier(runId), versionedGameId: identifier(versionedGameId) },
     cliAttempt: Number.isSafeInteger(cliAttempt) && cliAttempt > 0 ? cliAttempt : null,
-  }, receipt.schema === CONTEXT_RECEIPT_SCHEMA ? 'visibleToolResults' : null);
+  }, receipt.schema === CONTEXT_RECEIPT_SCHEMA ? 'visibleToolResults' : receipt.schema === LOOP_TERMINATION_SCHEMA ? 'window' : null);
 }
 
 export function receiptLogLine(receipt) {
@@ -345,6 +504,8 @@ export function receiptsFromPrivateLog(text, { maxLines = 1_000_000 } = {}) {
   const toolReceipts = [];
   const contextReceipts = [];
   const executionTerminals = [];
+  const readVisibility = [];
+  const loopTerminations = [];
   let malformed = 0;
   let lines = 0;
   for (const line of String(text).split('\n')) {
@@ -361,7 +522,9 @@ export function receiptsFromPrivateLog(text, { maxLines = 1_000_000 } = {}) {
     if (value?.schema === TOOL_RECEIPT_SCHEMA) toolReceipts.push(value);
     else if (value?.schema === CONTEXT_RECEIPT_SCHEMA) contextReceipts.push(value);
     else if (value?.schema === EXECUTION_TERMINAL_SCHEMA) executionTerminals.push(value);
+    else if (value?.schema === READ_VISIBILITY_SCHEMA) readVisibility.push(value);
+    else if (value?.schema === LOOP_TERMINATION_SCHEMA) loopTerminations.push(value);
     else malformed += 1;
   }
-  return { schema: AUDIT_RECEIPTS_SCHEMA, toolReceipts, contextReceipts, executionTerminals, malformedLines: malformed };
+  return { schema: AUDIT_RECEIPTS_SCHEMA, toolReceipts, contextReceipts, executionTerminals, readVisibility, loopTerminations, malformedLines: malformed };
 }

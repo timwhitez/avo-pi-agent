@@ -15,8 +15,13 @@ import {
 } from '../provider-capabilities.mjs';
 
 import {
+  READ_TOOLS,
   buildContextReceipt,
+  buildLoopTermination,
+  buildReadVisibility,
   buildToolReceipt,
+  classifyRead,
+  deliveredReadKeys,
   sha256 as receiptSha256,
   textDigest,
 } from '../trajectory/audit-events.mjs';
@@ -191,7 +196,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       .filter((block) => block?.type === 'text').map((block) => block.text).join('');
     const scope = state.scope();
     const startSequence = ++state.toolSequence;
-    emitReceipt(state, () => buildToolReceipt({
+    const emittedLifecycle = emitReceipt(state, () => buildToolReceipt({
       scope,
       resultScope: scope,
       toolCallId: id,
@@ -206,6 +211,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       delivery: 'complete',
       details: { rejectionStage: 'harness-before-execute' },
     }));
+    classifyReadReceipt(state, emittedLifecycle);
   };
   const clockDomain = `pi-loop:${process.pid}:${process.hrtime.bigint()}`;
   // Receipts are observation only: a failure to build one degrades audit
@@ -226,6 +232,31 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     }
     emitEvent({ type: 'avo_audit_receipt', receipt });
     return receipt;
+  };
+  // #345 phase 1 (observation only): classify each read against the request
+  // that produced its call. Nothing here feeds back into stopping, counting or
+  // the model context; the read history is bounded and declares eviction.
+  const MAX_READ_HISTORY = 4096;
+  const MAX_PREPARED = 256;
+  const MAX_READ_WINDOW = 64;
+  const classifyReadReceipt = (state, receipt) => {
+    if (!state || !receipt || !READ_TOOLS.has(receipt.toolName)) return;
+    const origin = state.preparedBySequence.get(receipt.originRequestSequence) ?? null;
+    const classification = classifyRead(receipt, {
+      origin,
+      history: { has: (key) => state.readHistory.has(key), complete: !state.readHistoryEvicted },
+    });
+    // The key becomes "seen" only when a later prepared request delivers it.
+    if (classification.readKey && receipt.outcome === 'success' && receipt.delivery === 'complete') {
+      state.readKeyByCall.set(String(receipt.toolCallId).split('|')[0], classification.readKey);
+      if (state.readKeyByCall.size > MAX_READ_HISTORY) state.readKeyByCall.delete(state.readKeyByCall.keys().next().value);
+    }
+    emitReceipt(state, (timing) => buildReadVisibility({ receipt, classification, ...timing }));
+    state.readWindow.push({ toolCallId: receipt.toolCallId, toolName: receipt.toolName, classification: classification.classification });
+    if (state.readWindow.length > MAX_READ_WINDOW) {
+      state.readWindow.shift();
+      state.readWindowOmitted += 1;
+    }
   };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
@@ -338,7 +369,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         // Digest over the JSON the transport would send (undefined fields drop).
         requestState.finalCanonicalSha256 = receiptSha256(canonicalJson(JSON.parse(JSON.stringify(finalPayload))));
         const visibility = wireVisibility(prepared, finalPayload);
-        emitReceipt(receipts, (timing) => buildContextReceipt({
+        const preparedReceipt = emitReceipt(receipts, (timing) => buildContextReceipt({
           scope: prepared?.scope,
           requestSequence,
           phase: 'prepared',
@@ -349,6 +380,20 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           inputChars: requestTelemetry.inputChars ?? null,
           ...timing,
         }));
+        if (receipts && preparedReceipt) {
+          for (const key of deliveredReadKeys(preparedReceipt, receipts.readKeyByCall)) {
+            receipts.readHistory.delete(key);
+            receipts.readHistory.add(key);
+            if (receipts.readHistory.size > MAX_READ_HISTORY) {
+              receipts.readHistory.delete(receipts.readHistory.values().next().value);
+              receipts.readHistoryEvicted = true;
+            }
+          }
+          receipts.preparedBySequence.set(requestSequence, preparedReceipt);
+          if (receipts.preparedBySequence.size > MAX_PREPARED) {
+            receipts.preparedBySequence.delete(receipts.preparedBySequence.keys().next().value);
+          }
+        }
         return override;
       },
     });
@@ -424,6 +469,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         selectors: new Map(),
         pendingTools: new Map(),
         wrapperCalls: new Set(),
+        preparedBySequence: new Map(),
+        readHistory: new Set(),
+        readKeyByCall: new Map(),
+        readHistoryEvicted: false,
+        readWindow: [],
+        readWindowOmitted: 0,
         lifecycle: new Map(),
         lifecycleReported: new Set(),
         scope: () => receiptScope(),
@@ -455,10 +506,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             result = await tool.execute(params);
           } catch (error) {
             receiptState.pendingTools.delete(callId);
-            emitReceipt(receiptState, () => buildToolReceipt({
+            classifyReadReceipt(receiptState, emitReceipt(receiptState, () => buildToolReceipt({
               scope: callScope, resultScope: ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope, toolCallId: callId, toolName: tool.name,
               startSequence, endSequence: ++receiptState.toolSequence, originRequestSequence, params, outcome: 'exception',
-            }));
+            })));
             throw error;
           }
           receiptState.pendingTools.delete(callId);
@@ -514,6 +565,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             details,
           }));
           if (receipt) receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
+          classifyReadReceipt(receiptState, receipt);
           return {
             content: [{ type: 'text', text }],
             details,
@@ -677,18 +729,38 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       const messages = agent.state.messages;
       const error = agent.state.errorMessage || null;
-      return {
-        messages,
-        error,
-        terminationReason: error
-          ? null
-          : noToolTurn
+      const terminationReason = error
+        ? null
+        : noToolTurn
           ? 'assistant-no-tool'
           : innerTurnNoActionLimitReached
             ? 'repeated-tool-outcome'
             : exhaustedOuterTurns
               ? 'outer-turn-budget'
-              : null,
+              : null;
+      // The original stop decision is recorded with its read window; the
+      // record never feeds back into the decision.
+      if (terminationReason) {
+        const finalStatus = (() => { try { return runtimeStatus(); } catch { return null; } })();
+        emitReceipt(runTelemetry.receipts, (timing) => buildLoopTermination({
+          scope: receiptScope(),
+          terminationReason,
+          noActionInnerTurns,
+          window: {
+            reads: runTelemetry.receipts.readWindow.slice(),
+            omittedCount: runTelemetry.receipts.readWindowOmitted,
+          },
+          remainingActions: Number.isSafeInteger(finalStatus?.maxActions) && Number.isSafeInteger(finalStatus?.environmentActions)
+            ? finalStatus.maxActions - finalStatus.environmentActions : null,
+          remainingOuterTurns: config.maxOuterTurns - outerTurns,
+          historyComplete: !runTelemetry.receipts.readHistoryEvicted,
+          ...timing,
+        }));
+      }
+      return {
+        messages,
+        error,
+        terminationReason,
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,
