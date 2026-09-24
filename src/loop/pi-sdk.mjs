@@ -14,6 +14,13 @@ import {
   transcriptMaxTokens,
 } from '../provider-capabilities.mjs';
 
+import {
+  buildContextReceipt,
+  buildToolReceipt,
+  sha256 as receiptSha256,
+  textDigest,
+} from '../trajectory/audit-events.mjs';
+
 /** Production loop backed by the official Pi Agent Harness packages. */
 const STATUS_LINES = `state={state}
 environment_actions={environmentActions}/{maxActions}
@@ -74,7 +81,7 @@ export const THINKING_ELISION_POLICY_SHA256 = crypto
   .createHash('sha256')
   .update(THINKING_ELISION_POLICY)
   .digest('hex');
-export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
+export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: externalOnPayload = undefined } = {}) {
   let Agent;
   let estimateContextTokens;
   let createModels;
@@ -163,11 +170,64 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     }
     onEvent(event);
     if (providerIncident) onEvent(providerIncident);
+    recordLifecycleReceipt(event);
+  };
+  // Calls that Pi rejects before execute (argument validation, truncated model
+  // output) never reach the wrapper; their lifecycle events still yield one
+  // receipt each, so receipts cover every counted tool call.
+  const recordLifecycleReceipt = (event) => {
+    const state = activeTelemetry?.receipts;
+    if (!state || (event?.type !== 'tool_execution_start' && event?.type !== 'tool_execution_end')) return;
+    const id = String(event.toolCallId || '');
+    if (!id) return;
+    if (event.type === 'tool_execution_start') {
+      state.lifecycle.set(id, { args: event.args, originRequestSequence: providerRequestSequence });
+      return;
+    }
+    if (state.wrapperCalls.has(id) || state.lifecycleReported.has(id)) return;
+    state.lifecycleReported.add(id);
+    const started = state.lifecycle.get(id);
+    const text = (Array.isArray(event.result?.content) ? event.result.content : [])
+      .filter((block) => block?.type === 'text').map((block) => block.text).join('');
+    const scope = state.scope();
+    const startSequence = ++state.toolSequence;
+    emitReceipt(state, () => buildToolReceipt({
+      scope,
+      resultScope: scope,
+      toolCallId: id,
+      toolName: String(event.toolName || ''),
+      startSequence,
+      endSequence: ++state.toolSequence,
+      originRequestSequence: started?.originRequestSequence ?? null,
+      params: started?.args,
+      outcome: 'rejected',
+      rawText: text,
+      deliveredText: text,
+      delivery: 'complete',
+      details: { rejectionStage: 'harness-before-execute' },
+    }));
+  };
+  const clockDomain = `pi-loop:${process.pid}:${process.hrtime.bigint()}`;
+  const emitReceipt = (state, build) => {
+    if (!state) return;
+    state.recordSequence += 1;
+    const receipt = build({
+      recordSequence: state.recordSequence,
+      monotonicTime: Number(process.hrtime.bigint() / 1000n),
+      clockDomain,
+    });
+    emitEvent({ type: 'avo_audit_receipt', receipt });
   };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
     const priorOnPayload = options?.onPayload;
     const telemetry = activeTelemetry;
+    const receipts = telemetry?.receipts ?? null;
+    // The request prepared by transformContext for this model call; later
+    // tool results never count as visible to the call that produced them.
+    const prepared = receipts?.pendingPrepared ?? null;
+    if (receipts) receipts.pendingPrepared = null;
+    const requestState = { httpAttempts: 0, finalCanonicalSha256: null };
     if (telemetry) {
       telemetry.modelCalls += 1;
       telemetry.requestStarts.push(Date.now());
@@ -177,8 +237,45 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
     const baseFetch = options?.fetch || globalThis.fetch;
     const measuredFetch = async (...args) => {
       if (telemetry) telemetry.providerHttpRequests += 1;
+      // One logical request may take several HTTP attempts; each is its own
+      // receipt under the same requestSequence and never a new model call.
+      const httpAttempt = ++requestState.httpAttempts;
+      const body = args[1]?.body;
+      const wire = typeof body === 'string' ? body : null;
+      let wireMatchesPayload = null;
+      if (wire !== null && requestState.finalCanonicalSha256) {
+        try {
+          wireMatchesPayload = receiptSha256(canonicalJson(JSON.parse(wire))) === requestState.finalCanonicalSha256;
+        } catch {
+          wireMatchesPayload = false;
+        }
+      }
+      emitReceipt(receipts, (timing) => buildContextReceipt({
+        scope: prepared?.scope,
+        requestSequence,
+        phase: 'dispatch-attempt',
+        httpAttempt,
+        currentObservationAnchor: prepared?.anchor ?? null,
+        coverage: wire === null
+          ? { complete: false, omittedCount: 0, reason: 'body-form-unobservable' }
+          : { complete: wireMatchesPayload === true, omittedCount: 0, reason: wireMatchesPayload === true ? null : 'wire-body-differs-from-final-payload' },
+        payloadCanonicalSha256: requestState.finalCanonicalSha256,
+        wireBodySha256: wire === null ? null : receiptSha256(wire),
+        wireMatchesPayload,
+        wireBytes: wire === null ? null : Buffer.byteLength(wire, 'utf8'),
+        ...timing,
+      }));
       try {
         const response = await baseFetch(...args);
+        emitReceipt(receipts, (timing) => buildContextReceipt({
+          scope: prepared?.scope,
+          requestSequence,
+          phase: 'response-observed',
+          httpAttempt,
+          responseStatus: Number.isSafeInteger(response?.status) ? response.status : null,
+          payloadCanonicalSha256: requestState.finalCanonicalSha256,
+          ...timing,
+        }));
         if (request) request.lastHttpFailed = response?.ok === false;
         if (telemetry && response?.ok === false) {
           telemetry.providerHttpErrors += 1;
@@ -201,15 +298,49 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       maxRetries: streamMaxRetries,
       fetch: measuredFetch,
       onPayload: async (payload, currentModel) => {
-        const requestTelemetry = providerRequestTelemetry(payload, {
-          capabilities,
-          expectedModel: config.provider.model,
-          reasoningEffort: config.provider.reasoningEffort,
-          requestSequence,
-          streamMaxRetries,
-        });
+        // The hook runs first; a returned object replaces the payload and an
+        // in-place edit changes it. Only the final object is checked and hashed.
+        let override;
+        let finalPayload;
+        let requestTelemetry;
+        try {
+          override = priorOnPayload ? await priorOnPayload(payload, currentModel) : undefined;
+          finalPayload = override === undefined ? payload : override;
+          requestTelemetry = providerRequestTelemetry(finalPayload, {
+            capabilities,
+            expectedModel: config.provider.model,
+            reasoningEffort: config.provider.reasoningEffort,
+            requestSequence,
+            streamMaxRetries,
+          });
+        } catch (error) {
+          emitReceipt(receipts, (timing) => buildContextReceipt({
+            scope: prepared?.scope,
+            requestSequence,
+            phase: 'failed-before-dispatch',
+            currentObservationAnchor: prepared?.anchor ?? null,
+            coverage: { complete: false, omittedCount: 0, reason: 'request-not-dispatched' },
+            failure: { stage: priorOnPayload && override === undefined && finalPayload === undefined ? 'payload-hook' : 'capability-check' },
+            ...timing,
+          }));
+          throw error;
+        }
         emitEvent(requestTelemetry);
-        return priorOnPayload ? priorOnPayload(payload, currentModel) : undefined;
+        // Digest over the JSON the transport would send (undefined fields drop).
+        requestState.finalCanonicalSha256 = receiptSha256(canonicalJson(JSON.parse(JSON.stringify(finalPayload))));
+        const visibility = wireVisibility(prepared, finalPayload);
+        emitReceipt(receipts, (timing) => buildContextReceipt({
+          scope: prepared?.scope,
+          requestSequence,
+          phase: 'prepared',
+          currentObservationAnchor: prepared?.anchor ?? null,
+          visibleToolResults: visibility.visibleToolResults,
+          coverage: visibility.coverage,
+          payloadCanonicalSha256: requestState.finalCanonicalSha256,
+          inputChars: requestTelemetry.inputChars ?? null,
+          ...timing,
+        }));
+        return override;
       },
     });
   };
@@ -277,6 +408,25 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       }
       if (activeTelemetry) throw new Error('Pi production loop cannot run one adapter concurrently');
       const runTelemetry = createRunTelemetry();
+      runTelemetry.receipts = {
+        toolSequence: 0,
+        recordSequence: 0,
+        pendingPrepared: null,
+        selectors: new Map(),
+        pendingTools: new Map(),
+        wrapperCalls: new Set(),
+        lifecycle: new Map(),
+        lifecycleReported: new Set(),
+        scope: () => receiptScope(),
+      };
+      const receiptScope = () => {
+        try {
+          const anchor = runtimeStatus()?.currentObservation;
+          return anchor ? { gameId: anchor.gameId, attemptId: anchor.attemptId, episodeId: anchor.episodeId } : {};
+        } catch {
+          return {};
+        }
+      };
       activeTelemetry = runTelemetry;
       try {
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
@@ -284,10 +434,29 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       let novelToolOutcomes = 0;
       const piTools = tools.map((tool) => ({
         ...piToolContract(tool, Type),
-        execute: async (_callId, params) => {
-          const result = await tool.execute(params);
+        execute: async (callId, params) => {
+          const receiptState = runTelemetry.receipts;
+          receiptState.wrapperCalls.add(String(callId));
+          const startSequence = ++receiptState.toolSequence;
+          const callScope = receiptScope();
+          const originRequestSequence = providerRequestSequence;
+          receiptState.pendingTools.set(callId, { toolName: tool.name, params, startSequence, callScope, originRequestSequence });
+          let result;
+          try {
+            result = await tool.execute(params);
+          } catch (error) {
+            receiptState.pendingTools.delete(callId);
+            emitReceipt(receiptState, () => buildToolReceipt({
+              scope: callScope, resultScope: receiptScope(), toolCallId: callId, toolName: tool.name,
+              startSequence, endSequence: ++receiptState.toolSequence, originRequestSequence, params, outcome: 'exception',
+            }));
+            throw error;
+          }
+          receiptState.pendingTools.delete(callId);
+          const rawText = typeof result.text === 'string' ? result.text : null;
           let text = String(result.text ?? '');
           let details = result.details ?? {};
+          const originalText = text;
           if (text.length > maxToolResultChars) {
             const originalChars = text.length;
             const notice = TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE
@@ -320,6 +489,23 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
             seenToolOutcomes.add(outcome);
             novelToolOutcomes += 1;
           }
+          const receipt = buildToolReceipt({
+            scope: callScope,
+            resultScope: receiptScope(),
+            toolCallId: callId,
+            toolName: tool.name,
+            startSequence,
+            endSequence: ++receiptState.toolSequence,
+            originRequestSequence,
+            params,
+            outcome: details?.ok === false ? 'rejected' : 'success',
+            rawText: rawText === null ? null : originalText,
+            deliveredText: text,
+            delivery: text === originalText ? 'complete' : 'truncated',
+            details,
+          });
+          receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
+          emitReceipt(receiptState, () => receipt);
           return {
             content: [{ type: 'text', text }],
             details,
@@ -354,10 +540,16 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           maxOuterTurns: config.maxOuterTurns,
           policyProfile,
         });
-        return boundTranscript(replaceRuntimeStatus(messages, status.text), {
+        const bounded = boundTranscript(replaceRuntimeStatus(messages, status.text), {
           ...transcriptOptions,
           currentAnchor: status.anchor ?? undefined,
         });
+        runTelemetry.receipts.pendingPrepared = preparedVisibility(bounded, {
+          anchor: status.anchor,
+          scope: status.anchor ? { gameId: status.anchor.gameId, attemptId: status.anchor.attemptId, episodeId: status.anchor.episodeId } : {},
+          selectors: runTelemetry.receipts.selectors,
+        });
+        return bounded;
       };
 
       // One logical assistant turn is one SDK `turn_start` event, including a
@@ -375,6 +567,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       let noActionInnerTurns = 0;
       let innerTurnNoActionLimitReached = false;
       const agent = new Agent({
+        ...(externalOnPayload ? { onPayload: externalOnPayload } : {}),
         initialState: {
           systemPrompt: effectiveSystemPrompt,
           model: resolvedModel,
@@ -499,6 +692,15 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
         }),
       };
       } finally {
+        // Calls that started but never returned are reported as incomplete.
+        for (const [callId, pending] of runTelemetry.receipts.pendingTools) {
+          emitReceipt(runTelemetry.receipts, () => buildToolReceipt({
+            scope: pending.callScope, toolCallId: callId, toolName: pending.toolName,
+            startSequence: pending.startSequence, originRequestSequence: pending.originRequestSequence,
+            params: pending.params, outcome: 'incomplete',
+          }));
+        }
+        runTelemetry.receipts.pendingTools.clear();
         if (activeTelemetry === runTelemetry) activeTelemetry = null;
       }
     },
@@ -843,6 +1045,68 @@ export function toTypeBox(schema, Type) {
 function metadata(schema) {
   const keys = ['description', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems'];
   return Object.fromEntries(keys.filter((key) => schema[key] !== undefined).map((key) => [key, schema[key]]));
+}
+
+// Host-side tool results in the bounded request, keyed by the call id the
+// Responses conversion keeps on the wire (the part before '|').
+function preparedVisibility(messages, { anchor, scope, selectors }) {
+  const visible = [];
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message?.role !== 'toolResult') continue;
+    const base = String(message.toolCallId || '').split('|')[0];
+    const text = (Array.isArray(message.content) ? message.content : [])
+      .filter((block) => block?.type === 'text').map((block) => block.text).join('');
+    visible.push({
+      toolKey: { toolCallId: String(message.toolCallId || '') },
+      wireCallId: base,
+      selectorSha256: selectors.get(base) ?? null,
+      contentVersion: textDigest(text).sha256,
+      representation: message.details?.observationView?.representation ?? null,
+      delivery: message.contextElided ? 'elided' : message.details?.contextTruncated ? 'truncated' : 'complete',
+    });
+  }
+  return { anchor: anchor ?? null, scope, visible };
+}
+
+// Matches each prepared host tool result to the final payload's
+// function_call_output. Missing, extra or differing outputs make coverage
+// incomplete; nothing is assumed to have reached the model.
+function wireVisibility(prepared, payload) {
+  const outputs = new Map();
+  let duplicateWireIds = 0;
+  for (const item of Array.isArray(payload?.input) ? payload.input : []) {
+    if (item?.type !== 'function_call_output') continue;
+    const id = String(item.call_id || '');
+    if (outputs.has(id)) duplicateWireIds += 1;
+    outputs.set(id, typeof item.output === 'string' ? item.output : null);
+  }
+  if (!prepared) {
+    return {
+      visibleToolResults: [],
+      coverage: { complete: false, omittedCount: outputs.size, reason: 'prepared-context-unavailable' },
+    };
+  }
+  const matchedIds = new Set();
+  let mismatched = 0;
+  const visibleToolResults = prepared.visible.map((entry) => {
+    const output = outputs.get(entry.wireCallId);
+    const wireOutputSha256 = typeof output === 'string' ? textDigest(output).sha256 : null;
+    if (outputs.has(entry.wireCallId)) matchedIds.add(entry.wireCallId);
+    const wireMatchesHost = wireOutputSha256 !== null && wireOutputSha256 === entry.contentVersion;
+    if (!wireMatchesHost) mismatched += 1;
+    const { wireCallId, ...rest } = entry;
+    return { ...rest, wireOutputSha256, wireMatchesHost };
+  });
+  const unmatchedWire = [...outputs.keys()].filter((id) => !matchedIds.has(id)).length;
+  const reasons = [
+    ...(mismatched ? ['wire-output-differs-or-missing'] : []),
+    ...(unmatchedWire ? ['wire-output-without-host-result'] : []),
+    ...(duplicateWireIds ? ['duplicate-wire-call-id'] : []),
+  ];
+  return {
+    visibleToolResults,
+    coverage: { complete: reasons.length === 0, omittedCount: 0, reason: reasons.length ? reasons.join(',') : null },
+  };
 }
 
 export function cooldownWaitMs(error, { capMs = 60_000 } = {}) {

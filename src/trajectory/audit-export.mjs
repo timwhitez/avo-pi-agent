@@ -9,6 +9,9 @@ import { normalizeGameRecord } from '../benchmark/report-records.mjs';
 import { REPORT_LIMITS, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 import { evaluateScorecardCoverage } from '../benchmark/scorecard-evidence.mjs';
 import { loadTrajectoryEvents } from './evidence-loader.mjs';
+import { AUDIT_RECEIPTS_SCHEMA, CONTEXT_RECEIPT_SCHEMA, EXECUTION_TERMINAL_SCHEMA, TOOL_RECEIPT_SCHEMA } from './audit-events.mjs';
+
+export { AUDIT_RECEIPTS_SCHEMA };
 
 // Single normalizer for trajectory audit exports (#343). One normalized object
 // per export produces every run projection, INDEX and MANIFEST; the validator
@@ -128,7 +131,9 @@ function normalizeRun(run, sourceRoot, recordSource) {
   if (report.value && String(report.value.runId ?? run.runId) !== run.runId) gaps.push('RUN_ID_MISMATCH');
   const attemptIndex = indexAttempts(attempts.value, gaps);
   const finishedByScope = indexFinished(trajectory.events, adapted.games);
+  if (receipts.availability === 'missing') gaps.push('RECEIPTS_MISSING');
   const terminals = executionTerminals(receipts.value, gaps);
+  const receiptSummary = summarizeReceipts(receipts.value, adapted.games, gaps);
   const games = adapted.games.map((game) => normalizeGame(game, attemptIndex.get(game.versionedGameId) ?? [], finishedByScope.get(game.versionedGameId) ?? [], terminals, gaps));
   for (const [versionedGameId] of attemptIndex) {
     if (!adapted.games.some((game) => game.versionedGameId === versionedGameId)) gaps.push('ATTEMPT_WITHOUT_GAME');
@@ -150,6 +155,7 @@ function normalizeRun(run, sourceRoot, recordSource) {
     progress,
     metrics,
     score,
+    receipts: receiptSummary,
     games,
     audit: { ready: uniqueGaps.length === 0, gaps: uniqueGaps },
   };
@@ -514,19 +520,82 @@ function finishedError(event) {
 
 // Execution terminal receipts (avo.execution-terminal.v1, produced by #346).
 // Any other shape is an explicit gap, never an implicit cancellation.
-export const AUDIT_RECEIPTS_SCHEMA = 'avo.trajectory-audit-receipts.v1';
 
 function executionTerminals(receipts, gaps) {
   if (receipts === null) return [];
-  if (receipts?.schema !== AUDIT_RECEIPTS_SCHEMA || !Array.isArray(receipts.executionTerminals)) {
+  if (receipts?.schema !== AUDIT_RECEIPTS_SCHEMA || (receipts.executionTerminals !== undefined && !Array.isArray(receipts.executionTerminals))) {
     gaps.push('RECEIPTS_SCHEMA_UNKNOWN');
     return [];
   }
-  return receipts.executionTerminals.filter((record) => {
-    const valid = record?.schema === 'avo.execution-terminal.v1' && record.scope && typeof record.scope === 'object';
+  return (receipts.executionTerminals ?? []).filter((record) => {
+    const valid = record?.schema === EXECUTION_TERMINAL_SCHEMA && record.scope && typeof record.scope === 'object';
     if (!valid) gaps.push('RECEIPT_INVALID');
     return valid;
   });
+}
+
+// Tool and context receipts (#344). A tool call is identified by run, game
+// version, CLI attempt, Agent attempt and call id: the same identity with the
+// same body is one call, with a different body a conflict. Missing, malformed
+// or incomplete receipts are gaps; nothing is reconstructed from totals.
+function summarizeReceipts(receipts, games, gaps) {
+  if (receipts === null || receipts?.schema !== AUDIT_RECEIPTS_SCHEMA) return null;
+  const tool = Array.isArray(receipts.toolReceipts) ? receipts.toolReceipts : null;
+  const context = Array.isArray(receipts.contextReceipts) ? receipts.contextReceipts : null;
+  if (!tool || !context) gaps.push('RECEIPTS_INCOMPLETE');
+  if (Number(receipts.malformedLines) > 0) gaps.push('RECEIPT_LOG_MALFORMED');
+  const calls = new Map();
+  let duplicateCount = 0;
+  const conflicts = [];
+  for (const receipt of tool ?? []) {
+    if (receipt?.schema !== TOOL_RECEIPT_SCHEMA || typeof receipt.toolCallId !== 'string' || !receipt.toolCallId
+        || !receipt.scope || typeof receipt.scope !== 'object') {
+      gaps.push('RECEIPT_INVALID');
+      continue;
+    }
+    const key = canonicalJson([receipt.scope.runId ?? null, receipt.scope.versionedGameId ?? null, receipt.cliAttempt ?? null,
+      receipt.scope.attemptId ?? null, receipt.toolCallId]);
+    const body = canonicalJson(receipt);
+    const prior = calls.get(key);
+    if (!prior) calls.set(key, { receipt, body });
+    else if (prior.body === body) duplicateCount += 1;
+    else conflicts.push(receipt.toolCallId);
+  }
+  if (conflicts.length) gaps.push('RECEIPT_ID_CONFLICT');
+  const counted = [...calls.values()].map((entry) => entry.receipt)
+    .filter((receipt) => ['success', 'rejected', 'exception'].includes(receipt.outcome));
+  if ([...calls.values()].some((entry) => entry.receipt.outcome === 'incomplete')) gaps.push('TOOL_CALL_INCOMPLETE');
+  const countDiscrepancies = [];
+  for (const game of games) {
+    const reported = game.metrics?.toolCalls;
+    if (!Number.isSafeInteger(reported)) continue;
+    const observed = counted.filter((receipt) => String(receipt.scope.versionedGameId ?? '').toLowerCase() === game.versionedGameId).length;
+    if (observed !== reported) countDiscrepancies.push({ versionedGameId: game.versionedGameId, reportedToolCalls: reported, toolReceipts: observed });
+  }
+  if (countDiscrepancies.length) gaps.push('RECEIPTS_COUNT_MISMATCH');
+  const incompleteContext = (context ?? []).filter((receipt) => receipt?.schema !== CONTEXT_RECEIPT_SCHEMA
+    || receipt.coverage?.complete !== true);
+  if (incompleteContext.length) gaps.push('CONTEXT_COVERAGE_INCOMPLETE');
+  return {
+    toolReceiptCount: calls.size,
+    duplicateCount,
+    conflicts,
+    contextReceiptCount: context?.length ?? null,
+    incompleteContextReceipts: incompleteContext.length,
+    countDiscrepancies,
+    toolCalls: [...calls.values()].slice(0, 20_000).map(({ receipt }) => ({
+      scope: receipt.scope,
+      cliAttempt: receipt.cliAttempt ?? null,
+      toolCallId: receipt.toolCallId,
+      toolName: receipt.toolName,
+      selectorSha256: receipt.selectorSha256 ?? null,
+      selectorCompleteness: receipt.selectorCompleteness ?? null,
+      outcome: receipt.outcome,
+      deliveredTextSha256: receipt.deliveredTextSha256 ?? null,
+      delivery: receipt.delivery ?? null,
+      originRequestSequence: receipt.originRequestSequence ?? null,
+    })),
+  };
 }
 
 function cancellationFor(terminals, versionedGameId) {
@@ -845,6 +914,9 @@ function deriveGaps(run) {
   const games = Array.isArray(run.games) ? run.games : [];
   if (run.artifactAvailability?.report !== 'present') gaps.push('REPORT_MISSING');
   if (run.artifactAvailability?.trajectory !== 'present') gaps.push('TRAJECTORY_NOT_PRESENT');
+  if (run.artifactAvailability?.receipts !== 'present') gaps.push('RECEIPTS_NOT_PRESENT');
+  if (run.receipts && (run.receipts.conflicts?.length || run.receipts.countDiscrepancies?.length
+      || run.receipts.incompleteContextReceipts > 0)) gaps.push('RECEIPTS_NOT_CONSISTENT');
   if (run.metrics?.coverage?.complete !== true || run.metrics?.coverage?.expectedUnits == null) gaps.push('RUN_METRICS_INCOMPLETE');
   if (run.metrics?.discrepancies?.length) gaps.push('AGGREGATE_MISMATCH');
   if (games.some((game) => !game.metrics || game.conflicts?.length || game.discrepancies?.length)) gaps.push('GAME_METRICS_INCOMPLETE');
@@ -858,6 +930,8 @@ function deriveGaps(run) {
 const GAP_CLASSES = Object.freeze({
   REPORT_MISSING: ['REPORT_MISSING'],
   TRAJECTORY_NOT_PRESENT: ['TRAJECTORY_MISSING', 'TRAJECTORY_PARTIAL'],
+  RECEIPTS_NOT_PRESENT: ['RECEIPTS_MISSING'],
+  RECEIPTS_NOT_CONSISTENT: ['RECEIPT_ID_CONFLICT', 'RECEIPTS_COUNT_MISMATCH', 'CONTEXT_COVERAGE_INCOMPLETE'],
   RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN'],
   AGGREGATE_MISMATCH: ['AGGREGATE_MISMATCH'],
   GAME_METRICS_INCOMPLETE: ['GAME_METRICS_INCOMPLETE', 'ATTEMPT_ID_CONFLICT', 'ATTEMPT_GAME_MISMATCH'],

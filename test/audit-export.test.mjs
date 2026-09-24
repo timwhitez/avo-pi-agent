@@ -318,7 +318,9 @@ test('E11 a crash before MANIFEST leaves an incomplete export and existing outpu
 
 test('E12 the real CLI exports, validates and reads back; exit codes follow audit readiness', () => {
   const complete = setup([{ runId: 'r18', report: { runId: 'r18', completeness: { expectedCount: 1 }, aggregates: { mechanismMetrics: metrics({ modelCalls: 3 }) }, games: [game('a-v1', metrics({ modelCalls: 3 }))] },
-    trajectory: [finished(1, 'a-v1', false)] }]);
+    trajectory: [finished(1, 'a-v1', false)],
+    // #344: forward runs need their receipts to be audit-ready.
+    receipts: { schema: 'avo.trajectory-audit-receipts.v1', toolReceipts: [], contextReceipts: [], executionTerminals: [] } }]);
   const incomplete = setup([{ runId: 'r19', report: { runId: 'r19', games: [game('a-v1', undefined)] } }]);
   try {
     const ok = spawnSync(process.execPath, ['scripts/export-trajectory-audit.mjs', '--input-manifest', complete.manifestFile,
