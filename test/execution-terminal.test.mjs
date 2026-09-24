@@ -386,8 +386,8 @@ test('X12 real child -> cancel -> drain -> final record -> CLI extract -> export
 
 test('X13 review regressions: graceful exit after cancel is censored; accounting counts only this execution', async () => {
   const graceful = `
-    process.send({ type: 'ready' });
     process.on('SIGTERM', () => process.exit(0));
+    process.send({ type: 'ready' });
     setInterval(() => {}, 1000);
   `;
   const controller = new AbortController();

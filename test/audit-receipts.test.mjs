@@ -78,9 +78,12 @@ async function runAgent({ url, root, script = null, policyProfile = 'minimal-v1'
   };
 }
 
+// Answers by conversation turn (prior function calls in the request), not by
+// HTTP request index, so a transport-level retry cannot desynchronise it.
 function scripted(calls) {
-  return (index, response) => {
-    const call = calls[index - 1];
+  return (index, response, bodies) => {
+    const turn = (bodies.at(-1)?.input ?? []).filter((item) => item.type === 'function_call').length;
+    const call = calls[turn];
     if (call) sendToolCall(response, { responseId: `r${index}`, ...call });
     else sendText(response, `r${index}`);
   };
