@@ -9,6 +9,8 @@ import { spawn, spawnSync } from 'node:child_process';
 
 import {
   EXPERIMENT_PLAN_SCHEMA,
+  EXPERIMENT_RESULT_SCHEMA,
+  EXPERIMENT_RUN_SCHEMA,
   assertExperimentCapsule,
   assertExperimentEnvironment,
   assertExperimentInitialState,
@@ -20,22 +22,40 @@ import {
   validateExperimentRunBinding,
 } from '../src/benchmark/experiment-protocol.mjs';
 import {
+  EXPERIMENT_RESULT_V2_SCHEMA,
   EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_RESULT_V3_SCHEMA,
   EXPERIMENT_RUN_V2_SCHEMA,
+  EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
   buildDescriptionChange,
+  buildSourceVerificationRecord,
   decodeStringLiteral,
   deriveArmToolContract,
   expectedBindingV2,
   holdoutExposure,
+  planSourceIdentitySha256,
   readGitSource,
+  readSourceVerificationRecord,
   readSnapshotSource,
+  validateSourceVerificationRecord,
   verifyDescriptionChange,
   verifyExperimentPlanSourcesV2,
+  verifyPlanSourceBytes,
+  validateExperimentRunBindingV2,
 } from '../src/benchmark/experiment-v2.mjs';
+import {
+  PROGRESS_IDLE_ACTIVITY,
+  assertExecutionTerminalPolicy,
+  progressIdlePolicies,
+  readExecutionPolicy,
+  runProcess,
+} from '../src/benchmark/process-runner.mjs';
+import { AUDIT_INPUT_SCHEMA, exportTrajectoryAudit, validateTrajectoryAudit } from '../src/trajectory/audit-export.mjs';
+import { AUDIT_RECEIPTS_SCHEMA, buildExecutionTerminal } from '../src/trajectory/audit-events.mjs';
 import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 import { aggregateGameMetrics, normalizeGameRecord } from '../src/benchmark/report.mjs';
 import { fingerprint } from '../src/benchmark/redaction.mjs';
-import { RUN_CAPSULE_COMPONENT_FILES, productionProviderToolSchemaDigest } from '../src/benchmark/run-capsule.mjs';
+import { RUN_CAPSULE_COMPONENT_FILES, productionProviderToolSchemaDigest, validateRunCapsule } from '../src/benchmark/run-capsule.mjs';
 import { projectPublicRunCapsule } from '../src/benchmark/run-capsule-public.mjs';
 import { effectiveAvoToolContract } from '../src/core/avo-agent-base.mjs';
 import { canonicalJson } from '../src/local/canonical-json.mjs';
@@ -69,6 +89,10 @@ const fixture = {};
 
 function digest(value) {
   return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+function digestText(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function git(repo, ...args) {
@@ -168,6 +192,7 @@ before(async () => {
 
 after(() => {
   if (fixture.repo) fs.rmSync(fixture.repo, { recursive: true, force: true });
+  for (const root of auditRoots) fs.rmSync(root, { recursive: true, force: true });
 });
 
 function runtimeConditions() {
@@ -216,7 +241,12 @@ function schedule() {
   ].map(([phase, arm], index) => ({ phase, arm, replicate: 1, order: index + 1 }));
 }
 
-function planDefinitionV2({ built = fixture.built, registrationMode = 'prospective', createdAt = '2026-09-25T00:00:00.000Z' } = {}) {
+function planDefinitionV2({
+  built = fixture.built,
+  registrationMode = 'prospective',
+  createdAt = '2026-09-25T00:00:00.000Z',
+  watchdogPolicy = { jobDeadlineMs: 43_200_000, progressIdleMs: null, progressIdleActivity: null },
+} = {}) {
   const runtime = runtimeConditions();
   const capabilities = providerCapabilities('high');
   return {
@@ -229,6 +259,7 @@ function planDefinitionV2({ built = fixture.built, registrationMode = 'prospecti
     change: structuredClone(built.change),
     singleVariable: structuredClone(built.singleVariable),
     arms: structuredClone(built.arms),
+    sourceVerificationSha256: built.sourceVerificationSha256,
     commonConditions: {
       policyProfile: PROFILE,
       provider: {
@@ -241,7 +272,7 @@ function planDefinitionV2({ built = fixture.built, registrationMode = 'prospecti
       },
       runtime,
       initialState: { mode: 'cold-start', memory: EMPTY_MEMORY, workspace: EMPTY_WORKSPACE },
-      watchdogPolicy: { jobDeadlineMs: 43_200_000, progressIdleMs: null },
+      watchdogPolicy: structuredClone(watchdogPolicy),
     },
     manifests: {
       tuning: { versionedGameIds: [...TUNING_GAMES], gameBudgets: gameBudgets(TUNING_GAMES, runtime) },
@@ -382,6 +413,186 @@ function completeEvidence(plan, options = {}) {
   return schedule().map(({ phase, arm }) => runEvidence(plan, phase, arm, options[`${phase}:${arm}`]));
 }
 
+// --- #343/#357 audit fixtures: real exporter, real validator ---------------
+
+const auditRoots = [];
+
+function auditGame(versionedGameId, mechanismValue, overrides = {}) {
+  return {
+    gameId: versionedGameId,
+    versionedGameId,
+    state: 'RUNNING',
+    levelsCompleted: 0,
+    totalLevels: 1,
+    actions: 4,
+    ...(mechanismValue === undefined ? {} : { mechanismMetrics: mechanismValue }),
+    ...overrides,
+  };
+}
+
+// One real export through the #343 producer for one run, plus the audit input
+// manifest the #363 validator re-derives that run's record from.
+function exportAudit({
+  runId,
+  games,
+  expectedGameIds = EVALUATION_GAMES,
+  trajectory = [],
+  cancelled = true,
+  attempts = null,
+}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-audit-'));
+  auditRoots.push(root);
+  const source = path.join(root, 'source');
+  const runDir = path.join(source, runId);
+  fs.mkdirSync(path.join(runDir, 'trajectory'), { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId,
+    status: 'incomplete',
+    completeness: {
+      complete: false,
+      expectedCount: expectedGameIds.length,
+      actualCount: games.length,
+      gameIds: expectedGameIds.map((gameId) => gameId.split('-')[0]),
+      versionedGameIds: [...expectedGameIds],
+    },
+    games,
+  }));
+  fs.writeFileSync(
+    path.join(runDir, 'trajectory', 'events.jsonl'),
+    `${[...trajectory].map((line) => JSON.stringify(line)).join('\n')}\n`,
+  );
+  fs.writeFileSync(path.join(runDir, 'receipts.json'), JSON.stringify({
+    schema: AUDIT_RECEIPTS_SCHEMA,
+    toolReceipts: [],
+    contextReceipts: [],
+    executionTerminals: cancelled ? [buildExecutionTerminal({
+      executionId: `exec-${runId}`,
+      scope: { runId },
+      policies: [{ kind: 'job-deadline', thresholdMs: 43_200_000, activitySource: 'none', clockDomain: 'monotonic', configuredSource: 'timeoutMs' }],
+      cancellation: {
+        executionId: `exec-${runId}`,
+        primaryReason: 'job-deadline',
+        additionalReasons: [],
+        policies: [{ kind: 'job-deadline', thresholdMs: 43_200_000 }],
+      },
+      process: { exitCode: null, signal: 'SIGTERM', closedAt: null, closeObserved: false },
+      drain: { complete: false, timeoutObserved: false },
+      executionOutcome: 'censored',
+      reasonCode: 'JOB_DEADLINE',
+    })] : [],
+  }));
+  const inputManifest = path.join(root, 'input.json');
+  const attemptsFile = attempts === null ? null : path.join(source, 'attempts.json');
+  if (attemptsFile) {
+    fs.writeFileSync(attemptsFile, JSON.stringify({
+      schema: 'avo.benchmark-attempts-fixture.v1',
+      attempts: attempts.map((attempt) => ({ runId, ...attempt })),
+    }));
+  }
+  fs.writeFileSync(inputManifest, JSON.stringify({
+    schema: AUDIT_INPUT_SCHEMA,
+    sourceRoot: source,
+    runs: [{
+      runId,
+      report: `${runId}/report.json`,
+      trajectoryDir: `${runId}/trajectory`,
+      ...(attemptsFile ? { attempts: 'attempts.json' } : {}),
+      receipts: `${runId}/receipts.json`,
+    }],
+  }));
+  const exportDir = path.join(root, 'export');
+  exportTrajectoryAudit({ manifestFile: inputManifest, outputDir: exportDir, repositoryRoot: WORKTREE });
+  return { runId, root, inputManifest, exportDir };
+}
+
+// The run capsule an interrupted run sealed before it started.
+function capsuleFor(plan, phase, arm, {
+  replicate = 1,
+  runId,
+  createdAt = PHASE_TIMES[phase][arm],
+  source = armSource(plan, arm),
+  initialStateOverrides = {},
+  experiment = expectedBindingV2(plan, phase, arm, replicate),
+} = {}) {
+  return privateRunCapsuleEvidenceFixture({
+    runId,
+    versionedGameIds: plan.manifests[phase].versionedGameIds,
+    policyProfile: plan.commonConditions.policyProfile,
+    experiment,
+    gitCommit: plan.arms[arm].gitCommit,
+    initialStateOverrides: {
+      mode: plan.commonConditions.initialState.mode,
+      snapshotName: `cold-start-${runId}`,
+      memory: plan.commonConditions.initialState.memory,
+      workspace: plan.commonConditions.initialState.workspace,
+      ...initialStateOverrides,
+    },
+    gameBudgets: plan.manifests[phase].gameBudgets,
+    createdAt,
+    source,
+  });
+}
+
+// A full incomplete unit: the sealed capsule plus its exported #343 audit.
+function incompleteEvidence(plan, phase, arm, {
+  replicate = 1,
+  runId = `${phase}-${arm}-incomplete`,
+  createdAt = PHASE_TIMES[phase][arm],
+  games = [],
+  expectedGameIds = plan.manifests[phase].versionedGameIds,
+  cancelled = true,
+  trajectory = [],
+  initialStateOverrides = {},
+  attempts = null,
+  experiment = expectedBindingV2(plan, phase, arm, replicate),
+} = {}) {
+  const audit = exportAudit({ runId, games, expectedGameIds, trajectory, cancelled, attempts });
+  return {
+    entry: {
+      phase,
+      arm,
+      replicate,
+      privateCapsuleEvidence: capsuleFor(plan, phase, arm, { replicate, runId, createdAt, initialStateOverrides, experiment }),
+      auditRun: { exportDir: audit.exportDir, inputManifest: audit.inputManifest },
+    },
+    audit,
+  };
+}
+
+// A determined editor: rewrite the exported run record and repair the MANIFEST
+// file hashes, coverage, discrepancies and INDEX so the export stays
+// internally consistent for the #343 validator.
+function tamperAuditExport(exportDir, runId, mutate) {
+  const runFile = path.join(exportDir, 'runs', `${runId}.json`);
+  const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+  mutate(run);
+  fs.writeFileSync(runFile, `${JSON.stringify(run, null, 2)}\n`);
+  const manifestFile = path.join(exportDir, 'MANIFEST.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  const indexFile = path.join(exportDir, 'INDEX.json');
+  const runs = manifest.files.filter((item) => item.path.startsWith('runs/'))
+    .map((item) => JSON.parse(fs.readFileSync(path.join(exportDir, item.path), 'utf8')));
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  index.runs = runs.map((item) => ({
+    runId: item.runId,
+    file: `runs/${item.runId}.json`,
+    outcome: item.executionOutcome.status,
+    auditReady: item.audit.ready,
+    gaps: item.audit.gaps,
+    recomputedModelCalls: item.metrics.recomputedAggregate?.modelCalls ?? null,
+  }));
+  fs.writeFileSync(indexFile, `${JSON.stringify(index, null, 2)}\n`);
+  for (const entry of manifest.files) {
+    const bytes = fs.readFileSync(path.join(exportDir, entry.path));
+    entry.bytes = bytes.length;
+    entry.sha256 = digestText(bytes);
+  }
+  manifest.coverage = { runs: runs.length, auditReadyRuns: runs.filter((item) => item.audit?.ready === true).length };
+  manifest.discrepancies = runs.flatMap((item) => (item.metrics?.discrepancies ?? []).map((d) => ({ runId: item.runId, ...d })));
+  fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 function providerFor(model = 'model-a', baseUrl = 'https://provider.invalid/v1') {
   return { baseUrl, model, reasoningEffort: 'high', capabilities: providerCapabilities('high') };
 }
@@ -402,27 +613,42 @@ function configFor(overrides = {}) {
   };
 }
 
-function environmentRun(plan, arm, phase = 'tuning') {
+// One real loader call: the sealed plan, the versioned source-verification
+// record and the Git object database the arms came from.
+function environmentRun(plan, arm, phase = 'tuning', {
+  record = fixture.built.sourceVerification,
+  repoDir = fixture.repo,
+  executionPolicy = plan.commonConditions.watchdogPolicy,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-plan-'));
-  const file = path.join(root, 'plan.json');
-  fs.writeFileSync(file, JSON.stringify(plan));
+  const file = writePlanFile(root, plan, record);
   try {
     return loadExperimentRunFromEnvironment({
       AVO_EXPERIMENT_PLAN_FILE: file,
+      AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE: path.join(root, 'source-verification.json'),
+      AVO_EXPERIMENT_SOURCE_REPO: repoDir,
       AVO_EXPERIMENT_PHASE: phase,
       AVO_EXPERIMENT_ARM: arm,
       AVO_EXPERIMENT_REPETITION: '1',
-    });
+    }, { executionPolicy });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+function writePlanFile(root, plan, record) {
+  const file = path.join(root, 'plan.json');
+  fs.writeFileSync(file, JSON.stringify(plan));
+  fs.writeFileSync(path.join(root, 'source-verification.json'), JSON.stringify(record));
+  return file;
 }
 
 function armEnvironment(plan, arm, overrides = {}) {
   return {
     provider: providerFor(),
     config: configFor(),
-    env: { AVO_BENCHMARK_TIMEOUT_MS: String(plan.commonConditions.watchdogPolicy.jobDeadlineMs) },
+    env: {},
+    executionPolicy: plan.commonConditions.watchdogPolicy,
     git: { clean: true, commit: plan.arms[arm].gitCommit },
     ...overrides,
   };
@@ -438,12 +664,12 @@ function environmentCheckInArm(plan, arm, phase, selectedArm = arm) {
     fs.writeFileSync(path.join(checkout, 'arm.tar'), archive.stdout);
     assert.equal(spawnSync('tar', ['-xf', 'arm.tar'], { cwd: checkout }).status, 0);
     fs.symlinkSync(path.join(WORKTREE, 'node_modules'), path.join(checkout, 'node_modules'));
-    fs.writeFileSync(path.join(checkout, 'plan.json'), JSON.stringify(plan));
-    const { provider, config, env, git: gitState } = armEnvironment(plan, selectedArm);
+    writePlanFile(checkout, plan, fixture.built.sourceVerification);
+    const { provider, config, env, git: gitState, executionPolicy } = armEnvironment(plan, selectedArm);
     const script = `
       import { assertExperimentEnvironment, loadExperimentRunFromEnvironment } from './src/benchmark/experiment-protocol.mjs';
       const input = JSON.parse(process.argv[1]);
-      const run = loadExperimentRunFromEnvironment(input.selector);
+      const run = loadExperimentRunFromEnvironment(input.selector, { executionPolicy: input.check.executionPolicy });
       try {
         console.log(JSON.stringify({ ok: assertExperimentEnvironment(run, input.check), binding: run.binding }));
       } catch (error) {
@@ -452,11 +678,13 @@ function environmentCheckInArm(plan, arm, phase, selectedArm = arm) {
     const input = {
       selector: {
         AVO_EXPERIMENT_PLAN_FILE: path.join(checkout, 'plan.json'),
+        AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE: path.join(checkout, 'source-verification.json'),
+        AVO_EXPERIMENT_SOURCE_REPO: fixture.repo,
         AVO_EXPERIMENT_PHASE: phase,
         AVO_EXPERIMENT_ARM: selectedArm,
         AVO_EXPERIMENT_REPETITION: '1',
       },
-      check: { provider, config, env, git: gitState },
+      check: { provider, config, env, git: gitState, executionPolicy },
     };
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, JSON.stringify(input)], { cwd: checkout, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
@@ -631,9 +859,14 @@ test('P06 effective model, budget, initial state, tool contract and watchdog dri
   );
   reject({ provider: providerFor('model-b') }, /provider\/model conditions differ/);
   reject({ config: configFor({ maxActions: 999 }) }, /maxActions differs/);
-  reject({ env: { AVO_BENCHMARK_TIMEOUT_MS: '43200000', AVO_TRANSCRIPT_MAX_TOKENS: '50000' } }, /transcriptMaxTokens differs/);
-  reject({ env: { AVO_BENCHMARK_TIMEOUT_MS: '3600000' } }, /watchdog policy differs/);
-  reject({ env: { AVO_BENCHMARK_TIMEOUT_MS: '43200000', AVO_PROGRESS_IDLE_MS: '600000' } }, /watchdog policy differs/);
+  reject({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '50000' } }, /transcriptMaxTokens differs/);
+  // The effective execution policy is parsed once by the runner and handed to
+  // every consumer; drift in any single field is refused before a request, and
+  // a missing policy is a refusal, never an equality of two nulls.
+  reject({ executionPolicy: { jobDeadlineMs: 3_600_000, progressIdleMs: null, progressIdleActivity: null } }, /watchdog policy differs/);
+  reject({ executionPolicy: { jobDeadlineMs: 43_200_000, progressIdleMs: 600_000, progressIdleActivity: PROGRESS_IDLE_ACTIVITY } }, /watchdog policy differs/);
+  reject({ executionPolicy: { jobDeadlineMs: 43_200_000, progressIdleMs: null, progressIdleActivity: 'another activity definition' } }, /cannot declare a progress activity/);
+  reject({ executionPolicy: null }, /effective execution policy must be an object/);
   reject({ git: { clean: true, commit: plan.arms.intervention.gitCommit } }, /Git commit differs/);
   // The intervention arm selected in the baseline checkout: the running
   // code's real tool contract is not the intervention arm's.
@@ -665,8 +898,7 @@ test('P06 effective model, budget, initial state, tool contract and watchdog dri
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-runner-'));
   const runId = `experiment-v2-drift-${process.pid}-${Date.now()}`;
   try {
-    const file = path.join(root, 'plan.json');
-    fs.writeFileSync(file, JSON.stringify(plan));
+    const file = writePlanFile(root, plan, fixture.built.sourceVerification);
     const child = spawn(process.execPath, ['scripts/run-real-public.mjs'], {
       cwd: WORKTREE,
       env: {
@@ -674,9 +906,13 @@ test('P06 effective model, budget, initial state, tool contract and watchdog dri
         AVO_DISABLE_DOTENV: '1',
         AVO_REAL_RUN_ID: runId,
         AVO_EXPERIMENT_PLAN_FILE: file,
+        AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE: path.join(root, 'source-verification.json'),
+        AVO_EXPERIMENT_SOURCE_REPO: fixture.repo,
         AVO_EXPERIMENT_PHASE: 'tuning',
         AVO_EXPERIMENT_ARM: 'baseline',
         AVO_EXPERIMENT_REPETITION: '1',
+        AVO_BENCHMARK_TIMEOUT_MS: '43200000',
+        AVO_PROGRESS_IDLE_MS: '',
         OPENAI_BASE_URL: 'https://provider.invalid/v1',
         OPENAI_API_KEY: 'contract-provider-key-1234567890',
         OPENAI_MODEL: 'model-b',
@@ -703,15 +939,12 @@ test('P07 every scheduled unit is reported; partial pairs, duplicates and retry 
   const plan = sealed();
   const evidence = completeEvidence(plan);
   // The censored run's runner sealed its capsule before starting; its #343
-  // audit outcome is bound to that capsule by run ID.
-  const censoredCapsule = runEvidence(plan, 'evaluation', 'intervention', { runId: 'evaluation-intervention-censored' }).privateCapsuleEvidence;
-  const censored = (overrides = {}) => ({
-    phase: 'evaluation', arm: 'intervention', replicate: 1,
-    privateCapsuleEvidence: censoredCapsule,
-    auditRun: { schema: 'avo.trajectory-audit.v1', runId: 'evaluation-intervention-censored', executionOutcome: { status: 'censored' } },
-    ...overrides,
+  // audit export is the real one and is bound to that capsule by run ID.
+  const censored = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'evaluation-intervention-censored',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
   });
-  const partial = validateExperimentResults(plan, [...evidence.slice(0, 3), censored()]);
+  const partial = validateExperimentResults(plan, [...evidence.slice(0, 3), censored.entry]);
   assert.equal(partial.units.length, 6, 'phases x games x replicates, each exactly once');
   assert.equal(partial.pairedUnits, 3);
   assert.deepEqual(partial.unitStatuses, { completed: 9, error: 0, censored: 3, 'not-run': 0, unknown: 0 });
@@ -719,21 +952,54 @@ test('P07 every scheduled unit is reported; partial pairs, duplicates and retry 
   assert.equal(partial.units[0].unit, `${plan.experimentId}:tuning:${TUNING_GAMES[0]}:1`);
   const missing = validateExperimentResults(plan, evidence.slice(0, 3));
   assert.equal(missing.unitStatuses['not-run'], 3);
-  // Costs: every accepted run counts exactly once per arm, and per-game
-  // costs sum to the run aggregate.
-  assert.deepEqual(partial.observedCost.baseline, { toolCalls: 36, trajectoryReadCalls: 6, totalTokens: 252 });
-  assert.deepEqual(partial.observedCost.intervention, { toolCalls: 18, trajectoryReadCalls: 3, totalTokens: 126 });
+  // Cost: every observed unit counts exactly once through one verified
+  // metering layer; completed totals and observed subtotals stay separate.
+  assert.deepEqual(partial.observedCost.baseline, {
+    completedTotal: { toolCalls: 36, trajectoryReadCalls: 6, totalTokens: 252 },
+    observedSubtotal: { toolCalls: 36, trajectoryReadCalls: 6, totalTokens: 252 },
+    coverage: {
+      expectedUnits: 6, observedUnits: 6, completedUnits: 6, missingUnits: 0,
+      meteringLayers: ['run-report-games'], completeMetering: true, complete: true,
+    },
+  });
+  assert.deepEqual(partial.observedCost.intervention.completedTotal, { toolCalls: 18, trajectoryReadCalls: 3, totalTokens: 126 });
+  assert.deepEqual(partial.observedCost.intervention.observedSubtotal, { toolCalls: 36, trajectoryReadCalls: 6, totalTokens: 252 });
+  assert.deepEqual(partial.observedCost.intervention.coverage, {
+    expectedUnits: 6, observedUnits: 6, completedUnits: 3, missingUnits: 0,
+    meteringLayers: ['game', 'run-report-games'], completeMetering: true, complete: false,
+  });
   // A retry of the same unit is not selectable after the fact.
   const retry = runEvidence(plan, 'evaluation', 'baseline', { runId: 'evaluation-baseline-retry', createdAt: '2026-09-25T03:30:00.000Z' });
   assert.throws(() => validateExperimentResults(plan, [...evidence, retry]), /duplicates unit/);
   assert.equal(partial.units.at(-1).arms.intervention.runId, 'evaluation-intervention-censored');
   const rejectIncomplete = (entry, pattern) => assert.throws(() => validateExperimentResults(plan, [...evidence.slice(0, 3), entry]), pattern);
-  rejectIncomplete(censored({ auditRun: { ...censored().auditRun, executionOutcome: { status: 'completed' } } }), /audited error\/censored\/unknown/);
-  rejectIncomplete(censored({ auditRun: { ...censored().auditRun, runId: 'another-run' } }), /audited error\/censored\/unknown/);
-  rejectIncomplete(censored({ auditRun: { ...censored().auditRun, schema: 'x' } }), /audited error\/censored\/unknown/);
-  const { privateCapsuleEvidence: _capsule, ...unbound } = censored();
+  // A schema string plus a self-reported status was enough before #363; it is
+  // now a malformed entry, and a run that finished elsewhere cannot pose as an
+  // incomplete unit of this one.
+  rejectIncomplete({
+    ...censored.entry,
+    auditRun: { schema: 'avo.trajectory-audit.v2', runId: 'evaluation-intervention-censored', executionOutcome: { status: 'censored' } },
+  }, /audit fields are malformed/);
+  const elsewhere = exportAudit({
+    runId: 'evaluation-intervention-elsewhere',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+  });
+  rejectIncomplete({
+    ...censored.entry,
+    auditRun: { exportDir: elsewhere.exportDir, inputManifest: elsewhere.inputManifest },
+  }, /does not include run/);
+  const finished = exportAudit({
+    runId: 'evaluation-intervention-censored',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism(), { state: 'GAME_OVER' })),
+    cancelled: false,
+  });
+  rejectIncomplete({
+    ...censored.entry,
+    auditRun: { exportDir: finished.exportDir, inputManifest: finished.inputManifest },
+  }, /audited error\/censored\/unknown/);
+  const { privateCapsuleEvidence: _capsule, ...unbound } = censored.entry;
   rejectIncomplete(unbound, /malformed/);
-  rejectIncomplete(censored({ privateCapsuleEvidence: evidence[2].privateCapsuleEvidence }), /not bound to this plan and arm/);
+  rejectIncomplete({ ...censored.entry, privateCapsuleEvidence: evidence[2].privateCapsuleEvidence }, /not bound to this plan and arm/);
   // Runs that ran out of the frozen order are rejected.
   const outOfOrder = completeEvidence(plan, { 'tuning:intervention': { createdAt: '2026-09-25T05:00:00.000Z' } });
   assert.throws(() => validateExperimentResults(plan, outOfOrder), /frozen schedule order/);
@@ -773,7 +1039,7 @@ test('P09 three mixed-direction zero-level pairs stay undetermined', () => {
   });
   const result = validateExperimentResults(plan, evidence);
   const evaluation = result.units.filter((unit) => unit.phase === 'evaluation');
-  assert.deepEqual(evaluation.map((unit) => [unit.arms.baseline.cost.toolCalls, unit.arms.intervention.cost.toolCalls]),
+  assert.deepEqual(evaluation.map((unit) => [unit.arms.baseline.observedCost.toolCalls, unit.arms.intervention.observedCost.toolCalls]),
     [[154, 63], [288, 376], [178, 120]]);
   assert.ok(evaluation.every((unit) => unit.arms.baseline.levelsCompleted === 0 && unit.arms.intervention.levelsCompleted === 0));
   assert.equal(result.conclusion, 'undetermined');
@@ -859,4 +1125,636 @@ test('P12 the forward contract leaves the default policy and production descript
   // with a complete, clean pair set.
   const plan = sealed();
   assert.equal(validateExperimentResults(plan, completeEvidence(plan)).conclusion, 'undetermined');
+});
+
+// --- #362 (B01-B06): source verification and the effective watchdog --------
+
+async function runRealRunner(plan, record, extraEnv = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-cli-'));
+  const runId = `experiment-v2-cli-${process.pid}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const privateDir = path.join(WORKTREE, 'runs', 'private', runId);
+  const publicFile = path.join(WORKTREE, 'runs', 'public', `${runId}.json`);
+  const file = writePlanFile(root, plan, record);
+  try {
+    const child = spawn(process.execPath, ['scripts/run-real-public.mjs'], {
+      cwd: WORKTREE,
+      env: {
+        ...process.env,
+        AVO_DISABLE_DOTENV: '1',
+        AVO_REAL_RUN_ID: runId,
+        AVO_EXPERIMENT_PLAN_FILE: file,
+        AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE: path.join(root, 'source-verification.json'),
+        AVO_EXPERIMENT_SOURCE_REPO: fixture.repo,
+        AVO_EXPERIMENT_PHASE: 'tuning',
+        AVO_EXPERIMENT_ARM: 'baseline',
+        AVO_EXPERIMENT_REPETITION: '1',
+        AVO_BENCHMARK_TIMEOUT_MS: '43200000',
+        AVO_PROGRESS_IDLE_MS: '',
+        OPENAI_BASE_URL: 'https://provider.invalid/v1',
+        OPENAI_API_KEY: 'contract-provider-key-1234567890',
+        OPENAI_MODEL: 'model-a',
+        OPENAI_REASONING_EFFORT: 'high',
+        ...providerEnvironment({ OPENAI_REASONING_EFFORT: 'high' }),
+        ...extraEnv,
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const [code] = await once(child, 'close');
+    const failure = fs.existsSync(publicFile) ? JSON.parse(fs.readFileSync(publicFile, 'utf8')) : null;
+    return { code, stdout, stderr, failure, runStarted: fs.existsSync(privateDir) };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(privateDir, { recursive: true, force: true });
+    fs.rmSync(publicFile, { force: true });
+  }
+}
+
+// A plan whose declared single-variable verdict and self-reported hashes are
+// all recomputed consistently for a candidate that also changes other logic.
+function forgedPlan(overrides = {}) {
+  const { built, record } = overrides;
+  return {
+    plan: sealExperimentPlan(planDefinitionV2({
+      built: {
+        ...built,
+        singleVariable: { singleVariable: true, reasons: [] },
+        sourceVerification: record,
+        sourceVerificationSha256: digest(record),
+      },
+    })),
+    record,
+  };
+}
+
+async function multiVariableCandidate() {
+  return buildDescriptionChange({
+    repoDir: fixture.repo,
+    baselineCommit: fixture.baseline,
+    interventionCommit: fixture.variants.sameFileLogic,
+    change: fixture.change,
+    componentPaths: RUN_CAPSULE_COMPONENT_FILES,
+    workspaceMode: MODE,
+    policyProfile: PROFILE,
+    allowImport: true,
+  });
+}
+
+test('B01 a real candidate that changes the description and other logic in the same allowed file is refused at load', async () => {
+  const candidate = await multiVariableCandidate();
+  assert.equal(candidate.singleVariable.singleVariable, false, 'the real byte check already refuses it');
+  assert.ok(candidate.singleVariable.reasons.includes('candidate-differs-beyond-the-declared-replacement'));
+  // Every self-reported hash is recomputed consistently from the real Git
+  // objects, and the declared verdict claims verification.
+  const forged = { ...candidate.sourceVerification, singleVariable: true, reasons: [], literalReplacement: { exact: true, reasons: [] } };
+  const { plan: plan, record } = forgedPlan({ built: candidate, record: forged });
+  assert.equal(plan.singleVariable.singleVariable, true);
+  assert.equal(plan.sourceVerificationSha256, digest(forged));
+  assert.throws(() => environmentRun(plan, 'baseline', 'tuning', { record }),
+    /not exactly one allowed description replacement/);
+  // The legitimate single replacement still passes the same mandatory check.
+  const legal = environmentRun(sealed(), 'baseline');
+  assert.equal(legal.binding.sourceVerificationSha256, fixture.built.sourceVerificationSha256);
+  assert.equal(verifyPlanSourceBytes(sealed(), { repoDir: fixture.repo }), true);
+});
+
+test('B02 missing source, an unauthorised derivation and a self-reported verified flag never certify an experiment unit', async () => {
+  const plan = sealed();
+  // 1. No versioned record at all.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-nosource-'));
+  try {
+    fs.writeFileSync(path.join(root, 'plan.json'), JSON.stringify(plan));
+    assert.throws(() => loadExperimentRunFromEnvironment({
+      AVO_EXPERIMENT_PLAN_FILE: path.join(root, 'plan.json'),
+      AVO_EXPERIMENT_PHASE: 'tuning',
+      AVO_EXPERIMENT_ARM: 'baseline',
+      AVO_EXPERIMENT_REPETITION: '1',
+    }), /requires AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE/);
+    // 2. The repository cannot resolve both arm commits.
+    assert.throws(() => environmentRun(plan, 'baseline', 'tuning', { repoDir: root }), /rev-parse|not a git repository|source bytes/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  // 3. The arms were never imported: a record without a derived tool contract
+  // cannot certify a plan whose arms declare derived contracts.
+  const unreviewed = await buildSourceVerificationRecord(plan, { repoDir: fixture.repo, allowImport: false });
+  assert.equal(unreviewed.toolContractDerived, false);
+  assert.ok(unreviewed.reasons.includes('tool-contract-not-derived'), unreviewed.reasons.join(', '));
+  assert.ok(unreviewed.reasons.includes('rebuilt-source-differs-from-plan'));
+  assert.equal(unreviewed.singleVariable, false);
+  const committedUnderived = sealExperimentPlan({ ...planDefinitionV2(), sourceVerificationSha256: digest(unreviewed) });
+  assert.throws(() => environmentRun(committedUnderived, 'baseline', 'tuning', { record: unreviewed }),
+    /does not bind this plan's arms and change/);
+  // 4. A record that belongs to another plan, however consistently it was
+  // built, is never accepted by this plan's commitment.
+  const candidate = await multiVariableCandidate();
+  const forged = { ...candidate.sourceVerification, singleVariable: true, reasons: [], literalReplacement: { exact: true, reasons: [] } };
+  assert.throws(() => environmentRun(plan, 'baseline', 'tuning', { record: forged }),
+    /does not match the sealed plan commitment/);
+  // 5. The real runner refuses before it starts a run: no state, no request.
+  const forgedExperiment = forgedPlan({ built: candidate, record: forged });
+  const refusal = await runRealRunner(forgedExperiment.plan, forgedExperiment.record);
+  assert.notEqual(refusal.code, 0);
+  assert.match(refusal.stderr, /not exactly one allowed description replacement/);
+  assert.equal(refusal.runStarted, false, 'the refused unit never creates run state');
+  assert.doesNotMatch(`${refusal.stdout}\n${refusal.stderr}`, /provider-preflight|validating a non-mock|arc-runtime-attestation/);
+});
+
+test('B03 one parsed execution policy closes the loop through environment, capsule, projection and results', async () => {
+  const policy = readExecutionPolicy({ AVO_BENCHMARK_TIMEOUT_MS: '43200000', AVO_PROGRESS_IDLE_MS: '600000' });
+  assert.deepEqual(policy, { jobDeadlineMs: 43_200_000, progressIdleMs: 600_000, progressIdleActivity: PROGRESS_IDLE_ACTIVITY });
+  const plan = sealExperimentPlan(planDefinitionV2({ watchdogPolicy: policy }));
+  const run = environmentRun(plan, 'baseline', 'tuning', { executionPolicy: policy });
+  assert.deepEqual(run.binding.executionPolicy, policy);
+  assert.equal(run.binding.executionPolicySha256, digest(policy));
+  assert.equal(assertExperimentEnvironment(run, armEnvironment(plan, 'baseline', { executionPolicy: policy })), true);
+  const evidence = runEvidence(plan, 'tuning', 'baseline');
+  assert.equal(assertExperimentCapsule(run, evidence.privateCapsuleEvidence.value), true);
+  // The public projection keeps the effective policy and drops only the
+  // private provider identities.
+  const published = evidence.report.provenance.runCapsule.experiment;
+  assert.deepEqual(published.executionPolicy, policy);
+  assert.equal(published.executionPolicySha256, digest(policy));
+  assert.equal(Object.hasOwn(published, 'providerModelSha256'), false);
+  const result = validateExperimentResults(plan, completeEvidence(plan));
+  assert.equal(result.schema, EXPERIMENT_RESULT_V3_SCHEMA);
+  assert.equal(result.sourceVerificationSha256, plan.sourceVerificationSha256);
+  // The terminal record is the last consumer of the same frozen value, through
+  // the real #346 cancellation and commit path.
+  const terminalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-terminal-'));
+  try {
+    const child = await runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 5)'], {
+      cwd: WORKTREE,
+      timeoutMs: policy.jobDeadlineMs,
+      cancellation: {
+        executionId: 'exec-b03',
+        scope: { runId: 'b03' },
+        terminalRoot,
+        terminalFile: path.join(terminalRoot, 'terminal.json'),
+        cancelRequestFile: path.join(terminalRoot, 'cancel.json'),
+        policies: progressIdlePolicies(policy),
+      },
+    });
+    assert.equal(assertExecutionTerminalPolicy(child.terminal.receipt, policy), true);
+    assert.throws(() => assertExecutionTerminalPolicy(child.terminal.receipt, { ...policy, progressIdleMs: 300_000 }), /progress policy differs/);
+    assert.throws(() => assertExecutionTerminalPolicy(child.terminal.receipt, { ...policy, jobDeadlineMs: 3_600_000 }), /deadline differs/);
+    assert.throws(() => assertExecutionTerminalPolicy({}, policy), /missing its policy evidence/);
+  } finally {
+    fs.rmSync(terminalRoot, { recursive: true, force: true });
+  }
+});
+test('B04 changing the deadline, the progress threshold or its activity definition anywhere breaks certification', async () => {
+  const declared = { jobDeadlineMs: 43_200_000, progressIdleMs: 600_000, progressIdleActivity: PROGRESS_IDLE_ACTIVITY };
+  const plan = sealExperimentPlan(planDefinitionV2({ watchdogPolicy: declared }));
+  const run = environmentRun(plan, 'baseline', 'tuning', { executionPolicy: declared });
+  const reject = (policy, pattern) => assert.throws(
+    () => assertExperimentEnvironment(run, armEnvironment(plan, 'baseline', { executionPolicy: policy })), pattern,
+  );
+  // One field changed in the parser is enough: deadline, threshold or the
+  // activity definition that threshold counts as progress.
+  reject({ ...declared, jobDeadlineMs: 3_600_000 }, /watchdog policy differs/);
+  reject({ ...declared, progressIdleMs: 300_000 }, /watchdog policy differs/);
+  reject({ ...declared, progressIdleActivity: 'another activity definition' }, /watchdog policy differs/);
+  // The loader refuses the same drift before the run exists at all.
+  assert.throws(() => environmentRun(plan, 'baseline', 'tuning', { executionPolicy: { ...declared, jobDeadlineMs: 3_600_000 } }),
+    /effective watchdog policy differs/);
+  assert.throws(() => environmentRun({ ...plan, sourceVerificationSha256: plan.sourceVerificationSha256 }, 'baseline', 'tuning',
+    { executionPolicy: { ...declared, progressIdleActivity: null } }), /progressIdleActivity must be one bounded non-empty line|watchdog policy differs/);
+  // The sealed capsule and the results chain verify the sealed effective
+  // policy against the plan; missing evidence is never "equal because both
+  // null".
+  const driftedBinding = expectedBindingV2(plan, 'tuning', 'baseline', 1, { ...declared, jobDeadlineMs: 3_600_000 });
+  const drifted = runEvidence(plan, 'tuning', 'baseline', { experiment: driftedBinding });
+  assert.throws(() => validateExperimentResults(plan, [{ ...drifted }, ...completeEvidence(plan).slice(1)]),
+    /binding differs from the plan or arm source|capsule rejected|execution policy/);
+  const sealedWithout = structuredClone(drifted.privateCapsuleEvidence.value);
+  delete sealedWithout.definition.experiment.executionPolicy;
+  assert.throws(() => validateRunCapsule(sealedWithout), /fields are malformed/);
+  // Missing sealed policy evidence is a malformed capsule, and a binding
+  // without it can never equal the plan's expected binding.
+  const withoutPolicy = { ...expectedBindingV2(plan, 'tuning', 'baseline', 1) };
+  delete withoutPolicy.executionPolicy;
+  delete withoutPolicy.executionPolicySha256;
+  assert.throws(() => validateExperimentRunBindingV2(withoutPolicy), /malformed/);
+  // The real runner refuses a drifted watchdog before any request.
+  const refusal = await runRealRunner(plan, fixture.built.sourceVerification, { AVO_BENCHMARK_TIMEOUT_MS: '3600000' });
+  assert.notEqual(refusal.code, 0);
+  assert.match(refusal.stderr, /effective watchdog policy differs/);
+  assert.equal(refusal.runStarted, false);
+  assert.doesNotMatch(`${refusal.stdout}\n${refusal.stderr}`, /provider-preflight|validating a non-mock|arc-runtime-attestation/);
+});
+
+test('B05 v1 plans, capsules and historical evidence keep their original semantics and hashes', () => {
+  // test/experiment-protocol.test.mjs (the unchanged v1 suite) runs in the same
+  // gate; here the strict version dispatch and the unchanged v1 schema
+  // constants are checked directly.
+  assert.equal(EXPERIMENT_PLAN_SCHEMA, 'avo.benchmark-experiment-plan.v1');
+  assert.equal(EXPERIMENT_RESULT_SCHEMA, 'avo.benchmark-experiment-result.v1');
+  assert.equal(EXPERIMENT_RUN_SCHEMA, 'avo.benchmark-experiment-run.v1');
+  assert.equal(EXPERIMENT_RESULT_V2_SCHEMA, 'avo.benchmark-experiment-result.v2');
+  assert.equal(EXPERIMENT_RESULT_V3_SCHEMA, 'avo.benchmark-experiment-result.v3');
+  assert.equal(EXPERIMENT_SOURCE_VERIFICATION_SCHEMA, 'avo.benchmark-experiment-source-verification.v1');
+  // A v1 capsule carries no v2 fields and still validates by its own rules.
+  const v1Evidence = privateRunCapsuleEvidenceFixture({ runId: 'v1-historical', versionedGameIds: ['g1-v1'], policyProfile: 'minimal-v1' });
+  assert.equal(validateRunCapsule(v1Evidence.value).capsuleHash, v1Evidence.value.capsuleHash);
+  assert.equal(Object.hasOwn(v1Evidence.value.definition, 'executionPolicy'), false);
+  // The v2 binding is rejected by the v1 validator instead of being read with
+  // the v1 field set (no global schema weakening).
+  const plan = sealed();
+  const v2Binding = expectedBindingV2(plan, 'tuning', 'baseline', 1);
+  assert.equal(validateExperimentRunBindingV2(v2Binding).schema, EXPERIMENT_RUN_V2_SCHEMA);
+  assert.throws(() => validateExperimentRunBinding({ ...v2Binding, schema: EXPERIMENT_RUN_SCHEMA }), /malformed/);
+  assert.throws(() => validateExperimentPlan({ ...structuredClone(plan), schema: EXPERIMENT_PLAN_SCHEMA }), /malformed/);
+  // A v1 capsule is never accepted as a v2 experiment unit.
+  assert.throws(() => validateExperimentResults(plan, [{
+    phase: 'tuning', arm: 'baseline', replicate: 1,
+    report: { runId: 'v1-historical', provenance: { runCapsule: null } },
+    privateCapsuleEvidence: v1Evidence,
+  }]), /capsule rejected|malformed|differs/);
+});
+
+test('B06 a synthetic end-to-end chain: temp Git repo, real tool contracts, real runner refusal and the legal chain', async () => {
+  const plan = sealed();
+  // The intervention arm's real checkout passes the real environment check
+  // (its own derived tool contract, its own commit, the frozen policy).
+  const inArm = environmentCheckInArm(plan, 'intervention', 'evaluation');
+  assert.equal(inArm.ok, true, inArm.error);
+  const run = environmentRun(plan, 'intervention', 'evaluation');
+  assert.deepEqual(inArm.binding, run.binding);
+  // The capsule the arm seals carries exactly that binding, and the public
+  // projection keeps the safe values.
+  const evidence = runEvidence(plan, 'evaluation', 'intervention');
+  assert.equal(assertExperimentCapsule(run, evidence.privateCapsuleEvidence.value), true);
+  assert.deepEqual(evidence.report.provenance.runCapsule.experiment, publicBindingView(run.binding));
+  // The full results chain over the synthetic pair set still leaves the
+  // conclusion undetermined.
+  const result = validateExperimentResults(plan, completeEvidence(plan), { repoDir: fixture.repo });
+  assert.equal(result.pairedUnits, 6);
+  assert.equal(result.conclusion, 'undetermined');
+  // Given a repository that cannot resolve the arm commits, the results chain
+  // re-runs the same byte-level check and refuses instead of trusting the seal.
+  assert.throws(() => validateExperimentResults(plan, completeEvidence(plan), { repoDir: os.tmpdir() }),
+    /rev-parse|not a git repository|source bytes|source verification/);
+  // The real CLI refuses a forged candidate plan before it starts a run, and
+  // accepts the legal plan far enough to reach its environment checks with the
+  // sealed policy and source commitment in its own failure report.
+  const candidate = await multiVariableCandidate();
+  const forged = { ...candidate.sourceVerification, singleVariable: true, reasons: [], literalReplacement: { exact: true, reasons: [] } };
+  const refused = forgedPlan({ built: candidate, record: forged });
+  const refusal = await runRealRunner(refused.plan, refused.record);
+  assert.notEqual(refusal.code, 0);
+  assert.match(refusal.stderr, /not exactly one allowed description replacement/);
+  assert.equal(refusal.runStarted, false);
+  const legal = await runRealRunner(plan, fixture.built.sourceVerification);
+  assert.notEqual(legal.code, 0, 'the synthetic run cannot reach a paid provider');
+  assert.match(legal.stderr, /FAILED stage=configuration/);
+  assert.doesNotMatch(legal.stderr, /source verification/);
+  assert.doesNotMatch(`${legal.stdout}\n${legal.stderr}`, /provider-preflight|validating a non-mock|arc-runtime-attestation/);
+  assert.ok(legal.failure, 'the real runner wrote its redacted failure report');
+  assert.equal(legal.failure.status, 'failed');
+  assert.equal(legal.failure.failedStage, 'configuration');
+  assert.equal(legal.failure.experiment.sourceVerificationSha256, plan.sourceVerificationSha256);
+  assert.deepEqual(legal.failure.experiment.executionPolicy, plan.commonConditions.watchdogPolicy);
+  assert.equal(Object.hasOwn(legal.failure.experiment, 'providerModelSha256'), false);
+  assert.equal(legal.runStarted, true);
+});
+
+function publicBindingView(value) {
+  const { providerEndpointSha256: _providerEndpointSha256, providerModelSha256: _providerModelSha256, ...published } = value;
+  return published;
+}
+
+// --- #363 (U01-U07): one common validation, then outcome-specific handling --
+
+function scheduleFor(repetitions) {
+  const entries = [];
+  for (const phase of ['tuning', 'evaluation']) {
+    for (let replicate = 1; replicate <= repetitions; replicate += 1) {
+      for (const arm of ['baseline', 'intervention']) entries.push({ phase, arm, replicate, order: entries.length + 1 });
+    }
+  }
+  return entries;
+}
+
+// A valid total-token observation for the audit fixtures: the shared metric
+// validator rejects reasoning tokens above the output tokens.
+function tokenUsage(totalTokens) {
+  return {
+    totalTokens,
+    inputTokens: totalTokens,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    modelCalls: totalTokens > 0 ? 1 : 0,
+    providerHttpRequests: totalTokens > 0 ? 1 : 0,
+  };
+}
+
+function sealedWithRepetitions(repetitions) {
+  return sealExperimentPlan({
+    ...planDefinitionV2(),
+    execution: { repetitions },
+    schedule: scheduleFor(repetitions),
+  });
+}
+
+test('U01 a censored unit with 100 observed tokens reports subtotal 100 with partial coverage, never a complete 0', () => {
+  const plan = sealed();
+  const censored = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u01-censored',
+    games: [auditGame('re86-v2', mechanism(tokenUsage(100)))],
+  });
+  const result = validateExperimentResults(plan, [censored.entry]);
+  assert.equal(result.observedCost.intervention.observedSubtotal.totalTokens, 100);
+  assert.equal(result.observedCost.intervention.completedTotal, null, 'nothing completed is unknown, not zero');
+  assert.deepEqual(result.observedCost.intervention.coverage, {
+    expectedUnits: 6, observedUnits: 1, completedUnits: 0, missingUnits: 5,
+    meteringLayers: ['game'], completeMetering: true, complete: false,
+  });
+  assert.equal(result.observedCost.baseline.observedSubtotal, null);
+  assert.equal(result.observedCost.baseline.coverage.missingUnits, 6);
+  const unit = result.units.find((item) => item.phase === 'evaluation' && item.versionedGameId === 're86-v2');
+  assert.equal(unit.arms.intervention.executionStatus, 'censored');
+  assert.equal(unit.arms.intervention.observedCost.totalTokens, 100);
+  assert.equal(unit.arms.intervention.costMeteringLayer, 'game');
+  assert.equal(unit.arms.intervention.sourceRef, '$.games[0]:u01-censored');
+  assert.equal(unit.arms.intervention.pairEligible, false);
+});
+
+test('U02 a complete 20-token unit plus a censored 100-token unit report a 120-token subtotal with explicit coverage', () => {
+  const plan = sealedWithRepetitions(2);
+  const complete = runEvidence(plan, 'evaluation', 'intervention', {
+    replicate: 1,
+    createdAt: '2026-09-25T04:00:00.000Z',
+    mechanismByGame: {
+      're86-v2': tokenUsage(20),
+      's5i5-v3': tokenUsage(0),
+      'wa30-v1': tokenUsage(0),
+    },
+  });
+  const censored = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    replicate: 2,
+    runId: 'u02-censored',
+    createdAt: '2026-09-25T05:00:00.000Z',
+    games: [auditGame('re86-v2', mechanism(tokenUsage(100)))],
+  });
+  const result = validateExperimentResults(plan, [complete, censored.entry]);
+  assert.equal(result.observedCost.intervention.observedSubtotal.totalTokens, 120, 'the subtotal is not truncated to complete runs');
+  assert.equal(result.observedCost.intervention.completedTotal.totalTokens, 20);
+  assert.deepEqual(result.observedCost.intervention.coverage, {
+    expectedUnits: 12, observedUnits: 4, completedUnits: 3, missingUnits: 8,
+    meteringLayers: ['game', 'run-report-games'], completeMetering: true, complete: false,
+  });
+  assert.equal(result.pairedUnits, 0, 'an incomplete unit never forms a comparable pair');
+  assert.equal(result.conclusion, 'undetermined');
+});
+
+test('U03 a run with one completed and one interrupted game keeps each game observed facts without pairing them', () => {
+  const plan = sealed();
+  const mixed = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u03-mixed',
+    games: [
+      auditGame('re86-v2', mechanism({ totalTokens: 20 }), { state: 'GAME_OVER' }),
+      auditGame('s5i5-v3', mechanism({ totalTokens: 30 })),
+    ],
+  });
+  const baseline = runEvidence(plan, 'evaluation', 'baseline');
+  const result = validateExperimentResults(plan, [baseline, mixed.entry]);
+  const completed = result.units.find((unit) => unit.versionedGameId === 're86-v2');
+  const interrupted = result.units.find((unit) => unit.versionedGameId === 's5i5-v3');
+  assert.equal(completed.arms.intervention.executionStatus, 'completed', 'the finished game keeps its own outcome');
+  assert.equal(completed.arms.intervention.observedCost.totalTokens, 20);
+  assert.equal(completed.arms.intervention.observedProgress.levelsCompleted, 0);
+  assert.equal(completed.paired, false, 'a mixed run is not an official complete pair');
+  assert.equal(interrupted.arms.intervention.executionStatus, 'censored');
+  assert.equal(interrupted.arms.intervention.observedCost.totalTokens, 30);
+  assert.equal(result.observedCost.intervention.observedSubtotal.totalTokens, 50);
+  assert.equal(result.observedCost.intervention.completedTotal.totalTokens, 20);
+  assert.equal(result.unitStatuses.completed, 4);
+  assert.equal(result.unitStatuses.censored, 1);
+});
+
+test('U04 every unit passes the same scope, run-id, retry and condition checks before the outcome split', () => {
+  const plan = sealed();
+  const evidence = completeEvidence(plan);
+  const retry = incompleteEvidence(plan, 'evaluation', 'intervention', { runId: 'u04-retry' });
+  assert.throws(() => validateExperimentResults(plan, [...evidence, retry.entry]), /duplicates unit/);
+  const retryFirst = incompleteEvidence(plan, 'evaluation', 'intervention', { runId: 'u04-retry-first' });
+  assert.throws(() => validateExperimentResults(plan, [retryFirst.entry, ...evidence]), /duplicates unit/);
+  // A run ID reused across a completed and an incomplete unit of the same arm
+  // is refused even though the two selectors are different units.
+  const repeated = sealedWithRepetitions(2);
+  const first = runEvidence(repeated, 'evaluation', 'intervention', { replicate: 1, createdAt: '2026-09-25T04:00:00.000Z' });
+  const reused = incompleteEvidence(repeated, 'evaluation', 'intervention', {
+    replicate: 2,
+    runId: first.report.runId,
+    createdAt: '2026-09-25T05:00:00.000Z',
+  });
+  assert.throws(() => validateExperimentResults(repeated, [first, reused.entry]), /reuse run/);
+  // A source/condition conflict in the incomplete branch cannot bypass the
+  // common condition comparison.
+  const drifted = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u04-drifted',
+    initialStateOverrides: { memory: { sha256: '9'.repeat(64), fileCount: 1, bytes: 1, empty: false } },
+  });
+  assert.throws(() => validateExperimentResults(plan, [...evidence.slice(0, 3), drifted.entry]), /non-intervention condition/);
+  // The other arm's sealed capsule is never accepted for this unit.
+  const wrongArm = incompleteEvidence(repeated, 'evaluation', 'baseline', { replicate: 2, runId: 'u04-wrong-arm', createdAt: '2026-09-25T05:00:00.000Z' });
+  assert.throws(() => validateExperimentResults(repeated, [first, { ...wrongArm.entry, arm: 'intervention' }]),
+    /not bound to this plan and arm/);
+});
+
+test('U05 prospective time, schedule order and missing start times are handled without filling them in', () => {
+  const plan = sealed();
+  const early = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u05-early',
+    createdAt: '2026-09-24T23:00:00.000Z',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+  });
+  assert.throws(() => validateExperimentResults(plan, [early.entry]), /predates its prospective plan/);
+  // The holdout arm cannot start before the tuning arm it precedes.
+  const earlyHoldout = completeEvidence(plan, { 'evaluation:baseline': { createdAt: '2026-09-25T01:30:00.000Z' } });
+  assert.throws(() => validateExperimentResults(plan, earlyHoldout), /frozen schedule order/);
+  // A unit without a trustworthy start time stays explicitly order-unverified.
+  const unknown = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u05-unknown',
+    createdAt: 'unknown-start-time',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+  });
+  const result = validateExperimentResults(plan, [unknown.entry]);
+  assert.equal(result.scheduleOrder.verified, false);
+  assert.deepEqual(result.scheduleOrder.unverifiedUnits, [{ unit: 'evaluation:intervention:1', reason: 'missing-start-time' }]);
+  assert.deepEqual(result.scheduleOrder.checkedUnits, []);
+  assert.equal(result.evidenceClass, 'registration-unverified');
+  // Retrospective plans keep their exploratory class and their real times.
+  const retrospective = sealed({ registrationMode: 'retrospective' });
+  const exploratory = validateExperimentResults(retrospective, completeEvidence(retrospective));
+  assert.equal(exploratory.evidenceClass, 'exploratory');
+  assert.equal(exploratory.scheduleOrder.verified, true);
+});
+
+test('U06 editing the exported audit cost, outcome, source ref or coverage is detected', () => {
+  const plan = sealed();
+  const censoredGames = () => [
+    auditGame('re86-v2', mechanism({ totalTokens: 100 })),
+    auditGame('s5i5-v3', mechanism({ totalTokens: 50 })),
+  ];
+  // A plain edit is already refused by the real validator the results chain
+  // uses, not by a schema string comparison.
+  const naive = incompleteEvidence(plan, 'evaluation', 'intervention', { runId: 'u06-naive', games: censoredGames() });
+  const naiveFile = path.join(naive.audit.exportDir, 'runs', 'u06-naive.json');
+  const naiveRun = JSON.parse(fs.readFileSync(naiveFile, 'utf8'));
+  naiveRun.games[0].metrics.totalTokens = 1;
+  fs.writeFileSync(naiveFile, `${JSON.stringify(naiveRun, null, 2)}\n`);
+  assert.equal(validateTrajectoryAudit(naive.audit.exportDir).ok, false);
+  assert.throws(() => validateExperimentResults(plan, [naive.entry]), /audit export is invalid/);
+  // A determined editor that also repairs the MANIFEST hashes, coverage,
+  // discrepancies and INDEX is caught by re-deriving the run record from the
+  // bound audit inputs.
+  const tamper = {
+    cost: (run) => {
+      run.games[0].metrics.totalTokens = 1;
+      run.metrics.observedSubtotal = { ...run.metrics.observedSubtotal, totalTokens: 51 };
+      run.metrics.recomputedAggregate = null;
+    },
+    outcome: (run) => { run.executionOutcome.status = 'completed'; },
+    sourceRef: (run) => {
+      run.games[0].sourceRef = '$.games[9]';
+      run.metrics.selectedSourceRefs = run.games.map((game) => `${game.sourceRef}:${game.meteringLayer}`);
+    },
+    coverage: (run) => { run.metrics.coverage = { ...run.metrics.coverage, missingUnits: 0, expectedUnits: 2 }; },
+  };
+  for (const [field, mutate] of Object.entries(tamper)) {
+    const tampered = incompleteEvidence(plan, 'evaluation', 'intervention', { runId: `u06-${field}`, games: censoredGames() });
+    tamperAuditExport(tampered.audit.exportDir, `u06-${field}`, mutate);
+    if (field === 'cost' || field === 'outcome' || field === 'sourceRef') {
+      // These repairs keep the export internally consistent for the #343
+      // validator, so the #363 run-record re-derivation is what refuses it.
+      assert.equal(validateTrajectoryAudit(tampered.audit.exportDir).ok, true, `${field} repair stays internally consistent`);
+    }
+    assert.throws(() => validateExperimentResults(plan, [tampered.entry]), /audit export is invalid|audit run record differs/,
+      `${field} tampering must be detected`);
+  }
+});
+
+test('U07 a sealed plan, capsule, public projection, legal and partial audits and the results chain connect end to end', () => {
+  const plan = sealed();
+  const run = environmentRun(plan, 'intervention', 'evaluation');
+  const censored = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u07-censored',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+  });
+  const sealedBinding = censored.entry.privateCapsuleEvidence.value.definition.experiment;
+  assert.deepEqual(sealedBinding, run.binding);
+  const published = projectPublicRunCapsule(censored.entry.privateCapsuleEvidence.value, {
+    runClass: 'cold-start',
+    comparable: true,
+    capsuleEvidenceSha256: censored.entry.privateCapsuleEvidence.sha256,
+  });
+  assert.deepEqual(published.experiment, publicBindingView(run.binding));
+  const manifest = JSON.parse(fs.readFileSync(censored.audit.inputManifest, 'utf8'));
+  const validation = validateTrajectoryAudit(censored.audit.exportDir, { sourceRoot: manifest.sourceRoot });
+  assert.equal(validation.ok, true, JSON.stringify(validation.errors));
+  assert.equal(validation.expectedIdentitiesVerifiedAgainstSource, true);
+  const partial = validateExperimentResults(plan, [
+    runEvidence(plan, 'evaluation', 'baseline', { createdAt: '2026-09-25T03:00:00.000Z' }),
+    censored.entry,
+  ]);
+  assert.equal(partial.pairedUnits, 0);
+  assert.equal(partial.unitStatuses.censored, 3);
+  assert.equal(partial.sourceVerificationSha256, plan.sourceVerificationSha256);
+  // The counterexamples the old branch accepted are still refused.
+  assert.throws(() => validateExperimentResults(plan, [{
+    phase: 'evaluation', arm: 'intervention', replicate: 1,
+    privateCapsuleEvidence: censored.entry.privateCapsuleEvidence,
+    auditRun: { schema: 'avo.trajectory-audit.v2', runId: 'u07-censored', executionOutcome: { status: 'censored' } },
+  }]), /audit fields are malformed/);
+  assert.throws(() => validateExperimentResults(plan, [{
+    phase: 'evaluation', arm: 'intervention', replicate: 1,
+    privateCapsuleEvidence: censored.entry.privateCapsuleEvidence,
+  }]), /malformed/);
+});
+
+// --- follow-up 1: mutation guards on the results side ----------------------
+
+test('U08 a sealed capsule whose effective execution policy differs from the frozen plan is refused', () => {
+  const plan = sealed();
+  // The runner's effective policy is parsed once; a capsule resealed by the
+  // real builder with a different threshold must never certify a unit.
+  const alteredPolicy = { jobDeadlineMs: plan.commonConditions.watchdogPolicy.jobDeadlineMs, progressIdleMs: 600_000, progressIdleActivity: PROGRESS_IDLE_ACTIVITY };
+  const alteredBinding = (phase, arm) => expectedBindingV2(plan, phase, arm, 1, alteredPolicy);
+  const complete = runEvidence(plan, 'evaluation', 'baseline', { experiment: alteredBinding('evaluation', 'baseline') });
+  // The refusal is the sealed plan/arm binding equality (`capsule.experiment`
+  // and its `executionPolicy`/`executionPolicySha256` are compared as one
+  // value), which subsumes the policy-only check.
+  assert.throws(() => validateExperimentResults(plan, [complete]), /binding differs from the plan or arm source/,
+    'a completed unit cannot carry a policy the plan never froze');
+  const censored = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u08-policy',
+    games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+    experiment: alteredBinding('evaluation', 'intervention'),
+  });
+  assert.throws(() => validateExperimentResults(plan, [censored.entry]), /capsule is not bound to this plan and arm/,
+    'an incomplete unit cannot carry a policy the plan never froze');
+  // The same two units under the frozen policy are accepted, so the refusal is
+  // caused by the policy, not by the fixtures.
+  assert.equal(validateExperimentResults(plan, [
+    runEvidence(plan, 'evaluation', 'baseline', { createdAt: '2026-09-25T03:00:00.000Z' }),
+    incompleteEvidence(plan, 'evaluation', 'intervention', {
+      runId: 'u08-policy-legal',
+      games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism())),
+    }).entry,
+  ]).conclusion, 'undetermined');
+});
+
+test('U09 partial attempt metrics are the game observed cost when the game itself has no complete metrics', () => {
+  const plan = sealed();
+  // The interrupted game reported no complete game-level metrics; the real
+  // #343 exporter keeps the declared attempts' subtotal on the partial-attempts
+  // layer because only one of its two executions is claimed.
+  const partial = incompleteEvidence(plan, 'evaluation', 'intervention', {
+    runId: 'u09-partial-attempts',
+    games: [
+      auditGame('re86-v2', undefined, {
+        executions: [
+          { versionedGameId: 're86-v2', executionIdSha256: 'a'.repeat(64), executionOccurrence: 0 },
+          { versionedGameId: 're86-v2', executionIdSha256: 'b'.repeat(64), executionOccurrence: 0 },
+        ],
+      }),
+      auditGame('s5i5-v3'),
+    ],
+    attempts: [{
+      versionedGameId: 're86-v2',
+      attemptId: 'attempt-0001',
+      mechanismMetrics: mechanism(tokenUsage(100)),
+      executions: [{ executionIdSha256: 'a'.repeat(64), executionOccurrence: 0 }],
+    }],
+  });
+  const manifest = JSON.parse(fs.readFileSync(partial.audit.inputManifest, 'utf8'));
+  assert.equal(validateTrajectoryAudit(partial.audit.exportDir, { sourceRoot: manifest.sourceRoot }).ok, true,
+    'the partial-attempts audit is a legal #343 export');
+  const exported = JSON.parse(fs.readFileSync(path.join(partial.audit.exportDir, 'runs', 'u09-partial-attempts.json'), 'utf8'));
+  const exportedPartial = exported.games.find((game) => game.versionedGameId === 're86-v2');
+  assert.equal(exportedPartial.metrics, null, 'no game-level metrics exist');
+  assert.equal(exportedPartial.meteringLayer, 'partial-attempts');
+  assert.equal(exportedPartial.observedSubtotal.totalTokens, 100);
+  assert.equal(exportedPartial.coverage.executions.status, 'partial');
+  const result = validateExperimentResults(plan, [partial.entry]);
+  const unit = result.units.find((item) => item.versionedGameId === 're86-v2');
+  assert.equal(unit.arms.intervention.observedCost.totalTokens, 100, 'the subtotal is the observed cost, never dropped');
+  assert.equal(unit.arms.intervention.costMeteringLayer, 'partial-attempts');
+  assert.equal(unit.arms.intervention.costMeteringComplete, false);
+  assert.equal(unit.arms.intervention.costCoverage.executions.status, 'partial');
+  const unmetered = result.units.find((item) => item.versionedGameId === 's5i5-v3');
+  assert.equal(unmetered.arms.intervention.observedCost, null, 'a game with neither layer is unknown, never zero');
+  assert.equal(unmetered.arms.intervention.costMeteringLayer, 'none');
+  assert.equal(result.observedCost.intervention.observedSubtotal.totalTokens, 100);
+  assert.deepEqual(result.observedCost.intervention.coverage, {
+    expectedUnits: 6, observedUnits: 1, completedUnits: 0, missingUnits: 5,
+    meteringLayers: ['partial-attempts'], completeMetering: false, complete: false,
+  });
+  assert.equal(result.observedCost.intervention.completedTotal, null);
 });

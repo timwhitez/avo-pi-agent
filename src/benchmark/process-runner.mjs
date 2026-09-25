@@ -13,6 +13,78 @@ import { acquireAuthorityDirectory } from '../local/authority-directory.mjs';
 
 const DEFAULT_TAIL_CHARS = 64 * 1024;
 
+/**
+ * The #346 execution policy: the job deadline, the progress-idle threshold and
+ * the activity definition that threshold counts as progress. #362 requires the
+ * real runner to parse this once and hand the same frozen value to the
+ * experiment environment check, the sealed experiment binding, this process
+ * runner's actual watchdog and the execution terminal record.
+ */
+export const PROGRESS_IDLE_ACTIVITY = 'game.progress committed action count increase';
+
+const DEFAULT_JOB_DEADLINE_MS = 12 * 60 * 60 * 1000;
+const MIN_JOB_DEADLINE_MS = 60_000;
+const MAX_JOB_DEADLINE_MS = 48 * 60 * 60 * 1000;
+
+export function readExecutionPolicy(env = process.env) {
+  const rawDeadline = env.AVO_BENCHMARK_TIMEOUT_MS;
+  const jobDeadlineMs = rawDeadline === undefined || rawDeadline === '' ? DEFAULT_JOB_DEADLINE_MS : Number(rawDeadline);
+  if (!Number.isFinite(jobDeadlineMs) || jobDeadlineMs < MIN_JOB_DEADLINE_MS || jobDeadlineMs > MAX_JOB_DEADLINE_MS) {
+    throw new Error('AVO_BENCHMARK_TIMEOUT_MS must be between 60000 and 172800000');
+  }
+  const rawIdle = env.AVO_PROGRESS_IDLE_MS;
+  const progressIdleMs = rawIdle === undefined || rawIdle === '' ? null : Number(rawIdle);
+  if (progressIdleMs !== null && (!Number.isSafeInteger(progressIdleMs) || progressIdleMs < MIN_JOB_DEADLINE_MS)) {
+    throw new Error('AVO_PROGRESS_IDLE_MS must be an integer of at least 60000');
+  }
+  return Object.freeze({
+    jobDeadlineMs: Math.trunc(jobDeadlineMs),
+    progressIdleMs,
+    progressIdleActivity: progressIdleMs === null ? null : PROGRESS_IDLE_ACTIVITY,
+  });
+}
+
+// The real cancellation policies for the frozen value. The activity definition
+// is the one the terminal record will name, never a second string.
+export function progressIdlePolicies(policy) {
+  if (policy.progressIdleMs === null) return [];
+  const lastActions = new Map();
+  return [{
+    kind: 'environment-progress-idle',
+    thresholdMs: policy.progressIdleMs,
+    activitySource: policy.progressIdleActivity,
+    configuredSource: 'AVO_PROGRESS_IDLE_MS',
+    isActivity(message) {
+      if (message?.type !== 'game.progress' || !Number.isSafeInteger(message.actions)) return false;
+      const key = String(message.gameId);
+      const increased = message.actions > (lastActions.get(key) ?? -1);
+      lastActions.set(key, Math.max(message.actions, lastActions.get(key) ?? -1));
+      return increased;
+    },
+  }];
+}
+
+/**
+ * The execution terminal is the last consumer of the frozen policy: it must
+ * record exactly the deadline and progress activity the runner used. It takes
+ * the committed terminal receipt (not the `{receipt, commit}` wrapper).
+ */
+export function assertExecutionTerminalPolicy(receipt, policy) {
+  const policies = Array.isArray(receipt?.policies) ? receipt.policies : null;
+  if (!policies) throw new Error('execution terminal record is missing its policy evidence');
+  const deadline = policies.find((item) => item.kind === 'job-deadline');
+  if (deadline?.thresholdMs !== policy.jobDeadlineMs) {
+    throw new Error('execution terminal deadline differs from the effective execution policy');
+  }
+  const progress = policies.find((item) => item.kind === 'environment-progress-idle') ?? null;
+  if (policy.progressIdleMs === null) {
+    if (progress !== null) throw new Error('execution terminal declares a progress policy that was not configured');
+  } else if (progress?.thresholdMs !== policy.progressIdleMs || progress?.activitySource !== policy.progressIdleActivity) {
+    throw new Error('execution terminal progress policy differs from the effective execution policy');
+  }
+  return true;
+}
+
 export async function runProcess(command, args, {
   cwd = process.cwd(),
   env = buildUtilityChildEnvironment({ source: process.env }),

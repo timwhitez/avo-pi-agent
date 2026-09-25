@@ -92,10 +92,28 @@ one reviewed replacement of one tool's description literal under the same profil
 Each arm binds its own commit, tree, component set and derived tool contracts, read from
 the Git object database. `buildDescriptionChange` derives the single-variable verdict.
 It imports each arm's committed code only with `allowImport: true` after review.
-Run each arm from its own clean checkout; its effective tool contracts, watchdog
-settings and conditions are checked before the provider preflight. Results report every
-scheduled unit (`completed`, `error`, `censored`, `not-run`, `unknown`), mark
-retrospective plans `exploratory` and keep the conclusion `undetermined`.
+That verdict is a declaration in the plan; the certification is the versioned
+`avo.benchmark-experiment-source-verification.v1` record produced by
+`buildSourceVerificationRecord`/`verifyExperimentPlanSourcesV2`. A v2 run is refused
+as an experiment unit unless `AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE` supplies that
+record and the byte-level check is re-run from the Git object database
+(`AVO_EXPERIMENT_SOURCE_REPO`, default the current working directory): both arm
+commits must resolve, the arm component bytes must match the plan, and the candidate
+must be exactly one reviewed description replacement.
+Run each arm from its own clean checkout; its effective tool contracts, conditions and
+the effective `{jobDeadlineMs, progressIdleMs, progressIdleActivity}` execution policy
+are checked before the provider preflight. The runner parses that policy once and
+seals it into the experiment binding and the execution terminal; changing the deadline,
+the progress threshold or the activity definition anywhere breaks certification.
+Results report every scheduled unit (`completed`, `error`, `censored`, `not-run`,
+`unknown`), keep each planned game's observed status, progress, cost coverage and
+source refs, and count an interrupted or censored run's observed cost in the
+`observedSubtotal` beside the `completedTotal` (unknown stays unknown, never zero).
+Every entry — completed or incomplete — passes the same scope, plan, arm, source,
+run-id, prospective-time and schedule checks first; an incomplete unit must also pass
+the real trajectory-audit validator against its own export directory and audit input
+manifest. Retrospective plans are marked `exploratory` and the conclusion stays
+`undetermined`.
 
 ## State, recovery and evidence
 

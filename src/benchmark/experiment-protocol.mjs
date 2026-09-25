@@ -35,10 +35,14 @@ export { aggregateMechanismMetrics, normalizeMechanismMetrics } from './mechanis
 
 import {
   EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_RESULT_V3_SCHEMA,
   EXPERIMENT_RUN_V2_SCHEMA,
+  EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
   assertExperimentCapsuleV2,
   assertExperimentEnvironmentV2,
+  buildSourceVerificationRecord,
   loadExperimentRunV2,
+  readSourceVerificationRecord,
   sealExperimentPlanV2,
   validateBindingForPlanV2,
   validateExperimentPlanV2,
@@ -46,7 +50,14 @@ import {
   validateExperimentRunBindingV2,
 } from './experiment-v2.mjs';
 
-export { EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_RUN_V2_SCHEMA };
+export {
+  EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_RESULT_V3_SCHEMA,
+  EXPERIMENT_RUN_V2_SCHEMA,
+  EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
+  buildSourceVerificationRecord,
+  readSourceVerificationRecord,
+};
 export const EXPERIMENT_PLAN_SCHEMA = 'avo.benchmark-experiment-plan.v1';
 export const EXPERIMENT_MANIFEST_SCHEMA = 'avo.public-game-manifest.v1';
 export const EXPERIMENT_RUN_SCHEMA = 'avo.benchmark-experiment-run.v1';
@@ -167,7 +178,7 @@ export function loadExperimentPlan(file) {
   return validateExperimentPlan(evidence.value);
 }
 
-export function loadExperimentRunFromEnvironment(env = process.env) {
+export function loadExperimentRunFromEnvironment(env = process.env, { executionPolicy = null } = {}) {
   const file = String(env.AVO_EXPERIMENT_PLAN_FILE || '').trim();
   const selectorsPresent = ['AVO_EXPERIMENT_PHASE', 'AVO_EXPERIMENT_ARM', 'AVO_EXPERIMENT_REPETITION']
     .some((name) => String(env[name] || '').trim());
@@ -176,7 +187,9 @@ export function loadExperimentRunFromEnvironment(env = process.env) {
     return null;
   }
   const plan = loadExperimentPlan(file);
-  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return loadExperimentRunV2(plan, env);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) {
+    return loadExperimentRunV2(plan, env, executionPolicy === null ? {} : { executionPolicy });
+  }
   const phase = String(env.AVO_EXPERIMENT_PHASE || '').trim();
   const arm = String(env.AVO_EXPERIMENT_ARM || '').trim();
   if (!PHASES.includes(phase)) throw new Error(`AVO_EXPERIMENT_PHASE must be one of: ${PHASES.join(', ')}`);
@@ -240,11 +253,12 @@ export function assertExperimentEnvironment(run, {
   config,
   env = process.env,
   git = null,
+  executionPolicy = null,
 } = {}) {
   if (!run) return true;
   const plan = validateExperimentPlan(run.plan);
   if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) {
-    return assertExperimentEnvironmentV2(plan, run.binding, { provider, config, env, git });
+    return assertExperimentEnvironmentV2(plan, run.binding, { provider, config, env, git, executionPolicy });
   }
   const binding = validateBindingForPlan(plan, run.binding);
   return assertEnvironmentConditions(plan.conditions, binding.policyProfile, { provider, config, env, git });
@@ -421,9 +435,9 @@ function assertCapsuleConditions(conditions, manifest, binding, capsule) {
   return true;
 }
 
-export function validateExperimentResults(planValue, evidenceEntries) {
+export function validateExperimentResults(planValue, evidenceEntries, options = null) {
   const plan = validateExperimentPlan(planValue);
-  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return validateExperimentResultsV2(plan, evidenceEntries);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return validateExperimentResultsV2(plan, evidenceEntries, options ?? {});
   if (!Array.isArray(evidenceEntries) || evidenceEntries.length === 0) {
     throw new Error('experiment results require run evidence');
   }

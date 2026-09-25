@@ -12,7 +12,13 @@ import {
   preflightResponsesProvider,
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
-import { runProcess, openLogFile } from '../src/benchmark/process-runner.mjs';
+import {
+  assertExecutionTerminalPolicy,
+  openLogFile,
+  progressIdlePolicies,
+  readExecutionPolicy,
+  runProcess,
+} from '../src/benchmark/process-runner.mjs';
 import { ledgerBaseline, reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
@@ -61,11 +67,17 @@ import { diagnosticSelection, selectDiagnosticGames, diagnosticReportFields } fr
 
 loadLocalEnv();
 
+// #362: the effective execution policy (#346 watchdog) is parsed exactly once
+// here. The experiment environment check, the sealed experiment binding, the
+// process runner's real watchdog and the execution terminal all consume this
+// same frozen value; nothing below re-reads the environment.
+const executionPolicy = readExecutionPolicy(process.env);
+
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
 
-const experimentRun = loadExperimentRunFromEnvironment(process.env);
+const experimentRun = loadExperimentRunFromEnvironment(process.env, { executionPolicy });
 if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
 
 const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
@@ -112,6 +124,7 @@ try {
     provider,
     config,
     git: inspectGitCheckout(root),
+    executionPolicy,
   });
   const runState = prepareRunState({
     root,
@@ -240,7 +253,7 @@ try {
   const stdoutFile = path.join(privateDir, 'runner.stdout.log');
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
-  const timeoutMs = benchmarkTimeout();
+  const timeoutMs = executionPolicy.jobDeadlineMs;
   const childArgs = experimentRun || diagnostic
     ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
     : ['src/cli.mjs', 'run-public', '--all'];
@@ -284,7 +297,7 @@ try {
       terminalRoot: privateDir,
       terminalFile: path.join(privateDir, `execution-terminal.${invocationId}.json`),
       cancelRequestFile: path.join(privateDir, `execution-cancel-request.${invocationId}.json`),
-      policies: progressIdlePolicies(),
+      policies: progressIdlePolicies(executionPolicy),
       reconcile: () => reconcileLedgerAccounting({
         memoryDir: runState.memoryDir,
         gameIds: ledgerGameIds,
@@ -320,6 +333,7 @@ try {
   if (child.status !== 0) {
     throw new Error(`production public runner exited status=${child.status} signal=${child.signal || 'none'} stderr_tail=${child.stderr.slice(-2000)}`);
   }
+  assertExecutionTerminalPolicy(child.terminal?.receipt ?? null, executionPolicy);
 
   stage.value = 'artifact-discovery';
   // With a pinned run ID the child writes a deterministic report filename,
@@ -507,37 +521,6 @@ try {
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
   process.exitCode = 1;
-}
-
-function progressIdlePolicies() {
-  const raw = process.env.AVO_PROGRESS_IDLE_MS;
-  if (raw === undefined || raw === '') return [];
-  const thresholdMs = Number(raw);
-  if (!Number.isSafeInteger(thresholdMs) || thresholdMs < 60_000) {
-    throw new Error('AVO_PROGRESS_IDLE_MS must be an integer of at least 60000');
-  }
-  const lastActions = new Map();
-  return [{
-    kind: 'environment-progress-idle',
-    thresholdMs,
-    activitySource: 'game.progress committed action count increase',
-    configuredSource: 'AVO_PROGRESS_IDLE_MS',
-    isActivity(message) {
-      if (message?.type !== 'game.progress' || !Number.isSafeInteger(message.actions)) return false;
-      const key = String(message.gameId);
-      const increased = message.actions > (lastActions.get(key) ?? -1);
-      lastActions.set(key, Math.max(message.actions, lastActions.get(key) ?? -1));
-      return increased;
-    },
-  }];
-}
-
-function benchmarkTimeout() {
-  const value = Number(process.env.AVO_BENCHMARK_TIMEOUT_MS || 12 * 60 * 60 * 1000);
-  if (!Number.isFinite(value) || value < 60_000 || value > 48 * 60 * 60 * 1000) {
-    throw new Error('AVO_BENCHMARK_TIMEOUT_MS must be between 60000 and 172800000');
-  }
-  return Math.trunc(value);
 }
 
 function safeRunId(value) {

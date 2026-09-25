@@ -6,11 +6,18 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { effectiveAvoToolContract } from '../core/avo-agent-base.mjs';
 import { normalizeMechanismMetrics } from './mechanism-metrics.mjs';
 import { evaluatePublicRunCapsule } from './run-capsule-authority.mjs';
 import { productionProviderToolSchemaDigest, validateRunCapsule } from './run-capsule.mjs';
-import { AUDIT_SCHEMA } from '../trajectory/audit-export.mjs';
+import { projectPublicRunCapsule } from './run-capsule-public.mjs';
+import {
+  AUDIT_SCHEMA,
+  normalizeAuditInputs,
+  readAuditInputManifest,
+  validateTrajectoryAudit,
+} from '../trajectory/audit-export.mjs';
 // Circular by design: v1 dispatches v2 public calls here, and v2 reuses the
 // shared v1 validators. Nothing is used at module-evaluation time.
 import { experimentIdentitySha256, experimentProtocolInternals as v1 } from './experiment-protocol.mjs';
@@ -23,9 +30,12 @@ import { experimentIdentitySha256, experimentProtocolInternals as v1 } from './e
 export const EXPERIMENT_PLAN_V2_SCHEMA = 'avo.benchmark-experiment-plan.v2';
 export const EXPERIMENT_RUN_V2_SCHEMA = 'avo.benchmark-experiment-run.v2';
 export const EXPERIMENT_RESULT_V2_SCHEMA = 'avo.benchmark-experiment-result.v2';
+export const EXPERIMENT_RESULT_V3_SCHEMA = 'avo.benchmark-experiment-result.v3';
+export const EXPERIMENT_SOURCE_VERIFICATION_SCHEMA = 'avo.benchmark-experiment-source-verification.v1';
 const REGISTRATION_MODES = Object.freeze(['prospective', 'retrospective']);
-const WATCHDOG_KEYS = ['jobDeadlineMs', 'progressIdleMs'];
+const WATCHDOG_KEYS = ['jobDeadlineMs', 'progressIdleActivity', 'progressIdleMs'];
 const UNIT_STATUSES = Object.freeze(['completed', 'error', 'censored', 'not-run', 'unknown']);
+const SOURCE_VERIFICATION_BOOLEAN_KEYS = ['gitIdentityVerified', 'singleVariable', 'sourceBytesVerified', 'toolContractDerived'];
 
 // --- source identity -------------------------------------------------------
 
@@ -281,15 +291,115 @@ export async function buildDescriptionChange({ repoDir, baselineCommit, interven
     if (closure && canonicalJson([...closure].sort()) !== declared) verdict.reasons.push(`component-closure-differs:${arm}`);
   }
   verdict.singleVariable = verdict.reasons.length === 0;
+  const literal = verifyLiteralReplacement({
+    beforeText: baseline.files.get(change.sourcePath)?.toString('utf8') ?? '',
+    afterText: intervention.files.get(change.sourcePath)?.toString('utf8') ?? '',
+    toolName: change.toolName,
+    beforeLiteral: change.beforeLiteral,
+    afterLiteral: change.afterLiteral,
+  });
+  const arms = { baseline: sourceBinding(baseline, contracts.baseline), intervention: sourceBinding(intervention, contracts.intervention) };
+  const record = validateSourceVerificationRecord({
+    schema: EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
+    changedVariable: 'tool-description',
+    planIdentitySha256: planSourceIdentitySha256({ change: fullChange, arms }),
+    change: fullChange,
+    arms,
+    literalReplacement: literal,
+    sourceBytesVerified: v1.ARMS.every((arm) => arms[arm].sourceEvidence.sourceBytesVerified === true),
+    gitIdentityVerified: v1.ARMS.every((arm) => arms[arm].sourceEvidence.gitIdentityVerified === true),
+    toolContractDerived: v1.ARMS.every((arm) => typeof arms[arm].toolContractSha256 === 'string'),
+    singleVariable: verdict.singleVariable,
+    reasons: verdict.reasons,
+  });
   return {
     change: fullChange,
-    arms: { baseline: sourceBinding(baseline, contracts.baseline), intervention: sourceBinding(intervention, contracts.intervention) },
+    arms,
     singleVariable: verdict,
+    literal,
+    sourceVerification: record,
+    sourceVerificationSha256: sha256(canonicalJson(record)),
   };
 }
 
 /** Recomputes a sealed plan's arms and verdict from the repository. */
 export async function verifyExperimentPlanSourcesV2(plan, { repoDir, allowImport = false }) {
+  const record = await buildSourceVerificationRecord(plan, { repoDir, allowImport });
+  const matches = record.singleVariable === true && record.reasons.length === 0;
+  return { verified: matches, singleVariable: { singleVariable: record.singleVariable, reasons: [...record.reasons] } };
+}
+
+const SOURCE_VERIFICATION_KEYS = Object.freeze([
+  'arms', 'change', 'changedVariable', 'gitIdentityVerified', 'literalReplacement', 'planIdentitySha256',
+  'reasons', 'schema', 'singleVariable', 'sourceBytesVerified', 'toolContractDerived',
+]);
+const CHANGE_KEYS = Object.freeze([
+  'afterFileSha256', 'afterLiteral', 'beforeFileSha256', 'beforeLiteral', 'commonToolContractSha256', 'patchSha256', 'sourcePath', 'toolName',
+]);
+const MAX_SOURCE_VERIFICATION_BYTES = 256 * 1024;
+
+/**
+ * The plan's source identity: exactly the facts a source-verification record
+ * binds. The sealed plan commits to the record by hash and the record commits
+ * to these facts, so a record cannot be replayed onto another plan's arms or
+ * change. (The record cannot bind the plan's own `planSha256`: the plan hashes
+ * the record commitment, so that would be circular.)
+ */
+export function planSourceIdentitySha256({ change, arms }) {
+  return sha256(canonicalJson({ arms, change, changedVariable: 'tool-description' }));
+}
+
+/** Strict field validator for the versioned source-verification record. */
+export function validateSourceVerificationRecord(value) {
+  const record = v1.cloneRecord(value, 'experiment source verification');
+  v1.requireExactKeys(record, SOURCE_VERIFICATION_KEYS, 'experiment source verification');
+  if (record.schema !== EXPERIMENT_SOURCE_VERIFICATION_SCHEMA) throw new Error('experiment source verification schema is invalid');
+  if (record.changedVariable !== 'tool-description') throw new Error('experiment source verification changed variable is invalid');
+  v1.requireSha(record.planIdentitySha256, 'experiment source verification plan identity hash');
+  for (const name of SOURCE_VERIFICATION_BOOLEAN_KEYS) {
+    if (typeof record[name] !== 'boolean') throw new Error(`experiment source verification ${name} must be a boolean`);
+  }
+  const change = v1.cloneRecord(record.change, 'experiment source verification change');
+  v1.requireExactKeys(change, CHANGE_KEYS, 'experiment source verification change');
+  v1.requireSafeId(change.toolName, 'changed tool name');
+  v1.requireLine(change.sourcePath, 'changed source path', 256);
+  for (const name of ['afterFileSha256', 'beforeFileSha256', 'patchSha256']) v1.requireSha(change[name], `change ${name}`);
+  if (change.patchSha256 !== sha256(canonicalJson({ sourcePath: change.sourcePath, beforeLiteral: change.beforeLiteral, afterLiteral: change.afterLiteral }))) {
+    throw new Error('experiment source verification patch hash does not match its declared replacement');
+  }
+  // A missing derivation stays null; it is never filled in with a placeholder.
+  if (record.toolContractDerived === true) v1.requireSha(change.commonToolContractSha256, 'change commonToolContractSha256');
+  else if (change.commonToolContractSha256 !== null) throw new Error('experiment source verification underived tool contract must stay null');
+  const arms = v1.cloneRecord(record.arms, 'experiment source verification arms');
+  v1.requireExactKeys(arms, v1.ARMS, 'experiment source verification arms');
+  for (const arm of v1.ARMS) validateSourceBinding(arms[arm], `${arm} arm`, change.sourcePath, { allowUnderived: true });
+  if (arms.baseline.gitCommit === arms.intervention.gitCommit) throw new Error('experiment source verification arms must be different commits');
+  // Each state is stated separately and must agree with the arms it describes;
+  // a boolean is never taken as a substitute for the fact it stands for.
+  const derived = v1.ARMS.every((arm) => typeof arms[arm].toolContractSha256 === 'string');
+  if (record.toolContractDerived !== derived) throw new Error('experiment source verification toolContractDerived contradicts its arms');
+  const bytesVerified = v1.ARMS.every((arm) => arms[arm].sourceEvidence.sourceBytesVerified === true);
+  const identityVerified = v1.ARMS.every((arm) => arms[arm].sourceEvidence.gitIdentityVerified === true);
+  if (record.sourceBytesVerified !== bytesVerified || record.gitIdentityVerified !== identityVerified) {
+    throw new Error('experiment source verification evidence states contradict its arms');
+  }
+  const literal = v1.cloneRecord(record.literalReplacement, 'experiment source verification literal replacement');
+  v1.requireExactKeys(literal, ['exact', 'reasons'], 'experiment source verification literal replacement');
+  if (typeof literal.exact !== 'boolean') throw new Error('experiment source verification literal verdict must be a boolean');
+  requireReasonList(literal.reasons, 'experiment source verification literal reasons');
+  requireReasonList(record.reasons, 'experiment source verification reasons');
+  if (record.planIdentitySha256 !== planSourceIdentitySha256({ change, arms })) {
+    throw new Error('experiment source verification does not bind its own arms and change');
+  }
+  return v1.deepFreeze(record);
+}
+
+/**
+ * Builds the versioned source-verification record for a sealed plan from the
+ * Git object database and the arms' reviewed derived tool contracts. The
+ * verdict is computed here, never supplied by the caller.
+ */
+export async function buildSourceVerificationRecord(plan, { repoDir, allowImport = false }) {
   const rebuilt = await buildDescriptionChange({
     repoDir,
     baselineCommit: plan.arms.baseline.gitCommit,
@@ -300,10 +410,100 @@ export async function verifyExperimentPlanSourcesV2(plan, { repoDir, allowImport
     policyProfile: plan.commonConditions.policyProfile,
     allowImport,
   });
-  const matches = canonicalJson(rebuilt.arms) === canonicalJson(plan.arms)
-    && canonicalJson(rebuilt.change) === canonicalJson(plan.change)
-    && rebuilt.singleVariable.singleVariable === true;
-  return { verified: matches, singleVariable: rebuilt.singleVariable };
+  const matches = canonicalJson(rebuilt.change) === canonicalJson(plan.change)
+    && canonicalJson(rebuilt.arms) === canonicalJson(plan.arms);
+  const reasons = matches
+    ? rebuilt.sourceVerification.reasons
+    : [...new Set([...rebuilt.sourceVerification.reasons, 'rebuilt-source-differs-from-plan'])];
+  return validateSourceVerificationRecord({
+    ...rebuilt.sourceVerification,
+    singleVariable: matches && rebuilt.sourceVerification.singleVariable,
+    reasons,
+  });
+}
+
+/**
+ * Reads the record the caller supplies for this run. The plan only commits to
+ * its hash, so a hand-written "verified" flag can never certify anything by
+ * itself: the record must match the commitment and the arms bound in the plan.
+ */
+export function readSourceVerificationRecord(file) {
+  const target = path.resolve(v1.requireLine(file, 'experiment source verification file', 4096));
+  const evidence = readJsonFileEvidence(target, {
+    root: path.dirname(target),
+    maxBytes: MAX_SOURCE_VERIFICATION_BYTES,
+    maxJsonNodes: 40_000,
+    maxJsonDepth: 32,
+    purpose: 'experiment source verification',
+  });
+  return validateSourceVerificationRecord(evidence.value);
+}
+
+export function assertSourceVerificationMatchesPlan(plan, record) {
+  if (sha256(canonicalJson(record)) !== plan.sourceVerificationSha256) {
+    throw new Error('experiment source verification record does not match the sealed plan commitment');
+  }
+  if (canonicalJson(record.change) !== canonicalJson(plan.change)
+      || canonicalJson(record.arms) !== canonicalJson(plan.arms)) {
+    throw new Error('experiment source verification record does not bind this plan\'s arms and change');
+  }
+  if (record.singleVariable !== true || record.sourceBytesVerified !== true || record.gitIdentityVerified !== true
+      || record.toolContractDerived !== true || record.literalReplacement.exact !== true
+      || record.reasons.length !== 0 || record.literalReplacement.reasons.length !== 0) {
+    throw new Error(`experiment source verification is not a certified single-variable description change: ${
+      [...new Set([...record.reasons, ...record.literalReplacement.reasons])].join(', ') || 'unverified-state'}`);
+  }
+  return true;
+}
+
+/**
+ * Re-runs the byte-level single-variable check straight from the Git object
+ * database: both arms' committed component bytes, the exact literal replacement
+ * and the changed-file hashes. Pure and import-free, so the mandatory
+ * pre-provider check never executes arm code.
+ */
+export function verifyPlanSourceBytes(plan, { repoDir }) {
+  const paths = plan.arms.baseline.components.map((component) => component.path);
+  if (canonicalJson(paths) !== canonicalJson(plan.arms.intervention.components.map((component) => component.path))) {
+    throw new Error('experiment source verification: arms must bind the same component paths');
+  }
+  const sources = {};
+  for (const arm of v1.ARMS) {
+    const declared = plan.arms[arm];
+    const source = readGitSource({ repoDir, commit: declared.gitCommit, componentPaths: paths });
+    const observed = source.components.map(({ path: file, sha256: digest }) => ({ path: file, sha256: digest }));
+    if (source.gitTree !== declared.gitTree || source.componentSetSha256 !== declared.componentSetSha256
+        || canonicalJson(observed) !== canonicalJson(declared.components)) {
+      throw new Error(`experiment source verification: ${arm} arm source bytes differ from the plan`);
+    }
+    sources[arm] = source;
+  }
+  const change = plan.change;
+  const beforeBytes = sources.baseline.files.get(change.sourcePath);
+  const afterBytes = sources.intervention.files.get(change.sourcePath);
+  if (!beforeBytes || !afterBytes) throw new Error('experiment source verification: the changed file is absent from an arm');
+  if (sha256(beforeBytes) !== change.beforeFileSha256 || sha256(afterBytes) !== change.afterFileSha256) {
+    throw new Error('experiment source verification: changed-file bytes differ from the declared hashes');
+  }
+  const literal = verifyLiteralReplacement({
+    beforeText: beforeBytes.toString('utf8'),
+    afterText: afterBytes.toString('utf8'),
+    toolName: change.toolName,
+    beforeLiteral: change.beforeLiteral,
+    afterLiteral: change.afterLiteral,
+  });
+  if (!literal.exact) {
+    throw new Error(`experiment source verification: the candidate is not exactly one allowed description replacement (${literal.reasons.join(', ')})`);
+  }
+  return true;
+}
+
+function requireReasonList(value, name) {
+  if (!Array.isArray(value) || value.some((reason) => typeof reason !== 'string' || !reason || reason.length > 256 || /[\r\n\0]/.test(reason))) {
+    throw new Error(`${name} must list bounded non-empty lines`);
+  }
+  if (new Set(value).size !== value.length) throw new Error(`${name} must be unique`);
+  return value;
 }
 
 // --- plan -------------------------------------------------------------------
@@ -324,13 +524,18 @@ export function validateExperimentPlanV2(value) {
   const plan = v1.cloneRecord(value, 'experiment v2 plan');
   v1.requireExactKeys(plan, [
     'arms', 'change', 'changedVariable', 'commonConditions', 'createdAt', 'execution', 'experimentId',
-    'exposure', 'hypothesis', 'manifests', 'planSha256', 'registrationMode', 'schedule', 'schema', 'singleVariable',
+    'exposure', 'hypothesis', 'manifests', 'planSha256', 'registrationMode', 'schedule', 'schema',
+    'singleVariable', 'sourceVerificationSha256',
   ], 'experiment v2 plan');
   if (plan.schema !== EXPERIMENT_PLAN_V2_SCHEMA) throw new Error('experiment v2 plan schema is invalid');
   v1.requireSafeId(plan.experimentId, 'experiment ID');
   v1.requireTimestamp(plan.createdAt, 'experiment creation time');
   v1.requireLine(plan.hypothesis, 'experiment hypothesis', 1000);
   v1.requireSha(plan.planSha256, 'experiment plan hash');
+  // The plan commits to the source-verification record by hash. The
+  // `singleVariable` block above stays a declaration; only the record plus the
+  // mandatory byte-level re-check at load time certifies it.
+  v1.requireSha(plan.sourceVerificationSha256, 'experiment source verification commitment');
   if (!REGISTRATION_MODES.includes(plan.registrationMode)) throw new Error('experiment registrationMode must be prospective or retrospective');
   if (plan.changedVariable !== 'tool-description') throw new Error('experiment v2 supports only changedVariable=tool-description');
   const verdict = v1.cloneRecord(plan.singleVariable, 'experiment single-variable verdict');
@@ -340,9 +545,7 @@ export function validateExperimentPlanV2(value) {
   }
 
   const change = v1.cloneRecord(plan.change, 'experiment change');
-  v1.requireExactKeys(change, [
-    'afterFileSha256', 'afterLiteral', 'beforeFileSha256', 'beforeLiteral', 'commonToolContractSha256', 'patchSha256', 'sourcePath', 'toolName',
-  ], 'experiment change');
+  v1.requireExactKeys(change, CHANGE_KEYS, 'experiment change');
   v1.requireSafeId(change.toolName, 'changed tool name');
   v1.requireLine(change.sourcePath, 'changed source path', 256);
   if (path.isAbsolute(change.sourcePath) || change.sourcePath.split('/').includes('..')) throw new Error('changed source path must be repository-relative');
@@ -358,10 +561,7 @@ export function validateExperimentPlanV2(value) {
   v1.requireExactKeys(common, ['initialState', 'policyProfile', 'provider', 'runtime', 'watchdogPolicy'], 'experiment common conditions');
   v1.requireSafeId(common.policyProfile, 'experiment common policy profile');
   v1.validateConditionParts(common);
-  const watchdog = v1.cloneRecord(common.watchdogPolicy, 'experiment watchdog policy');
-  v1.requireExactKeys(watchdog, WATCHDOG_KEYS, 'experiment watchdog policy');
-  v1.strictInteger(watchdog.jobDeadlineMs, 'watchdog jobDeadlineMs', 60_000, 172_800_000);
-  if (watchdog.progressIdleMs !== null) v1.strictInteger(watchdog.progressIdleMs, 'watchdog progressIdleMs', 60_000, 172_800_000);
+  validateExecutionPolicy(common.watchdogPolicy, 'experiment watchdog policy');
 
   const arms = v1.cloneRecord(plan.arms, 'experiment arms');
   v1.requireExactKeys(arms, v1.ARMS, 'experiment arms');
@@ -398,13 +598,19 @@ export function validateExperimentPlanV2(value) {
   return v1.deepFreeze({ ...plan, manifests: normalizedManifests });
 }
 
-function validateSourceBinding(value, name, changedPath) {
+function validateSourceBinding(value, name, changedPath, { allowUnderived = false } = {}) {
   const binding = v1.cloneRecord(value, name);
   v1.requireExactKeys(binding, ['componentSetSha256', 'components', 'gitCommit', 'gitTree', 'providerToolSchemaSha256', 'sourceEvidence', 'toolContractSha256'], name);
   if (!v1.GIT_HASH.test(String(binding.gitCommit || '')) || !v1.GIT_HASH.test(String(binding.gitTree || ''))) {
     throw new Error(`${name} must bind a verified Git commit and tree`);
   }
-  for (const field of ['componentSetSha256', 'providerToolSchemaSha256', 'toolContractSha256']) v1.requireSha(binding[field], `${name} ${field}`);
+  for (const field of ['componentSetSha256', 'providerToolSchemaSha256', 'toolContractSha256']) {
+    if (allowUnderived && field !== 'componentSetSha256' && binding[field] === null) continue;
+    v1.requireSha(binding[field], `${name} ${field}`);
+  }
+  if ((binding.providerToolSchemaSha256 === null) !== (binding.toolContractSha256 === null)) {
+    throw new Error(`${name} derived tool contract hashes must be present together or absent together`);
+  }
   if (!Array.isArray(binding.components) || !binding.components.some((component) => component?.path === changedPath)) {
     throw new Error(`${name} components must include the changed file`);
   }
@@ -479,13 +685,21 @@ export function validateExperimentRunBindingV2(value) {
   const binding = v1.cloneRecord(value, 'experiment v2 run binding');
   v1.requireExactKeys(binding, [
     'arm', 'changedVariable', 'commonConditionsSha256', 'componentSetSha256', 'experimentId', 'gitCommit', 'gitTree',
-    'manifestSha256', 'phase', 'planSha256', 'policyProfile', 'providerEndpointSha256', 'providerModelSha256',
-    'providerToolSchemaSha256', 'replicate', 'schema', 'toolContractSha256',
+    'executionPolicy', 'executionPolicySha256', 'manifestSha256', 'phase', 'planSha256', 'policyProfile',
+    'providerEndpointSha256', 'providerModelSha256', 'providerToolSchemaSha256', 'replicate', 'schema',
+    'sourceVerificationSha256', 'toolContractSha256',
   ], 'experiment v2 run binding');
   if (binding.schema !== EXPERIMENT_RUN_V2_SCHEMA) throw new Error('experiment v2 run binding schema is invalid');
   v1.requireSafeId(binding.experimentId, 'experiment ID');
   for (const field of ['commonConditionsSha256', 'componentSetSha256', 'manifestSha256', 'planSha256', 'providerEndpointSha256',
-    'providerModelSha256', 'providerToolSchemaSha256', 'toolContractSha256']) v1.requireSha(binding[field], `experiment v2 ${field}`);
+    'providerModelSha256', 'providerToolSchemaSha256', 'sourceVerificationSha256', 'toolContractSha256']) {
+    v1.requireSha(binding[field], `experiment v2 ${field}`);
+  }
+  const policy = validateExecutionPolicy(binding.executionPolicy, 'experiment v2 execution policy');
+  v1.requireSha(binding.executionPolicySha256, 'experiment v2 executionPolicySha256');
+  if (binding.executionPolicySha256 !== sha256(canonicalJson(policy))) {
+    throw new Error('experiment v2 execution policy hash does not match its policy');
+  }
   if (!v1.GIT_HASH.test(String(binding.gitCommit || '')) || !v1.GIT_HASH.test(String(binding.gitTree || ''))) {
     throw new Error('experiment v2 run Git identity is invalid');
   }
@@ -495,12 +709,14 @@ export function validateExperimentRunBindingV2(value) {
   return v1.deepFreeze(binding);
 }
 
-export function expectedBindingV2(plan, phase, arm, replicate) {
+export function expectedBindingV2(plan, phase, arm, replicate, executionPolicy = plan.commonConditions.watchdogPolicy) {
   const source = plan.arms[arm];
+  const policy = validateExecutionPolicy(executionPolicy, 'experiment effective execution policy');
   return {
     schema: EXPERIMENT_RUN_V2_SCHEMA,
     experimentId: plan.experimentId,
     planSha256: plan.planSha256,
+    sourceVerificationSha256: plan.sourceVerificationSha256,
     commonConditionsSha256: sha256(canonicalJson(plan.commonConditions)),
     gitCommit: source.gitCommit,
     gitTree: source.gitTree,
@@ -509,6 +725,8 @@ export function expectedBindingV2(plan, phase, arm, replicate) {
     providerToolSchemaSha256: source.providerToolSchemaSha256,
     providerEndpointSha256: plan.commonConditions.provider.endpointSha256,
     providerModelSha256: plan.commonConditions.provider.modelSha256,
+    executionPolicy: policy,
+    executionPolicySha256: sha256(canonicalJson(policy)),
     phase,
     arm,
     replicate,
@@ -527,7 +745,15 @@ export function validateBindingForPlanV2(plan, value) {
   return binding;
 }
 
-export function loadExperimentRunV2(plan, env) {
+/**
+ * The mandatory pre-provider experiment-unit check (#362). The record the
+ * caller supplies must match the plan's commitment and the plan's arms, must
+ * state all three verified facts, and the byte-level single-variable check is
+ * re-run here from the Git object database. A missing record, an unreadable
+ * repository or a source that is not exactly one reviewed description
+ * replacement refuses the run as an experiment unit: no provider request.
+ */
+export function loadExperimentRunV2(plan, env, { executionPolicy = plan.commonConditions.watchdogPolicy } = {}) {
   const phase = String(env.AVO_EXPERIMENT_PHASE || '').trim();
   const arm = String(env.AVO_EXPERIMENT_ARM || '').trim();
   if (!v1.PHASES.includes(phase)) throw new Error(`AVO_EXPERIMENT_PHASE must be one of: ${v1.PHASES.join(', ')}`);
@@ -537,14 +763,33 @@ export function loadExperimentRunV2(plan, env) {
   if (explicitProfile && explicitProfile !== plan.commonConditions.policyProfile) {
     throw new Error('AVO_POLICY_PROFILE contradicts the experiment common policy profile');
   }
-  return v1.deepFreeze({ plan, binding: validateBindingForPlanV2(plan, expectedBindingV2(plan, phase, arm, replicate)) });
+  const verificationFile = String(env.AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE || '').trim();
+  if (!verificationFile) {
+    throw new Error('an experiment v2 run requires AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE for its sealed plan');
+  }
+  const record = readSourceVerificationRecord(verificationFile);
+  assertSourceVerificationMatchesPlan(plan, record);
+  const repoDir = String(env.AVO_EXPERIMENT_SOURCE_REPO || '').trim() || process.cwd();
+  verifyPlanSourceBytes(plan, { repoDir });
+  // The runner parses the effective execution policy once and hands it here.
+  // Any difference from the frozen plan refuses the unit before a request; the
+  // binding then seals that same verified value into the capsule.
+  const policy = validateExecutionPolicy(executionPolicy, 'experiment effective execution policy');
+  if (canonicalJson(policy) !== canonicalJson(plan.commonConditions.watchdogPolicy)) {
+    throw new Error('effective watchdog policy differs from the frozen experiment plan');
+  }
+  return v1.deepFreeze({
+    plan,
+    sourceVerification: record,
+    binding: validateBindingForPlanV2(plan, expectedBindingV2(plan, phase, arm, replicate, policy)),
+  });
 }
 
 // --- effective checks before any provider call ------------------------------
 
 // The tool contracts are always the running checkout's own: an arm is checked
 // by running this in that arm's checkout.
-export function assertExperimentEnvironmentV2(plan, bindingValue, { provider, config, env, git: gitState }) {
+export function assertExperimentEnvironmentV2(plan, bindingValue, { provider, config, env, git: gitState, executionPolicy = null }) {
   const binding = validateBindingForPlanV2(plan, bindingValue);
   v1.assertEnvironmentConditions({ ...plan.commonConditions, gitCommit: binding.gitCommit }, binding.policyProfile, { provider, config, env, git: gitState });
   const workspaceMode = config?.workspaceMode;
@@ -556,11 +801,15 @@ export function assertExperimentEnvironmentV2(plan, bindingValue, { provider, co
       || tools.find((tool) => tool.name === plan.change.toolName)?.description !== declared) {
     throw new Error('effective tool contract differs from the selected experiment arm');
   }
-  const watchdog = plan.commonConditions.watchdogPolicy;
-  const deadline = Number(env.AVO_BENCHMARK_TIMEOUT_MS || 12 * 60 * 60 * 1000);
-  const idle = env.AVO_PROGRESS_IDLE_MS === undefined || env.AVO_PROGRESS_IDLE_MS === '' ? null : Number(env.AVO_PROGRESS_IDLE_MS);
-  if (deadline !== watchdog.jobDeadlineMs || idle !== watchdog.progressIdleMs) {
+  // The effective execution policy is parsed exactly once by the runner and
+  // handed to every consumer. It is never re-read from the environment here,
+  // and a missing policy is a refusal: two absences are not one equality.
+  const effective = validateExecutionPolicy(executionPolicy, 'effective execution policy');
+  if (canonicalJson(effective) !== canonicalJson(plan.commonConditions.watchdogPolicy)) {
     throw new Error('effective watchdog policy differs from the frozen experiment plan');
+  }
+  if (canonicalJson(binding.executionPolicy) !== canonicalJson(effective)) {
+    throw new Error('sealed experiment binding carries a different execution policy than the runner');
   }
   return true;
 }
@@ -581,85 +830,46 @@ export function assertExperimentCapsuleV2(plan, bindingValue, capsule) {
 // --- results ----------------------------------------------------------------
 
 /**
- * Validates v2 run evidence without relaxing the official-score rules: each
- * complete run must pass the same capsule, report and condition checks as v1,
- * bound to its own arm source. Incomplete runs are listed by their #343 audit
- * outcome (error / censored / unknown) and never enter pairs. Every scheduled
- * unit is reported; a pair exists only when both arms completed.
+ * Validates v2 run evidence (#347/#362/#363) without relaxing the
+ * official-score rules. Every entry — completed or incomplete — first passes
+ * the same scope, plan, arm, source-verification, run-id, prospective-time,
+ * schedule and common-condition checks; only then are the outcome-specific
+ * rules applied. A completed run must still pass the same capsule, report,
+ * scorecard and condition checks as v1. An incomplete unit must pass the real
+ * #343/#357 audit validator, be bound to its sealed capsule by run ID, and
+ * keep its observed per-game status, progress and cost instead of being
+ * flattened to a missing pair. Incomplete units never enter a comparable pair.
  */
-export function validateExperimentResultsV2(plan, evidenceEntries) {
+export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = null } = {}) {
   if (!Array.isArray(evidenceEntries)) throw new Error('experiment results require an evidence list');
+  // #362: with a repository the byte-level source commitment is re-verified
+  // here too; without one the sealed binding still has to carry it.
+  if (repoDir !== null) verifyPlanSourceBytes(plan, { repoDir });
   const seen = new Set();
-  const runIds = new Set();
-  const runs = [];
-  const incomplete = [];
+  const runIds = new Map();
+  const entries = [];
   for (const [index, entry] of evidenceEntries.entries()) {
-    const selector = `${entry?.phase}:${entry?.arm}:${entry?.replicate}`;
-    if (!v1.PHASES.includes(entry?.phase) || !v1.ARMS.includes(entry?.arm)) throw new Error(`experiment result ${index} selector is invalid`);
-    v1.strictInteger(entry.replicate, `experiment result ${index} replicate`, 1, repetitionLimit(plan));
-    if (seen.has(selector)) throw new Error(`experiment result duplicates unit ${selector}; retries are not selectable after the fact`);
-    seen.add(selector);
-    if (entry.auditRun) {
-      incomplete.push(incompleteUnit(plan, entry, selector));
-      continue;
-    }
-    v1.requireExactKeys(entry, ['arm', 'phase', 'privateCapsuleEvidence', 'replicate', 'report'], `experiment result ${index}`);
-    const report = v1.cloneRecord(entry.report, `experiment result ${selector} report`);
-    const capsule = report?.provenance?.runCapsule;
-    const authority = evaluatePublicRunCapsule(capsule, {
-      privateCapsuleEvidence: entry.privateCapsuleEvidence,
-      expectedRunId: report.runId,
-      benchmarkReport: report,
-    });
-    if (!authority.accepted) throw new Error(`experiment result ${selector} capsule rejected: ${authority.reasons.join('; ')}`);
-    const expected = validateBindingForPlanV2(plan, expectedBindingV2(plan, entry.phase, entry.arm, entry.replicate));
-    const privateDefinition = entry.privateCapsuleEvidence?.value?.definition;
-    const published = v1.publicExperimentBinding(expected);
-    if (canonicalJson(privateDefinition?.experiment) !== canonicalJson(expected)
-        || canonicalJson(capsule.experiment) !== canonicalJson(published)
-        || canonicalJson(report.experiment) !== canonicalJson(published)) {
-      throw new Error(`experiment result ${selector} binding differs from the plan or arm source`);
-    }
-    if (capsule.gitCommit !== expected.gitCommit || capsule.gitTree !== expected.gitTree
-        || capsule.componentSetSha256 !== expected.componentSetSha256
-        || capsule.toolSchemaSha256 !== expected.toolContractSha256
-        || capsule.providerToolSchemaSha256 !== expected.providerToolSchemaSha256) {
-      throw new Error(`experiment result ${selector} source identity differs from its arm`);
-    }
-    v1.validatePublicExperimentReport(report, plan.manifests[entry.phase]);
-    v1.assertPublicCapsuleConditions({ conditions: { ...plan.commonConditions, gitCommit: expected.gitCommit }, manifests: plan.manifests },
-      capsule, expected);
-    const created = Date.parse(entry.privateCapsuleEvidence.value.createdAt);
-    if (plan.registrationMode === 'prospective' && created < Date.parse(plan.createdAt)) {
-      throw new Error(`experiment result ${selector} predates its prospective plan; register it as retrospective`);
-    }
-    if (runIds.has(report.runId)) throw new Error(`experiment results reuse run ${report.runId}`);
-    runIds.add(report.runId);
-    runs.push({
-      phase: entry.phase,
-      arm: entry.arm,
-      replicate: entry.replicate,
-      runId: report.runId,
-      createdAt: created,
-      condition: comparableArmCondition(capsule),
-      mechanism: normalizeMechanismMetrics(report.aggregates?.mechanismMetrics, `${selector} mechanism metrics`),
-      games: report.games.map((game) => ({
-        versionedGameId: game.versionedGameId,
-        won: game.won,
-        levelsCompleted: game.levelsCompleted,
-        cost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector} ${game.versionedGameId} mechanism metrics`)),
-      })),
-    });
+    const selector = resultSelector(plan, entry, index);
+    if (seen.has(selector.key)) throw new Error(`experiment result duplicates unit ${selector.key}; retries are not selectable after the fact`);
+    seen.add(selector.key);
+    const resolved = entry?.auditRun
+      ? resolveIncompleteEntry(plan, entry, selector)
+      : resolveCompleteEntry(plan, entry, selector);
+    if (runIds.has(resolved.runId)) throw new Error(`experiment results reuse run ${resolved.runId} (${runIds.get(resolved.runId)} and ${selector.key})`);
+    runIds.set(resolved.runId, selector.key);
+    entries.push(resolved);
   }
-  // Completed runs must have started in the frozen schedule order.
-  const scheduled = runs.map((run) => ({
-    order: plan.schedule.find((entry) => entry.phase === run.phase && entry.arm === run.arm && entry.replicate === run.replicate).order,
-    createdAt: run.createdAt,
-  })).sort((left, right) => left.order - right.order);
-  for (let index = 1; index < scheduled.length; index += 1) {
-    if (scheduled[index].createdAt < scheduled[index - 1].createdAt) throw new Error('experiment runs did not follow the frozen schedule order');
+  // Every unit with a trustworthy start time is checked against the frozen
+  // schedule order; a unit whose start time cannot be established stays
+  // explicitly order-unverified instead of being treated as on time.
+  const scheduled = entries.slice().sort((left, right) => left.order - right.order);
+  const timed = scheduled.filter((entry) => entry.startedAt !== null);
+  for (let index = 1; index < timed.length; index += 1) {
+    if (timed[index].startedAt < timed[index - 1].startedAt) throw new Error('experiment runs did not follow the frozen schedule order');
   }
-  const conditions = new Set(runs.map((run) => canonicalJson(run.condition)));
+  const orderUnverified = scheduled.filter((entry) => entry.startedAt === null)
+    .map((entry) => ({ unit: entry.key, reason: 'missing-start-time' }));
+  const conditions = new Set(entries.map((entry) => canonicalJson(entry.condition)));
   if (conditions.size > 1) throw new Error('experiment arms differ in a non-intervention condition');
 
   const units = [];
@@ -667,18 +877,13 @@ export function validateExperimentResultsV2(plan, evidenceEntries) {
     for (let replicate = 1; replicate <= repetitionLimit(plan); replicate += 1) {
       for (const versionedGameId of plan.manifests[phase].versionedGameIds) {
         const arms = Object.fromEntries(v1.ARMS.map((arm) => {
-          const run = runs.find((item) => item.phase === phase && item.arm === arm && item.replicate === replicate);
-          const missing = incomplete.find((item) => item.phase === phase && item.arm === arm && item.replicate === replicate);
-          const game = run?.games.find((item) => item.versionedGameId === versionedGameId);
-          return [arm, run
-            // Accepted reports contain exactly the frozen manifest's games.
-            ? { status: 'completed', runId: run.runId, won: game.won, levelsCompleted: game.levelsCompleted, cost: game.cost }
-            : { status: missing?.status ?? 'not-run', runId: missing?.runId ?? null, won: null, levelsCompleted: null, cost: null }];
+          const entry = entries.find((item) => item.phase === phase && item.arm === arm && item.replicate === replicate);
+          return [arm, entry?.games.get(versionedGameId) ?? notRunArmFacts()];
         }));
         units.push({
           unit: `${plan.experimentId}:${phase}:${versionedGameId}:${replicate}`,
           phase, versionedGameId, replicate, arms,
-          paired: v1.ARMS.every((arm) => arms[arm].status === 'completed'),
+          paired: v1.ARMS.every((arm) => arms[arm].pairEligible === true),
         });
       }
     }
@@ -686,24 +891,30 @@ export function validateExperimentResultsV2(plan, evidenceEntries) {
   const paired = units.filter((unit) => unit.paired);
   const outcomeDifference = paired.some((unit) => unit.arms.baseline.won !== unit.arms.intervention.won
     || unit.arms.baseline.levelsCompleted !== unit.arms.intervention.levelsCompleted);
-  // Every accepted run's cost counts once, including runs without a pair.
-  const cost = (arm) => runs.filter((run) => run.arm === arm).reduce((total, run) => ({
-    toolCalls: total.toolCalls + run.mechanism.toolCalls,
-    trajectoryReadCalls: total.trajectoryReadCalls + run.mechanism.trajectoryReadCalls,
-    totalTokens: total.totalTokens + run.mechanism.totalTokens,
-  }), unitCost(null));
+  const preRegistered = plan.registrationMode === 'prospective' && orderUnverified.length === 0;
   const result = {
-    schema: EXPERIMENT_RESULT_V2_SCHEMA,
+    schema: EXPERIMENT_RESULT_V3_SCHEMA,
     experimentId: plan.experimentId,
     planSha256: plan.planSha256,
+    sourceVerificationSha256: plan.sourceVerificationSha256,
     registrationMode: plan.registrationMode,
-    evidenceClass: plan.registrationMode === 'prospective' ? 'pre-registered' : 'exploratory',
+    evidenceClass: plan.registrationMode === 'prospective'
+      ? (preRegistered ? 'pre-registered' : 'registration-unverified')
+      : 'exploratory',
     holdout: holdoutExposure(plan),
     unitStatuses: Object.fromEntries(UNIT_STATUSES.map((status) => [status, units.reduce((count, unit) => count
-      + v1.ARMS.filter((arm) => unit.arms[arm].status === status).length, 0)])),
+      + v1.ARMS.filter((arm) => unit.arms[arm].executionStatus === status).length, 0)])),
     units,
     pairedUnits: paired.length,
-    observedCost: { baseline: cost('baseline'), intervention: cost('intervention') },
+    observedCost: {
+      baseline: armObservedCost(units, 'baseline'),
+      intervention: armObservedCost(units, 'intervention'),
+    },
+    scheduleOrder: {
+      verified: orderUnverified.length === 0 && timed.length > 0,
+      checkedUnits: timed.map((entry) => entry.key),
+      unverifiedUnits: orderUnverified,
+    },
     // No pre-registered decision rule exists for this contract, so outcome
     // and cost deltas are reported descriptively and the conclusion stays open.
     conclusion: 'undetermined',
@@ -724,22 +935,229 @@ function comparableArmCondition(capsule) {
   return { ...rest, policyProfile: capsule.policyProfile, prompts: capsule.prompts, enabledTools: capsule.enabledTools };
 }
 
+function resultSelector(plan, entry, index) {
+  if (!v1.PHASES.includes(entry?.phase) || !v1.ARMS.includes(entry?.arm)) throw new Error(`experiment result ${index} selector is invalid`);
+  const replicate = v1.strictInteger(entry.replicate, `experiment result ${index} replicate`, 1, repetitionLimit(plan));
+  const scheduled = plan.schedule.find((item) => item.phase === entry.phase && item.arm === entry.arm && item.replicate === replicate);
+  if (!scheduled) throw new Error(`experiment result ${index} is not in the frozen schedule`);
+  return { key: `${entry.phase}:${entry.arm}:${replicate}`, phase: entry.phase, arm: entry.arm, replicate, order: scheduled.order };
+}
+
+// The run's sealed capsule start time; an unparseable time stays unknown.
+function startedAtOf(value) {
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function assertProspectiveStart(plan, selector, startedAt) {
+  if (plan.registrationMode === 'prospective' && startedAt !== null && startedAt < Date.parse(plan.createdAt)) {
+    throw new Error(`experiment result ${selector.key} predates its prospective plan; register it as retrospective`);
+  }
+}
+
+// A complete run through the real capsule, public projection, scorecard
+// authority and report aggregation, bound to its own arm source (#347/P10).
+function resolveCompleteEntry(plan, entry, selector) {
+  v1.requireExactKeys(entry, ['arm', 'phase', 'privateCapsuleEvidence', 'replicate', 'report'], `experiment result ${selector.key}`);
+  const report = v1.cloneRecord(entry.report, `experiment result ${selector.key} report`);
+  const capsule = report?.provenance?.runCapsule;
+  const authority = evaluatePublicRunCapsule(capsule, {
+    privateCapsuleEvidence: entry.privateCapsuleEvidence,
+    expectedRunId: report.runId,
+    benchmarkReport: report,
+  });
+  if (!authority.accepted) throw new Error(`experiment result ${selector.key} capsule rejected: ${authority.reasons.join('; ')}`);
+  const expected = validateBindingForPlanV2(plan, expectedBindingV2(plan, selector.phase, selector.arm, selector.replicate));
+  const privateDefinition = entry.privateCapsuleEvidence?.value?.definition;
+  const published = v1.publicExperimentBinding(expected);
+  if (canonicalJson(privateDefinition?.experiment) !== canonicalJson(expected)
+      || canonicalJson(capsule.experiment) !== canonicalJson(published)
+      || canonicalJson(report.experiment) !== canonicalJson(published)) {
+    throw new Error(`experiment result ${selector.key} binding differs from the plan or arm source`);
+  }
+  assertSealedExecutionPolicy(plan, capsule.experiment);
+  if (capsule.gitCommit !== expected.gitCommit || capsule.gitTree !== expected.gitTree
+      || capsule.componentSetSha256 !== expected.componentSetSha256
+      || capsule.toolSchemaSha256 !== expected.toolContractSha256
+      || capsule.providerToolSchemaSha256 !== expected.providerToolSchemaSha256) {
+    throw new Error(`experiment result ${selector.key} source identity differs from its arm`);
+  }
+  v1.validatePublicExperimentReport(report, plan.manifests[selector.phase]);
+  v1.assertPublicCapsuleConditions({ conditions: { ...plan.commonConditions, gitCommit: expected.gitCommit }, manifests: plan.manifests },
+    capsule, expected);
+  const startedAt = startedAtOf(entry.privateCapsuleEvidence.value.createdAt);
+  assertProspectiveStart(plan, selector, startedAt);
+  return {
+    ...selector,
+    runId: report.runId,
+    startedAt,
+    condition: comparableArmCondition(capsule),
+    // A report accepted through the complete-score rules is the only evidence
+    // that can form a comparable pair.
+    games: new Map(report.games.map((game) => [game.versionedGameId, {
+      executionStatus: 'completed',
+      runId: report.runId,
+      pairEligible: true,
+      won: game.won,
+      levelsCompleted: game.levelsCompleted,
+      observedProgress: { levelsCompleted: game.levelsCompleted, totalLevels: game.totalLevels },
+      observedCost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector.key} ${game.versionedGameId} mechanism metrics`)),
+      costMeteringLayer: 'run-report-games',
+      costMeteringComplete: true,
+      costCoverage: { source: 'complete-report', complete: true },
+      sourceRef: `report:${report.runId}:${game.versionedGameId}`,
+    }])),
+  };
+}
+
 // An incomplete unit is bound to the plan through the run capsule its runner
-// sealed before the benchmark started, and to its #343 audit by run ID. A unit
-// without a capsule stays not-run.
-function incompleteUnit(plan, entry, selector) {
-  v1.requireExactKeys(entry, ['arm', 'auditRun', 'phase', 'privateCapsuleEvidence', 'replicate'], `experiment incomplete unit ${selector}`);
+// sealed before the benchmark started, and to its #343/#357 audit export by
+// run ID. The audit is validated by the real validator and its run record is
+// re-derived from the bound audit inputs, so a schema string, a rewritten cost,
+// outcome, source ref or coverage block is never enough.
+function resolveIncompleteEntry(plan, entry, selector) {
+  v1.requireExactKeys(entry, ['arm', 'auditRun', 'phase', 'privateCapsuleEvidence', 'replicate'], `experiment incomplete unit ${selector.key}`);
   const capsule = validateRunCapsule(entry.privateCapsuleEvidence?.value);
-  const expected = expectedBindingV2(plan, entry.phase, entry.arm, entry.replicate);
+  const expected = expectedBindingV2(plan, selector.phase, selector.arm, selector.replicate);
   if (canonicalJson(capsule.definition.experiment) !== canonicalJson(expected)) {
-    throw new Error(`experiment incomplete unit ${selector} capsule is not bound to this plan and arm`);
+    throw new Error(`experiment incomplete unit ${selector.key} capsule is not bound to this plan and arm`);
   }
-  const audit = entry.auditRun;
-  const status = audit?.executionOutcome?.status;
-  if (audit?.schema !== AUDIT_SCHEMA || audit.runId !== capsule.definition.runId || !['error', 'censored', 'unknown'].includes(status)) {
-    throw new Error(`experiment result ${selector} incomplete entry needs its run's audited error/censored/unknown outcome`);
+  assertSealedExecutionPolicy(plan, capsule.definition.experiment);
+  const runId = capsule.definition.runId;
+  const audited = readAuditedRun(entry.auditRun, runId, selector);
+  if (!['error', 'censored', 'unknown'].includes(audited.executionOutcome.status)) {
+    throw new Error(`experiment result ${selector.key} incomplete entry needs its run's audited error/censored/unknown outcome`);
   }
-  return { phase: entry.phase, arm: entry.arm, replicate: entry.replicate, runId: audit.runId, status };
+  const startedAt = startedAtOf(entry.privateCapsuleEvidence.value.createdAt);
+  assertProspectiveStart(plan, selector, startedAt);
+  const published = projectPublicRunCapsule(entry.privateCapsuleEvidence.value, {
+    runClass: capsule.definition.initialState.mode,
+    comparable: true,
+    capsuleEvidenceSha256: entry.privateCapsuleEvidence.sha256,
+  });
+  const games = new Map();
+  for (const game of audited.games) {
+    const observedCost = game.metrics ?? game.observedSubtotal ?? null;
+    games.set(game.versionedGameId, {
+      executionStatus: game.outcome.status,
+      runId,
+      pairEligible: false,
+      won: null,
+      levelsCompleted: Number.isSafeInteger(game.levels?.levelsCompleted) ? game.levels.levelsCompleted : null,
+      observedProgress: {
+        levelsCompleted: Number.isSafeInteger(game.levels?.levelsCompleted) ? game.levels.levelsCompleted : null,
+        totalLevels: Number.isSafeInteger(game.levels?.totalLevels) ? game.levels.totalLevels : null,
+        errorObserved: game.outcome.errorObserved ?? null,
+      },
+      observedCost,
+      costMeteringLayer: game.meteringLayer,
+      costMeteringComplete: game.metrics !== null,
+      costCoverage: game.coverage ?? null,
+      sourceRef: `${game.sourceRef}:${runId}`,
+    });
+  }
+  return { ...selector, runId, startedAt, condition: comparableArmCondition(published), games };
+}
+
+/**
+ * Validates one incomplete unit's exported audit directory with the real
+ * #343/#357 validator bound to its own source report, then re-derives the run
+ * record from the listed audit inputs. Editing the written cost, outcome,
+ * source ref or coverage changes the re-derived record; only an owner of the
+ * bound source material could reproduce it.
+ */
+function readAuditedRun(auditRun, runId, selector) {
+  v1.requireExactKeys(auditRun, ['exportDir', 'inputManifest'], `experiment incomplete unit ${selector.key} audit`);
+  const manifest = readAuditInputManifest(path.resolve(v1.requireLine(auditRun.inputManifest, 'audit input manifest', 4096)));
+  const outputDir = path.resolve(v1.requireLine(auditRun.exportDir, 'audit export directory', 4096));
+  const validation = validateTrajectoryAudit(outputDir, { sourceRoot: manifest.sourceRoot });
+  if (!validation.ok) {
+    throw new Error(`experiment result ${selector.key} audit export is invalid: ${
+      validation.errors.map((error) => `${error.file}:${error.field ?? '-'}:${error.reason}`).join('; ')}`);
+  }
+  if (validation.expectedIdentitiesVerifiedAgainstSource !== true) {
+    throw new Error(`experiment result ${selector.key} audit expectation was not re-derived from its bound source report`);
+  }
+  const normalized = normalizeAuditInputs(manifest);
+  const derived = normalized.runs.find((run) => run.runId === runId);
+  if (!derived) throw new Error(`experiment result ${selector.key} audit export does not include run ${runId}`);
+  const exported = readJsonFileEvidence(path.join(outputDir, 'runs', `${runId}.json`), {
+    root: outputDir,
+    purpose: 'audit run record',
+  }).value;
+  const exportId = `audit-${sha256(canonicalJson({
+    sourceFiles: normalized.sourceFiles,
+    runs: normalized.runs.map((run) => run.runId),
+  })).slice(0, 16)}`;
+  if (canonicalJson({ schema: AUDIT_SCHEMA, exportId, ...derived }) !== canonicalJson(exported)) {
+    throw new Error(`experiment result ${selector.key} audit run record differs from its re-derived source facts`);
+  }
+  return derived;
+}
+
+// The sealed effective execution policy must exist and must be the plan's
+// watchdog policy. Missing evidence is a refusal, never an equality of nulls.
+function assertSealedExecutionPolicy(plan, sealedBinding) {
+  if (!sealedBinding || typeof sealedBinding !== 'object') throw new Error('experiment unit has no sealed experiment binding');
+  const policy = sealedBinding.executionPolicy ?? null;
+  if (policy === null) throw new Error('experiment unit has no sealed execution policy evidence');
+  if (canonicalJson(policy) !== canonicalJson(plan.commonConditions.watchdogPolicy)) {
+    throw new Error('sealed effective watchdog policy differs from the frozen experiment plan');
+  }
+  if (sealedBinding.executionPolicySha256 !== sha256(canonicalJson(policy))) {
+    throw new Error('sealed execution policy hash does not match its policy');
+  }
+  return true;
+}
+
+function notRunArmFacts() {
+  return {
+    executionStatus: 'not-run',
+    runId: null,
+    pairEligible: false,
+    won: null,
+    levelsCompleted: null,
+    observedProgress: null,
+    observedCost: null,
+    costMeteringLayer: null,
+    costMeteringComplete: false,
+    costCoverage: null,
+    sourceRef: null,
+  };
+}
+
+// One verified metering layer per planned game unit: completed totals are the
+// sum over score-complete units, the observed subtotal also includes error and
+// censored units, and missing units are counted as missing, never as zero.
+function armObservedCost(units, arm) {
+  const facts = units.map((unit) => unit.arms[arm]);
+  const observed = facts.filter((fact) => fact.observedCost !== null);
+  const completed = observed.filter((fact) => fact.executionStatus === 'completed');
+  const completeMetering = observed.every((fact) => fact.costMeteringComplete === true);
+  return {
+    completedTotal: sumCost(completed),
+    observedSubtotal: sumCost(observed),
+    coverage: {
+      expectedUnits: facts.length,
+      observedUnits: observed.length,
+      completedUnits: completed.length,
+      missingUnits: facts.length - observed.length,
+      meteringLayers: [...new Set(observed.map((fact) => fact.costMeteringLayer))].sort(),
+      completeMetering,
+      complete: facts.length > 0 && observed.length === facts.length && completeMetering
+        && facts.every((fact) => fact.executionStatus === 'completed'),
+    },
+  };
+}
+
+// Nothing observed is unknown, not zero.
+function sumCost(facts) {
+  if (!facts.length) return null;
+  return facts.reduce((total, fact) => ({
+    toolCalls: total.toolCalls + fact.observedCost.toolCalls,
+    trajectoryReadCalls: total.trajectoryReadCalls + fact.observedCost.trajectoryReadCalls,
+    totalTokens: total.totalTokens + fact.observedCost.totalTokens,
+  }), unitCost(null));
 }
 
 function unitCost(mechanism) {
@@ -748,6 +1166,25 @@ function unitCost(mechanism) {
     trajectoryReadCalls: mechanism?.trajectoryReadCalls ?? 0,
     totalTokens: mechanism?.totalTokens ?? 0,
   };
+}
+
+/**
+ * The frozen effective execution policy: the job deadline, the progress-idle
+ * threshold and the activity definition that threshold counts as progress. It
+ * is parsed once by the real runner and consumed by the environment check, the
+ * sealed experiment binding, the process runner and the execution terminal.
+ */
+function validateExecutionPolicy(value, name) {
+  const policy = v1.cloneRecord(value, name);
+  v1.requireExactKeys(policy, WATCHDOG_KEYS, name);
+  v1.strictInteger(policy.jobDeadlineMs, `${name} jobDeadlineMs`, 60_000, 172_800_000);
+  if (policy.progressIdleMs === null) {
+    if (policy.progressIdleActivity !== null) throw new Error(`${name} cannot declare a progress activity without an idle threshold`);
+  } else {
+    v1.strictInteger(policy.progressIdleMs, `${name} progressIdleMs`, 60_000, 172_800_000);
+    v1.requireLine(policy.progressIdleActivity, `${name} progressIdleActivity`, 256);
+  }
+  return policy;
 }
 
 function sha256(value) {
