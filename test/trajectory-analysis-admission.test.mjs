@@ -76,6 +76,16 @@ function reset(sequence, { episode = 1, game = 'g1-v1' } = {}) {
   });
 }
 
+// The recorder writes an `open` response carrying the environment's available
+// actions before the first step of every game/episode, so the first transition
+// always has an in-scope preceding observation.
+function open(sequence, { game = 'g1-v1', episode = 0, available = [1, 2, 3, 4, 5, 6] } = {}) {
+  return record(sequence, 'arc.response', {
+    game_id: game, operation: 'open', episode, frame_sha256: `open-${sequence}`,
+    available_actions: available, ok: true, response: { ok: true },
+  });
+}
+
 function writeTrace(records, name = 'arc.jsonl') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-admission-'));
   fs.writeFileSync(path.join(dir, name), `${records.map((value) => JSON.stringify(value)).join('\n')}\n`);
@@ -113,13 +123,13 @@ function findings(analysis, detectorId) {
 }
 
 test('A01 different ACTION6 coordinates never form an executable cycle; identical payloads remain an objective signal', () => {
-  const distinct = analyze([start(), ...Array.from({ length: 6 }, (_, index) =>
-    step(index + 2, { action: 'ACTION6', data: { x: index, y: 2 * index } }))]);
+  const distinct = analyze([start(), open(2), ...Array.from({ length: 6 }, (_, index) =>
+    step(index + 3, { action: 'ACTION6', data: { x: index, y: 2 * index } }))]);
   assert.deepEqual(findings(distinct, 'periodic-action-cycle'), []);
   assert.equal(coverageFor(distinct, 'periodic-action-cycle').status, 'evaluated');
 
-  const same = analyze([start(), ...Array.from({ length: 6 }, (_, index) =>
-    step(index + 2, { action: 'ACTION6', data: { x: 3, y: 4 } }))]);
+  const same = analyze([start(), open(2), ...Array.from({ length: 6 }, (_, index) =>
+    step(index + 3, { action: 'ACTION6', data: { x: 3, y: 4 } }))]);
   const [cycle] = findings(same, 'periodic-action-cycle');
   assert.ok(cycle, 'identical payloads are still observed');
   assert.equal(cycle.kind, 'behavioral-signal');
@@ -131,8 +141,8 @@ test('A01 different ACTION6 coordinates never form an executable cycle; identica
 });
 
 test('A02 identical pixels and payloads describe observed repetition, not unchanged hidden state', () => {
-  const analysis = analyze([start(), ...Array.from({ length: 5 }, (_, index) =>
-    step(index + 2, { frame: 'same-frame', action: 'ACTION1' }))]);
+  const analysis = analyze([start(), open(2), ...Array.from({ length: 5 }, (_, index) =>
+    step(index + 3, { frame: 'same-frame', action: 'ACTION1' }))]);
   const [ineffective] = findings(analysis, 'ineffective-action');
   assert.equal(ineffective.kind, 'behavioral-signal');
   assert.equal(ineffective.details.claim, 'observed-repetition');
@@ -141,8 +151,8 @@ test('A02 identical pixels and payloads describe observed repetition, not unchan
 });
 
 test('A03 supervisor coverage distinguishes disabled, delivered and missing evidence', () => {
-  const loop = [start(), ...Array.from({ length: 8 }, (_, index) =>
-    step(index + 2, { frame: index % 2 ? 'a' : 'b', action: index % 2 ? 'ACTION1' : 'ACTION2' }))];
+  const loop = [start(), open(2), ...Array.from({ length: 8 }, (_, index) =>
+    step(index + 3, { frame: index % 2 ? 'a' : 'b', action: index % 2 ? 'ACTION1' : 'ACTION2' }))];
   const memoryByGame = new Map([['g1', { hypothesisProposals: [], hypothesisEvaluations: [] }]]);
   const disabled = analyze(loop, { capabilities: { strategy: false }, config: { repeatedStateWindow: 6 } });
   assert.deepEqual(
@@ -169,13 +179,14 @@ test('A03 supervisor coverage distinguishes disabled, delivered and missing evid
 test('A04 windows never join episodes, versions, attempts or clock domains', () => {
   const split = analyze([
     start(),
-    ...[2, 3, 4].map((sequence) => step(sequence, { frame: 'same', episode: 0 })),
-    reset(5),
-    ...[6, 7, 8].map((sequence) => step(sequence, { frame: 'same', episode: 1 })),
+    open(2),
+    ...[3, 4, 5].map((sequence) => step(sequence, { frame: 'same', episode: 0 })),
+    reset(6),
+    ...[7, 8, 9].map((sequence) => step(sequence, { frame: 'same', episode: 1 })),
   ], { config: { repeatedStateWindow: 4 } });
   assert.deepEqual(findings(split, 'repeated-state-loop'), []);
 
-  const joined = analyze([start(), ...[2, 3, 4, 5, 6, 7].map((sequence) => step(sequence, { frame: 'same' }))], {
+  const joined = analyze([start(), open(2), ...[3, 4, 5, 6, 7, 8].map((sequence) => step(sequence, { frame: 'same' }))], {
     config: { repeatedStateWindow: 4 },
   });
   assert.equal(findings(joined, 'repeated-state-loop').length, 1);
@@ -183,8 +194,10 @@ test('A04 windows never join episodes, versions, attempts or clock domains', () 
 
   const versions = analyze([
     start(),
-    ...[2, 3, 4].map((sequence) => step(sequence, { frame: 'same', game: 'g1-v1' })),
-    ...[5, 6, 7].map((sequence) => step(sequence, { frame: 'same', game: 'g1-v2' })),
+    open(2, { game: 'g1-v1' }),
+    ...[3, 4, 5].map((sequence) => step(sequence, { frame: 'same', game: 'g1-v1' })),
+    open(6, { game: 'g1-v2' }),
+    ...[7, 8, 9].map((sequence) => step(sequence, { frame: 'same', game: 'g1-v2' })),
   ], { config: { repeatedStateWindow: 4 } });
   assert.deepEqual(findings(versions, 'repeated-state-loop'), []);
   assert.ok(versions.findings.some((finding) => finding.id.includes('game-identity-conflict')));
@@ -192,8 +205,8 @@ test('A04 windows never join episodes, versions, attempts or clock domains', () 
   // Two recorder files are two clock domains; monotonic values are not compared across them.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-admission-clock-'));
   try {
-    fs.writeFileSync(path.join(dir, 'a.jsonl'), `${[start(), step(2, { frame: 'same' }), step(3, { frame: 'same' })].map((v) => JSON.stringify(v)).join('\n')}\n`);
-    fs.writeFileSync(path.join(dir, 'b.jsonl'), `${[step(4, { frame: 'same' }), step(5, { frame: 'same' })].map((v) => JSON.stringify(v)).join('\n')}\n`);
+    fs.writeFileSync(path.join(dir, 'a.jsonl'), `${[start(), open(2), step(3, { frame: 'same' }), step(4, { frame: 'same' })].map((v) => JSON.stringify(v)).join('\n')}\n`);
+    fs.writeFileSync(path.join(dir, 'b.jsonl'), `${[open(5), step(6, { frame: 'same' }), step(7, { frame: 'same' })].map((v) => JSON.stringify(v)).join('\n')}\n`);
     const loaded = loadTrajectoryEvents(dir);
     const analysis = analyzeTrajectory({
       events: loaded.events, expectedGames: ['g1'], config: { repeatedStateWindow: 4 },
@@ -215,7 +228,7 @@ test('A05 negations, quotes, plans and hypotheses are not machine win claims and
     hypothesisProposals: [],
     hypothesisEvaluations: [],
   };
-  const analysis = analyze([start(), step(2)], { capabilities: { strategy: true }, memoryByGame: new Map([['g1', memory]]) });
+  const analysis = analyze([start(), open(2), step(3)], { capabilities: { strategy: true }, memoryByGame: new Map([['g1', memory]]) });
   assert.deepEqual(findings(analysis, 'hallucinated-progress'), []);
   assert.deepEqual(findings(analysis, 'contradictory-memory'), []);
   assert.deepEqual(
@@ -230,7 +243,7 @@ test('A06 legal liveness stops, recovered incidents and final errors are classif
   const games = ['g1-v1', 'g2-v1', 'g3-v1'];
   const records = [
     start(),
-    ...games.map((game, index) => step(index + 2, { game })),
+    ...games.flatMap((game, index) => [open(index * 2 + 2, { game }), step(index * 2 + 3, { game })]),
     record(10, 'avo_provider_incident', { game_id: 'g2-v1', category: 'stream-error' }),
     step(11, { game: 'g4-v1', response: { ok: true, text: 'rate limit exceeded is only quoted text' } }),
   ];
@@ -285,8 +298,10 @@ function fixtureOutcomes() {
 function authoritativeRound(extraRecords = []) {
   const records = [
     start(),
-    ...[2, 3, 4].map((sequence) => step(sequence, { game: 'g1-v1', action: `ACTION${sequence - 1}` })),
-    ...[5, 6, 7].map((sequence) => step(sequence, { game: 'g2-v1', action: `ACTION${sequence - 4}` })),
+    open(2, { game: 'g1-v1' }),
+    ...[3, 4, 5].map((sequence) => step(sequence, { game: 'g1-v1', action: `ACTION${sequence - 2}` })),
+    open(6, { game: 'g2-v1' }),
+    ...[7, 8, 9].map((sequence) => step(sequence, { game: 'g2-v1', action: `ACTION${sequence - 6}` })),
     ...extraRecords,
   ];
   const loaded = loadRecords(records);
@@ -371,8 +386,10 @@ test('A08 a registry with one evidence gap or one failing detector is never comp
 function gapArgs(round) {
   const loaded = loadRecords([
     start(),
-    ...[2, 3, 4].map((sequence) => step(sequence, { game: 'g1-v1' })),
-    ...[5, 6, 7].map((sequence) => step(sequence, { game: 'g2-v1' })),
+    open(2, { game: 'g1-v1' }),
+    ...[3, 4, 5].map((sequence) => step(sequence, { game: 'g1-v1' })),
+    open(6, { game: 'g2-v1' }),
+    ...[7, 8, 9].map((sequence) => step(sequence, { game: 'g2-v1' })),
   ]);
   return {
     events: loaded.events,
@@ -388,10 +405,11 @@ function gapArgs(round) {
 test('A09 forwarded unavailable actions are contract violations; guard rejections and transport failures are not', () => {
   const analysis = analyze([
     start(),
-    step(2, { available: [1, 2, 3] }),
-    step(3, { action: 'ACTION6', data: { x: 1, y: 1 }, ok: false, response: { ok: false, error: 'action not available' } }),
-    step(4, { action: 'ACTION1', ok: false, response: { ok: false, rejected: true, recoverable: true, code: 'FINISH_UNAVAILABLE_ACTIVE' } }),
-    step(5, { action: 'ACTION1', ok: false, response: { ok: false, error: 'socket closed' } }),
+    open(2, { available: [1, 2, 3] }),
+    step(3, { available: [1, 2, 3] }),
+    step(4, { action: 'ACTION6', data: { x: 1, y: 1 }, ok: false, response: { ok: false, error: 'action not available' } }),
+    step(5, { action: 'ACTION1', ok: false, response: { ok: false, rejected: true, recoverable: true, code: 'FINISH_UNAVAILABLE_ACTIVE' } }),
+    step(6, { action: 'ACTION1', ok: false, response: { ok: false, error: 'socket closed' } }),
   ]);
   const invalid = findings(analysis, 'invalid-action');
   const violation = invalid.find((finding) => finding.kind === 'contract-violation');
@@ -406,11 +424,11 @@ test('A09 forwarded unavailable actions are contract violations; guard rejection
   assert.deepEqual([decision.status, decision.exitCode], ['repair-required', 1]);
 
   // A failed reset is an execution incident, recovered only by a later successful step.
-  const failedReset = { ...reset(3), ok: false, error_present: true, response: { ok: false, error: 'reset failed' } };
-  const unrecovered = analyze([start(), step(2), failedReset]);
+  const failedReset = { ...reset(4), ok: false, error_present: true, response: { ok: false, error: 'reset failed' } };
+  const unrecovered = analyze([start(), open(2), step(3), failedReset]);
   assert.deepEqual(findings(unrecovered, 'invalid-action').map((finding) => [finding.reasonCode, finding.resolution]),
     [['environment-operation-failed', 'unrecovered']]);
-  const recovered = analyze([start(), step(2), failedReset, step(4, { episode: 1 })]);
+  const recovered = analyze([start(), open(2), step(3), failedReset, step(5, { episode: 1 })]);
   assert.deepEqual(findings(recovered, 'invalid-action'), []);
   assert.ok(recovered.observations.some((item) => item.reasonCode === 'environment-operation-failed'));
 });
@@ -468,8 +486,8 @@ test('A11 the loader keeps real payload and scope fields and leaves missing ones
 });
 
 test('A12 CLI exit codes, public projections and the #341 writer path agree without double writes or reruns', () => {
-  const trace = writeTrace([start(), ...Array.from({ length: 6 }, (_, index) =>
-    step(index + 2, { action: 'ACTION6', data: { x: 1, y: 2 } }))]);
+  const trace = writeTrace([start(), open(2), ...Array.from({ length: 6 }, (_, index) =>
+    step(index + 3, { action: 'ACTION6', data: { x: 1, y: 2 } }))]);
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-admission-out-'));
   const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-admission-memory-'));
   try {
@@ -498,7 +516,7 @@ test('A12 CLI exit codes, public projections and the #341 writer path agree with
 
     // With an explicit benchmark report the CLI reads structured outcomes and
     // the sealed profile; a distinct-action corpus is then clean (exit 0).
-    const cleanTrace = writeTrace([start(), ...[1, 2, 3].map((index) => step(index + 1, { action: `ACTION${index}` }))]);
+    const cleanTrace = writeTrace([start(), open(2), ...[1, 2, 3].map((index) => step(index + 2, { action: `ACTION${index}` }))]);
     try {
       const report = path.join(out, 'benchmark.json');
       fs.writeFileSync(report, JSON.stringify({

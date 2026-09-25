@@ -24,14 +24,48 @@ export function analysisInputsFromReport(report) {
   } catch {
     gameOutcomes = null;
   }
-  let strategy = null;
+  return { gameOutcomes, capabilities: strategyCapability(report?.provenance?.runCapsule?.policyProfile) };
+}
+
+function derivedStrategy(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
   try {
-    const profile = report?.provenance?.runCapsule?.policyProfile;
-    strategy = typeof profile === 'string' ? policyUsesStrategy(profile) : null;
+    return policyUsesStrategy(value);
   } catch {
-    strategy = null;
+    return null;
   }
-  return { gameOutcomes, capabilities: { strategy } };
+}
+
+/**
+ * Resolves the strategy capability from the sealed capsule's policy profile.
+ * The production builder and its public projection emit an object
+ * `{requested, effective}`; `effective` is authoritative and an explicitly
+ * declared `strategyEnabled` must agree with it. A bare profile name is the
+ * known legacy report shape. Anything missing, malformed or contradictory
+ * stays null with a source/shape/conflict reason; unknown is never false.
+ */
+function strategyCapability(profile) {
+  if (typeof profile === 'string') {
+    const strategy = derivedStrategy(profile);
+    return strategy === null
+      ? { strategy: null, strategyReason: 'shape-invalid', strategySource: 'legacy-string' }
+      : { strategy, strategyReason: null, strategySource: 'legacy-string' };
+  }
+  if (profile === undefined || profile === null) {
+    return { strategy: null, strategyReason: 'source-missing', strategySource: null };
+  }
+  if (typeof profile !== 'object' || Array.isArray(profile)) {
+    return { strategy: null, strategyReason: 'shape-invalid', strategySource: null };
+  }
+  const source = { strategySource: 'run-capsule-object' };
+  const strategy = derivedStrategy(profile.effective);
+  if (strategy === null) return { strategy: null, strategyReason: 'shape-invalid', ...source };
+  if (Object.prototype.hasOwnProperty.call(profile, 'strategyEnabled')) {
+    const declared = profile.strategyEnabled;
+    if (typeof declared !== 'boolean') return { strategy: null, strategyReason: 'shape-invalid', ...source };
+    if (declared !== strategy) return { strategy: null, strategyReason: 'conflict', ...source };
+  }
+  return { strategy, strategyReason: null, ...source };
 }
 
 export function redactedAnalysis(analysis) {

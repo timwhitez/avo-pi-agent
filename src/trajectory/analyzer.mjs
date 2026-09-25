@@ -104,6 +104,9 @@ export function analyzeTrajectory({
   ]).sort();
   const outcomes = indexGameOutcomes(gameOutcomes);
   const strategy = typeof capabilities?.strategy === 'boolean' ? capabilities.strategy : null;
+  const strategyReason = typeof capabilities?.strategyReason === 'string' && capabilities.strategyReason
+    ? capabilities.strategyReason
+    : null;
   const contexts = new Map(gameIds.map((gameId) => [gameId, buildGameContext(gameId, normalized, {
     memory: memoryByGame.get(gameId),
     config,
@@ -111,6 +114,7 @@ export function analyzeTrajectory({
     outcomesSupplied: outcomes.supplied,
     outcomeConflict: outcomes.conflicts.has(gameId),
     strategy,
+    strategyReason,
   })]));
   const findings = [];
   const observations = [];
@@ -260,7 +264,7 @@ export function verifyAnalysisCoverage(analysis) {
   };
 }
 
-function buildGameContext(gameId, events, { memory, config, outcome, outcomesSupplied, outcomeConflict, strategy }) {
+function buildGameContext(gameId, events, { memory, config, outcome, outcomesSupplied, outcomeConflict, strategy, strategyReason }) {
   const gameEvents = events.filter((event) => event.gameId === gameId);
   const transitions = gameEvents.filter((event) => event.kind === 'arc.response' && TRANSITION_OPERATIONS.has(event.operation));
   const resets = gameEvents.filter((event) => event.kind === 'arc.response' && event.operation === 'reset');
@@ -293,6 +297,7 @@ function buildGameContext(gameId, events, { memory, config, outcome, outcomesSup
     outcomesSupplied,
     outcomeConflict,
     strategy,
+    strategyReason,
     maxLevels: Math.max(0, ...transitions.map((event) => number(event.levelsCompleted))),
     winLevels: Math.max(0, ...transitions.map((event) => number(event.winLevels))),
     won: transitions.some((event) => String(event.state).toUpperCase() === 'WIN'),
@@ -322,6 +327,10 @@ function buildSegments(groups) {
   for (const group of groups) {
     let current = null;
     let lastAvailable = null;
+    // Whether the last available-action set came from an observation inside the
+    // current episode. A segment's first transition after an episode boundary
+    // has no in-scope preceding observation and its legality is not checkable.
+    let lastObservedInScope = false;
     const close = () => {
       if (current?.transitions.length) segments.push(current);
       current = null;
@@ -329,11 +338,21 @@ function buildSegments(groups) {
     for (const event of group) {
       if ((event.kind === 'arc.response' || event.kind === 'arc.request') && BOUNDARY_OPERATIONS.has(event.operation)) {
         close();
-        if (event.kind === 'arc.response') lastAvailable = knownAvailable(event);
+        if (event.kind === 'arc.response') {
+          lastAvailable = knownAvailable(event);
+          lastObservedInScope = true;
+        } else {
+          lastAvailable = null;
+          lastObservedInScope = false;
+        }
         continue;
       }
       if (event.kind !== 'arc.response' || !TRANSITION_OPERATIONS.has(event.operation)) continue;
-      if (current && current.scope.episodeId !== (event.episodeId ?? null)) close();
+      if (current && current.scope.episodeId !== (event.episodeId ?? null)) {
+        close();
+        lastAvailable = null;
+        lastObservedInScope = false;
+      }
       if (!current) {
         current = {
           scope: {
@@ -345,12 +364,15 @@ function buildSegments(groups) {
           },
           transitions: [],
           priorAvailable: [],
+          priorObserved: [],
           groupEvents: group,
         };
       }
       current.transitions.push(event);
       current.priorAvailable.push(lastAvailable);
+      current.priorObserved.push(lastObservedInScope);
       lastAvailable = knownAvailable(event);
+      lastObservedInScope = true;
     }
     close();
   }
@@ -440,17 +462,22 @@ function detectIneffectiveActions(context, config) {
 }
 
 // Guard rejections that never reached the environment are normal behaviour.
-// A forwarded action absent from the preceding observation's available set is
-// a harness contract violation; other failed responses are execution incidents.
+// Legality is independent of the environment response: a forwarded action
+// absent from the preceding in-scope observation's available set is a harness
+// contract violation even when the environment returned ok:true. Other failed
+// responses are execution incidents, and a legal failing action is never
+// reported as illegality.
 function detectInvalidActions(context) {
   const findings = [];
   const observations = [];
   for (const segment of context.segments) {
     segment.transitions.forEach((event, index) => {
-      if (!responseFailed(event) || isNormalRejection(event)) return;
       const available = segment.priorAvailable[index];
       const action = normalizeActionName(event.action);
-      if (available && action && !available.includes(action)) {
+      if (isNormalRejection(event)) return;
+      // A recorder-tagged environment response is evidence the request was
+      // forwarded; without it the action's legality stays unknown.
+      if (actionForwarded(event) && action && available && !available.includes(action)) {
         findings.push({
           kind: 'contract-violation',
           severity: 'high',
@@ -465,6 +492,7 @@ function detectInvalidActions(context) {
         });
         return;
       }
+      if (!responseFailed(event)) return;
       const recovered = segment.transitions.slice(index + 1).some((later) => !responseFailed(later));
       const incident = {
         kind: 'execution-incident',
@@ -503,7 +531,21 @@ function detectInvalidActions(context) {
       else findings.push(incident);
     });
   }
-  return evaluated(findings, observations);
+  // A forwarded transition can only be judged against the observation that
+  // preceded it inside the same episode. A missing observation means the trace
+  // is truncated; an observation without an available-action set leaves the
+  // legality unknown. Neither may be silently treated as legal.
+  let gap = null;
+  for (const segment of context.segments) {
+    segment.transitions.forEach((event, index) => {
+      if (gap || !actionForwarded(event) || !normalizeActionName(event.action)) return;
+      if (!segment.priorObserved[index]) gap = 'preceding-observation-missing';
+      else if (segment.priorAvailable[index] === null) gap = 'preceding-availability-unknown';
+    });
+  }
+  return gap
+    ? { status: 'insufficient-evidence', reasonCode: gap, findings, observations }
+    : evaluated(findings, observations);
 }
 
 function detectPrematureFinish(context) {
@@ -644,7 +686,11 @@ function detectGlobalProviderIncidents(events) {
 
 function detectMissingSupervisor(context, config) {
   if (context.strategy === false) return notApplicable('supervisor-disabled');
-  if (context.strategy === null) return insufficient('supervisor-capability-unknown');
+  if (context.strategy === null) {
+    return insufficient(context.strategyReason
+      ? `supervisor-capability-${context.strategyReason}`
+      : 'supervisor-capability-unknown');
+  }
   const windowSize = Math.max(4, number(config.repeatedStateWindow) || 6);
   let gap = null;
   for (const segment of context.segments) {
@@ -762,6 +808,17 @@ function responseFailed(event) {
 function isNormalRejection(event) {
   const response = event.response && typeof event.response === 'object' ? event.response : {};
   return response.ok === false && response.rejected === true && response.recoverable === true;
+}
+
+// Reliable forwarding evidence: the recorder captured an environment response
+// for this request. It keeps the top-level `ok` even when an oversized response
+// body is replaced by a truncation digest. A guard rejection never reaches the
+// environment and an absent response leaves the action's legality unknown.
+function actionForwarded(event) {
+  if (isNormalRejection(event)) return false;
+  const response = event?.response && typeof event.response === 'object' ? event.response : null;
+  if (!response) return false;
+  return typeof response.ok === 'boolean' || (response.truncated === true && typeof event.ok === 'boolean');
 }
 
 function knownAvailable(event) {

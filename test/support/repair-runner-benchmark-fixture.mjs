@@ -11,9 +11,14 @@ const trace = process.env.AVO_TRAJECTORY_DIR;
 const versionedGameIds = ['g1-v1', 'g2-v1'];
 const rec = (sequence, game, kind, fields) => ({ schema_version: 5, run_id: runId, sequence, monotonic_ns: sequence * 1000, kind, game_id: game, episode: 0, turn: sequence, ...fields });
 const step = (sequence, game, action, data) => rec(sequence, game, 'arc.response', { operation: 'step', action, action_data: data, frame_sha256: `f${sequence}`, available_actions: [1, 2, 3, 4, 5, 6], ok: true, level_delta: 0, state: 'NOT_FINISHED' });
+// The recorder writes an `open` response carrying the available actions before
+// the first step of every game.
+const open = (sequence, game) => rec(sequence, game, 'arc.response', { operation: 'open', available_actions: [1, 2, 3, 4, 5, 6], ok: true, response: { ok: true }, frame_sha256: `open-${sequence}`, state: 'NOT_FINISHED' });
 const lines = [rec(1, 'g1-v1', 'bridge.wrapper_start', { method_protocol_supported: true }),
-  ...Array.from({ length: 6 }, (_, i) => step(i + 2, 'g1-v1', 'ACTION6', { x: 1, y: 1 })),
-  step(20, 'g2-v1', 'ACTION1', null), step(21, 'g2-v1', 'ACTION2', null), step(22, 'g2-v1', 'ACTION3', null)];
+  open(2, 'g1-v1'),
+  ...Array.from({ length: 6 }, (_, i) => step(i + 3, 'g1-v1', 'ACTION6', { x: 1, y: 1 })),
+  open(20, 'g2-v1'),
+  step(21, 'g2-v1', 'ACTION1', null), step(22, 'g2-v1', 'ACTION2', null), step(23, 'g2-v1', 'ACTION3', null)];
 fs.writeFileSync(path.join(trace, 'arc.jsonl'), lines.map((v) => JSON.stringify(v)).join('\n') + '\n');
 const privateDir = path.join('runs', 'private', runId);
 const outMemory = path.join(privateDir, 'state', 'memory');
