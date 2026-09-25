@@ -46,6 +46,8 @@ let roundMemoryDir = memoryDir;
 let roundWorkspaceDir = workspaceDir;
 const privateRoot = path.resolve(`runs/private/repair-loop/${baseRunId}`);
 const publicRoot = path.resolve('runs/public');
+// Group entry may re-execute this script; it must precede filesystem effects.
+const scope = await enterOwnedRun();
 if (fs.existsSync(privateRoot)) throw new Error('repair run private root already exists; choose a fresh run ID');
 for (const [directory, purpose] of [
   [memoryDir, 'repair memory directory'],
@@ -56,7 +58,6 @@ for (const [directory, purpose] of [
   ensureAuthorityDirectory(directory, { root: repositoryRoot, purpose });
 }
 
-const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId: baseRunId, kind: 'trajectory-repair-loop' });
 process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
 let activeChild = null;

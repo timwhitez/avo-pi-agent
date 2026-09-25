@@ -12,6 +12,7 @@ import {
 import {
   boundTranscript,
   prepareRuntimeStatusTurn,
+  replaceRuntimeStatus,
   runtimeStatusMessage,
 } from '../src/loop/pi-sdk.mjs';
 
@@ -67,11 +68,12 @@ test('real Pi inner tool loop refreshes terminal status before its next provider
           };
         },
       }],
-      messages: [
+      // Host status messages are only created through replaceRuntimeStatus,
+      // which carries the internal source marker (not a text prefix).
+      messages: replaceRuntimeStatus([
         { role: 'user', content: [{ type: 'text', text: 'solve' }], timestamp: 0 },
         fauxAssistantMessage('prior natural stop', { stopReason: 'stop', timestamp: 1 }),
-        { role: 'user', content: [{ type: 'text', text: initialStatus }], timestamp: 2 },
-      ],
+      ], initialStatus, 2),
     },
     streamFn: faux.streamSimple,
     transformContext: (messages) => boundTranscript(messages),

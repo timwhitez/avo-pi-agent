@@ -28,7 +28,7 @@ import {
   THINKING_ELISION_POLICY_SHA256,
   TOOL_RESULT_ELISION_TEMPLATE_SHA256,
   TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
-  boundTranscript,
+  transcriptPolicySource,
   createPiSdkLoop,
   estimateStaticPiContextTokens,
   effectivePiSystemPrompt,
@@ -361,7 +361,7 @@ export function buildRunCapsule({
       attestation: structuredClone(workspaceAttestation),
     },
     transcript: {
-      policySha256: sha256(boundTranscript.toString()),
+      policySha256: sha256(transcriptPolicySource()),
       toolResultElisionTemplateSha256: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
       toolResultTruncationTemplateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
       thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,
@@ -658,7 +658,7 @@ export function verifyRunCapsuleExecution({
       executionMode: 'sequential',
     },
     transcript: {
-      policySha256: sha256(boundTranscript.toString()),
+      policySha256: sha256(transcriptPolicySource()),
       toolResultElisionTemplateSha256: TOOL_RESULT_ELISION_TEMPLATE_SHA256,
       toolResultTruncationTemplateSha256: TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,
       thinkingElisionPolicySha256: THINKING_ELISION_POLICY_SHA256,

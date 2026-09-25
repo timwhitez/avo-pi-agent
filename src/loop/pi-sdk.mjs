@@ -15,29 +15,50 @@ import {
 } from '../provider-capabilities.mjs';
 
 /** Production loop backed by the official Pi Agent Harness packages. */
-export const RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
-state={state}
+const STATUS_LINES = `state={state}
 environment_actions={environmentActions}/{maxActions}
 outer_turns={outerTurns}/{maxOuterTurns}
 terminal_reason={terminalReason}
-allowed_next={allowedNext}
+allowed_next={allowedNext}`;
+// The current observation anchor is host authority: it names the observation
+// the environment is in now, independently of whatever evidence was read last.
+const CURRENT_OBSERVATION_LINES = `current_observation_ref={observationRef}
+current_observation_scope={observationScope}
+current_observation_sha256={observationSha256}
+current_observation_recovery={observationRecovery}`;
+const LEGACY_RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
+${STATUS_LINES}
 budget_policy=Action and turn budgets are ceilings.`;
-const MINIMAL_RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
-state={state}
-environment_actions={environmentActions}/{maxActions}
-outer_turns={outerTurns}/{maxOuterTurns}
-terminal_reason={terminalReason}
-allowed_next={allowedNext}
+const LEGACY_MINIMAL_RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v1]
+${STATUS_LINES}
+budget_policy=Action and turn budgets are ceilings, never targets to consume.`;
+export const RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v2]
+${STATUS_LINES}
+${CURRENT_OBSERVATION_LINES}
+budget_policy=Action and turn budgets are ceilings.`;
+const MINIMAL_RUNTIME_STATUS_TEMPLATE = `[AVO_RUNTIME_STATUS v2]
+${STATUS_LINES}
+${CURRENT_OBSERVATION_LINES}
 budget_policy=Action and turn budgets are ceilings, never targets to consume.`;
 export const RUNTIME_STATUS_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
   .update(RUNTIME_STATUS_TEMPLATE)
   .digest('hex');
-export const COMPACTION_NOTICE_TEMPLATE = '[transcript compaction: {dropped} of the oldest messages were elided; latest_evidence_ref={latestEvidenceRef}; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]';
+export const COMPACTION_NOTICE_TEMPLATE = '[transcript compaction: {dropped} of the oldest messages were elided; current_observation_ref={currentObservationRef} (its exact recovery read is in the runtime status); page trajectory_read from startSequence=1 to rediscover other exact environment evidence, and use read-only tools to inspect other durable state]';
 export const COMPACTION_NOTICE_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
   .update(COMPACTION_NOTICE_TEMPLATE)
   .digest('hex');
+const LEGACY_COMPACTION_NOTICE_TEMPLATE = '[transcript compaction: {dropped} of the oldest messages were elided; latest_evidence_ref={latestEvidenceRef}; page trajectory_read from startSequence=1 to rediscover exact environment evidence, and use read-only tools to inspect other durable state]';
+export const LEGACY_COMPACTION_NOTICE_TEMPLATE_SHA256 = crypto
+  .createHash('sha256')
+  .update(LEGACY_COMPACTION_NOTICE_TEMPLATE)
+  .digest('hex');
+const CURRENT_OBSERVATION_ANCHOR_SCHEMA = 'avo.current-observation-anchor.v1';
+const CURRENT_REPRESENTATION_RANK = Object.freeze({ 'full-observation': 3, 'grid-and-header': 2, summary: 1 });
+// Internal source marker on host-authored messages; message text is never
+// trusted to identify them. Provider conversion ignores the field.
+const HOST_MESSAGE_FIELD = 'avoHostMessage';
 export const TOOL_RESULT_ELISION_TEMPLATE = '[older {toolName} output elided; {recoveryHint}]';
 export const TOOL_RESULT_ELISION_TEMPLATE_SHA256 = crypto
   .createHash('sha256')
@@ -216,6 +237,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
       policyProfile: initializedPolicyProfile,
       productionToolContract,
       toolResultMaxChars: initializedToolResultMaxChars,
+      currentObservationRequired = false,
     }) {
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
@@ -282,6 +304,13 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
               latestEvidenceRef: String(result.details?.evidenceRef || '') || null,
             });
             details = { ...details, contextTruncated: true };
+            // The delivered text no longer carries the formatted observation in full.
+            if (details.observationView) {
+              details = {
+                ...details,
+                observationView: { ...details.observationView, delivery: 'truncated', payloadSha256: null },
+              };
+            }
           }
           const outcome = crypto.createHash('sha256').update(canonicalJson({
             toolName: tool.name,
@@ -307,6 +336,29 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           tools: piTools,
         }).tokens,
       };
+      // Every real model request refreshes the runtime status (and, in the
+      // production Agent path, its current observation anchor) before
+      // compaction, so status and anchor are inside the bounded budget. The
+      // turn counter shows turns completed before this request, as the
+      // persisted status injected after the previous turn does.
+      // The production Agent requires its anchor; generic callers without one
+      // run the explicit legacy branch and report currentAnchorVerified=false.
+      const anchorRequired = currentObservationRequired === true;
+      const transformContext = (messages) => {
+        const snapshot = runtimeStatus();
+        if (anchorRequired && !snapshot?.currentObservation) {
+          throw new Error('production Pi loop requires the current observation anchor in runtime status');
+        }
+        const status = runtimeStatusMessage(snapshot, {
+          outerTurns: Math.max(0, outerTurns - 1),
+          maxOuterTurns: config.maxOuterTurns,
+          policyProfile,
+        });
+        return boundTranscript(replaceRuntimeStatus(messages, status.text), {
+          ...transcriptOptions,
+          currentAnchor: status.anchor ?? undefined,
+        });
+      };
 
       // One logical assistant turn is one SDK `turn_start` event, including a
       // turn that fails before or during streaming. Counting at the event
@@ -331,7 +383,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {} } = {}) {
           messages: [],
         },
         streamFn: resilientStreamFn,
-        transformContext: (messages) => boundTranscript(messages, transcriptOptions),
+        transformContext,
         toolExecution: 'sequential',
         followUpMode: 'one-at-a-time',
         sessionId: `avo-arc-${Date.now()}`,
@@ -826,6 +878,16 @@ export function runtimeStatusTemplateSha256(policyProfile) {
   return crypto.createHash('sha256').update(runtimeStatusTemplate(policyProfile)).digest('hex');
 }
 
+export function legacyRuntimeStatusTemplateSha256(policyProfile) {
+  return crypto.createHash('sha256').update(legacyRuntimeStatusTemplate(policyProfile)).digest('hex');
+}
+
+function legacyRuntimeStatusTemplate(policyProfile) {
+  return normalizePolicyProfile(policyProfile) === 'minimal-v1'
+    ? LEGACY_MINIMAL_RUNTIME_STATUS_TEMPLATE
+    : LEGACY_RUNTIME_STATUS_TEMPLATE;
+}
+
 export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policyProfile }) {
   const value = {
     state: statusField(status?.state, 'state'),
@@ -839,7 +901,12 @@ export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policy
   if (value.environmentActions > value.maxActions || value.outerTurns > value.maxOuterTurns) {
     throw new Error('runtime status counters exceed their configured maxima');
   }
-  const text = runtimeStatusTemplate(policyProfile)
+  // A status without currentObservation is the legacy generic interface; the
+  // production Agent always supplies a verified anchor.
+  const anchor = status?.currentObservation === undefined
+    ? undefined
+    : validateCurrentAnchor(status.currentObservation);
+  let text = (anchor === undefined ? legacyRuntimeStatusTemplate(policyProfile) : runtimeStatusTemplate(policyProfile))
     .replace('{state}', value.state)
     .replace('{environmentActions}', String(value.environmentActions))
     .replace('{maxActions}', String(value.maxActions))
@@ -847,14 +914,47 @@ export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policy
     .replace('{maxOuterTurns}', String(value.maxOuterTurns))
     .replace('{terminalReason}', value.terminalReason)
     .replace('{allowedNext}', value.allowedNext);
-  return { text, value };
+  if (anchor !== undefined) {
+    text = text
+      .replace('{observationRef}', () => anchor.observationRef)
+      .replace('{observationScope}', () => `${anchor.gameId}/${anchor.attemptId}/${anchor.episodeId}`)
+      .replace('{observationSha256}', () => anchor.payloadSha256)
+      .replace('{observationRecovery}', () => recoveryText(anchor.recovery));
+  }
+  return { text, value, anchor: anchor ?? null };
+}
+
+export function validateCurrentAnchor(anchor) {
+  if (anchor === null) throw new Error('runtime status has no current observation anchor');
+  const recovery = anchor?.recovery;
+  const valid = anchor?.schema === CURRENT_OBSERVATION_ANCHOR_SCHEMA
+    && typeof anchor.gameId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(anchor.gameId)
+    && typeof anchor.attemptId === 'string' && /^attempt-[0-9]{6,}$/.test(anchor.attemptId)
+    && typeof anchor.episodeId === 'string' && /^episode-[0-9]{6,}$/.test(anchor.episodeId)
+    && typeof anchor.observationRef === 'string' && /^evidence-[0-9]{6,}-[a-f0-9]{12}$/.test(anchor.observationRef)
+    && typeof anchor.payloadSha256 === 'string' && /^[a-f0-9]{64}$/.test(anchor.payloadSha256)
+    && (recovery === null || (recovery?.tool === 'trajectory_read'
+      && recovery.arguments?.ref === anchor.observationRef
+      && ['complete', 'partitioned'].includes(recovery.mode)));
+  if (!valid) throw new Error('runtime status current observation anchor is malformed');
+  if (recovery === null) {
+    throw new Error('current observation cannot be recovered within the tool result bound');
+  }
+  return anchor;
+}
+
+function recoveryText(recovery) {
+  const call = JSON.stringify({ tool: recovery.tool, arguments: recovery.arguments });
+  return recovery.mode === 'complete'
+    ? `${call} returns the exact current observation`
+    : `${call} returns one bounded region of the ${recovery.gridShape.join('x')} current grid; the full after read exceeds the tool output bound, so read further regions as needed`;
 }
 
 export function replaceRuntimeStatus(messages, text, timestamp = Date.now()) {
   if (!Array.isArray(messages)) throw new Error('runtime status requires an agent message array');
   return [
     ...messages.filter((message) => !isRuntimeStatus(message)),
-    { role: 'user', content: [{ type: 'text', text }], timestamp },
+    { role: 'user', content: [{ type: 'text', text }], timestamp, [HOST_MESSAGE_FIELD]: 'runtime-status' },
   ];
 }
 
@@ -900,8 +1000,10 @@ function injectRuntimeStatus(messages, {
   });
   onEvent({
     type: 'avo_runtime_status',
-    templateSha256: runtimeStatusTemplateSha256(policyProfile),
+    templateSha256: status.anchor ? runtimeStatusTemplateSha256(policyProfile) : legacyRuntimeStatusTemplateSha256(policyProfile),
     status: status.value,
+    currentObservationRef: status.anchor?.observationRef ?? null,
+    currentAnchorVerified: status.anchor !== null,
   });
   return replaceRuntimeStatus(messages, status.text, timestamp);
 }
@@ -919,10 +1021,7 @@ function nonNegativeInteger(input, name) {
 }
 
 function isRuntimeStatus(message) {
-  if (message?.role !== 'user') return false;
-  const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }];
-  return blocks.some((block) => block?.type === 'text'
-    && String(block.text || '').startsWith('[AVO_RUNTIME_STATUS v1]'));
+  return message?.role === 'user' && message[HOST_MESSAGE_FIELD] === 'runtime-status';
 }
 
 /**
@@ -942,6 +1041,7 @@ export function boundTranscript(messages, {
   estimateMessageTokens = fallbackEstimateTokens,
   estimateContextTokens = null,
   onCompaction = () => {},
+  currentAnchor = undefined,
 } = {}) {
   if (!Array.isArray(messages)) return messages;
   if (!Number.isInteger(maxMessages) || maxMessages <= 0) throw new Error('maxMessages must be a positive integer');
@@ -950,6 +1050,9 @@ export function boundTranscript(messages, {
   if (estimateContextTokens !== null && typeof estimateContextTokens !== 'function') {
     throw new Error('estimateContextTokens must be a function');
   }
+  // undefined selects the legacy generic interface (no current guarantee);
+  // production passes the verified host anchor for this request.
+  const anchor = currentAnchor === undefined ? null : validateCurrentAnchor(currentAnchor);
   const estimate = estimateContextTokens
     ? (value) => contextTokens(value, estimateContextTokens)
     : (value) => transcriptTokens(value, estimateMessageTokens);
@@ -975,10 +1078,15 @@ export function boundTranscript(messages, {
     return messages;
   }
 
-  const latestEvidence = latestEvidencePair(messages);
+  const selection = evidenceSelection(messages, anchor);
   const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
-  const latestEvidenceResultIndex = latestEvidence.indexes.at(-1);
-  if (latestEvidenceResultIndex >= 0) keepTools.add(latestEvidenceResultIndex);
+  // The current observation group is protected by host authority. Without an
+  // anchor (legacy interface) the most recently consulted evidence is kept as
+  // before, but it is never reported as current.
+  const protectedResult = anchor
+    ? selection.current?.resultIndex
+    : selection.latestEvidence.indexes.at(-1);
+  if (protectedResult >= 0) keepTools.add(protectedResult);
   const kept = [];
   let toolResultsElided = 0;
   let thinkingBlocksRemoved = 0;
@@ -1017,10 +1125,7 @@ export function boundTranscript(messages, {
       toolResultsElided,
       thinkingBlocksRemoved,
       orphanedToolResultsDropped,
-      latestEvidenceRef: latestEvidence.ref,
-      exactLatestEvidenceRetained: latestEvidence.exact
-        && latestEvidence.indexes.length === 2
-        && latestEvidence.indexes.every((index) => repaired.includes(messages[index])),
+      ...selectionTelemetry(selection, anchor, (index) => repaired.includes(messages[index])),
     });
   }
   if (repaired.length <= maxMessages && estimate(repaired) <= maxTokens) {
@@ -1031,6 +1136,7 @@ export function boundTranscript(messages, {
     maxTokens,
     estimateContextTokens: estimate,
     onCompaction,
+    anchor,
   });
 }
 
@@ -1039,6 +1145,7 @@ function hardBoundTranscript(messages, {
   maxTokens,
   estimateContextTokens,
   onCompaction,
+  anchor,
 }) {
   // Retain whole tool turns: Pi synthesizes error results for any retained
   // call whose real result was trimmed. Keep reasoning blocks with their turn.
@@ -1067,6 +1174,11 @@ function hardBoundTranscript(messages, {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (isRuntimeStatus(messages[index])) { statusIndex = index; break; }
   }
+  if (anchor && statusIndex < 0) {
+    throw new Error('transcript bounds require the runtime status carrying the current observation anchor');
+  }
+  const selection = evidenceSelection(messages, anchor);
+  const noticeRef = anchor ? anchor.observationRef : selection.latestEvidence.ref;
   const selected = new Set([taskIndex, statusIndex].filter((index) => index >= 0));
   const fits = (indexes, includeNotice = false) => {
     let candidate = repairToolPairs(messages.filter((_message, index) => indexes.has(index)));
@@ -1075,25 +1187,30 @@ function hardBoundTranscript(messages, {
       candidate.splice(taskPosition >= 0 ? taskPosition + 1 : 0, 0, compactionNotice(
         messages.length - candidate.length,
         messages[0]?.timestamp,
-        latestEvidencePair(messages).ref,
+        noticeRef,
+        anchor !== null,
       ));
     }
     return candidate.length <= maxMessages && estimateContextTokens(candidate) <= maxTokens;
   };
   if (!fits(selected)) {
-    throw new Error('transcript bounds cannot preserve the original task and current runtime status');
+    throw new Error(anchor
+      ? 'transcript bounds cannot preserve the original task and the runtime status with the current observation anchor'
+      : 'transcript bounds cannot preserve the original task and current runtime status');
   }
-  const latestEvidence = latestEvidencePair(messages);
-  const evidenceIndexes = latestEvidence.indexes.filter((index) => !selected.has(index));
-  const withEvidence = includeGroups([...selected, ...evidenceIndexes]);
-  const keepsExactEvidence = latestEvidence.exact
-    && latestEvidence.indexes.length === 2
-    && fits(withEvidence);
-  if (keepsExactEvidence) {
-    for (const index of withEvidence) selected.add(index);
+  // With an anchor the protected group is the current observation; when it
+  // does not fit, the status still carries the current ref and recovery read
+  // and no other ref takes its place.
+  const protectedIndexes = anchor
+    ? (selection.current ? selection.current.indexes : [])
+    : (selection.latestEvidence.exact && selection.latestEvidence.indexes.length === 2 ? selection.latestEvidence.indexes : []);
+  const withProtected = includeGroups([...selected, ...protectedIndexes.filter((index) => !selected.has(index))]);
+  const keepsProtected = protectedIndexes.length > 0 && fits(withProtected);
+  if (keepsProtected) {
+    for (const index of withProtected) selected.add(index);
   }
   const reserveNotice = fits(selected, true);
-  if (latestEvidence.ref && !keepsExactEvidence && !reserveNotice) {
+  if (!anchor && selection.latestEvidence.ref && !keepsProtected && !reserveNotice) {
     throw new Error('transcript bounds cannot preserve the latest exact evidence or its durable reference');
   }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -1113,7 +1230,8 @@ function hardBoundTranscript(messages, {
     const notice = compactionNotice(
       droppedMessages,
       messages[0]?.timestamp,
-      latestEvidence.ref,
+      noticeRef,
+      anchor !== null,
     );
     const retainedTaskIndex = retained.indexOf(messages[taskIndex]);
     retained.splice(retainedTaskIndex >= 0 ? retainedTaskIndex + 1 : 0, 0, notice);
@@ -1126,14 +1244,25 @@ function hardBoundTranscript(messages, {
   onCompaction({
     type: 'avo_context_compaction',
     mode: 'hard',
-    templateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
+    templateSha256: anchor ? COMPACTION_NOTICE_TEMPLATE_SHA256 : LEGACY_COMPACTION_NOTICE_TEMPLATE_SHA256,
     droppedMessages,
     orphanedToolResultsDropped,
-    latestEvidenceRef: latestEvidence.ref,
-    exactLatestEvidenceRetained: keepsExactEvidence,
+    ...selectionTelemetry(selection, anchor, (index) => retained.includes(messages[index])),
     noticeIncluded,
   });
   return retained;
+}
+
+/**
+ * Source of every function that decides what a bounded request keeps; sealed
+ * as the transcript policy identity so selection changes change the hash.
+ */
+export function transcriptPolicySource() {
+  return [
+    boundTranscript, hardBoundTranscript, evidenceSelection, currentRepresentation,
+    selectionTelemetry, compactionNotice, repairToolPairs, isDeliveryReduced,
+    isReducedToolResult, validateCurrentAnchor,
+  ].map((fn) => fn.toString()).join('\n');
 }
 
 function contextTokens(messages, estimateContextTokens) {
@@ -1142,50 +1271,114 @@ function contextTokens(messages, estimateContextTokens) {
   return Math.ceil(value);
 }
 
-function compactionNotice(dropped, timestamp = Date.now(), latestEvidenceRef = null) {
+function compactionNotice(dropped, timestamp = Date.now(), ref = null, anchored = false) {
+  const text = anchored
+    ? COMPACTION_NOTICE_TEMPLATE
+      .replace('{dropped}', String(dropped))
+      .replace('{currentObservationRef}', () => ref)
+    : LEGACY_COMPACTION_NOTICE_TEMPLATE
+      .replace('{dropped}', String(dropped))
+      .replace('{latestEvidenceRef}', () => ref || 'none');
   return {
     role: 'user',
-    content: [{
-      type: 'text',
-      text: COMPACTION_NOTICE_TEMPLATE
-        .replace('{dropped}', String(dropped))
-        .replace('{latestEvidenceRef}', latestEvidenceRef || 'none'),
-    }],
+    content: [{ type: 'text', text }],
     timestamp,
+    [HOST_MESSAGE_FIELD]: 'compaction-notice',
   };
 }
 
-function latestEvidencePair(messages) {
-  for (let resultIndex = messages.length - 1; resultIndex >= 0; resultIndex -= 1) {
-    const result = messages[resultIndex];
-    const ref = String(result?.details?.evidenceRef || '');
-    if (result?.role !== 'toolResult' || !ref) continue;
-    const callId = String(result.toolCallId || '').split('|')[0];
-    let callIndex = -1;
+// Separates the host's current observation from the most recently consulted
+// evidence ref. The current group is chosen only by structured observation
+// views matching the anchor's ref, scope and payload version; the newest
+// evidence-bearing tool result is merely "last consulted".
+function evidenceSelection(messages, anchor) {
+  const callIndexFor = (resultIndex) => {
+    const callId = String(messages[resultIndex]?.toolCallId || '').split('|')[0];
     for (let index = resultIndex - 1; index >= 0; index -= 1) {
       const blocks = messages[index]?.role === 'assistant' && Array.isArray(messages[index].content)
         ? messages[index].content
         : [];
       if (blocks.some((block) => block?.type === 'toolCall'
         && String(block.id || '').split('|')[0] === callId)) {
-        callIndex = index;
-        break;
+        return index;
       }
     }
-    return {
-      ref,
-      indexes: [callIndex, resultIndex].filter((index) => index >= 0),
-      exact: callIndex >= 0 && !isReducedToolResult(result),
-    };
+    return -1;
+  };
+  // latestEvidence: newest tool result carrying any evidence ref (act, reset,
+  // read); lastConsulted: newest explicit trajectory_read of a ref.
+  let latestEvidence = { ref: null, indexes: [], exact: false };
+  let lastConsultedRef = null;
+  for (let resultIndex = messages.length - 1; resultIndex >= 0; resultIndex -= 1) {
+    const result = messages[resultIndex];
+    const ref = String(result?.details?.evidenceRef || '');
+    if (result?.role !== 'toolResult' || !ref) continue;
+    if (!latestEvidence.ref) {
+      const callIndex = callIndexFor(resultIndex);
+      latestEvidence = {
+        ref,
+        indexes: [callIndex, resultIndex].filter((index) => index >= 0),
+        exact: callIndex >= 0 && !isReducedToolResult(result),
+      };
+    }
+    if (result.toolName === 'trajectory_read') {
+      lastConsultedRef = ref;
+      break;
+    }
   }
-  return { ref: null, indexes: [], exact: false };
+  let current = null;
+  if (anchor) {
+    for (let resultIndex = messages.length - 1; resultIndex >= 0; resultIndex -= 1) {
+      const result = messages[resultIndex];
+      // contextExactEvidence=false only says the text is not the exact durable
+      // event; the observation view states what the delivered text represents.
+      if (result?.role !== 'toolResult' || isDeliveryReduced(result)) continue;
+      const representation = currentRepresentation(result.details?.observationView, anchor);
+      if (!representation) continue;
+      const callIndex = callIndexFor(resultIndex);
+      if (callIndex < 0) continue;
+      if (!current || CURRENT_REPRESENTATION_RANK[representation] > CURRENT_REPRESENTATION_RANK[current.representation]) {
+        current = { resultIndex, indexes: [callIndex, resultIndex], representation };
+      }
+      if (representation !== 'summary') break;
+    }
+  }
+  return { current, latestEvidence, lastConsultedRef };
+}
+
+function currentRepresentation(view, anchor) {
+  if (!view || view.observationRef !== anchor.observationRef) return null;
+  if (!['current', 'after', 'event'].includes(view.part)) return null;
+  if (view.scope?.gameId !== anchor.gameId
+      || view.scope?.attemptId !== anchor.attemptId
+      || view.scope?.episodeId !== anchor.episodeId) return null;
+  if (view.delivery !== 'complete') return null;
+  if (view.payloadSha256 !== null && view.payloadSha256 !== undefined && view.payloadSha256 !== anchor.payloadSha256) {
+    return null;
+  }
+  return Object.hasOwn(CURRENT_REPRESENTATION_RANK, view.representation) ? view.representation : null;
+}
+
+function selectionTelemetry(selection, anchor, retained) {
+  const currentRetained = Boolean(selection.current)
+    && selection.current.indexes.every((index) => retained(index));
+  return {
+    currentAnchorVerified: anchor !== null,
+    currentObservationRef: anchor?.observationRef ?? null,
+    currentRepresentation: anchor
+      ? (currentRetained ? selection.current.representation : 'reference-only')
+      : null,
+    currentObservationRetained: anchor ? currentRetained : null,
+    lastConsultedEvidenceRef: selection.lastConsultedRef,
+    latestEvidenceResultRef: selection.latestEvidence.ref,
+    latestEvidenceResultRetained: selection.latestEvidence.exact
+      && selection.latestEvidence.indexes.length === 2
+      && selection.latestEvidence.indexes.every((index) => retained(index)),
+  };
 }
 
 function isCompactionNotice(message) {
-  if (message?.role !== 'user') return false;
-  const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: message.content }];
-  return blocks.some((block) => block?.type === 'text'
-    && String(block.text || '').startsWith('[transcript compaction:'));
+  return message?.role === 'user' && message[HOST_MESSAGE_FIELD] === 'compaction-notice';
 }
 
 function transcriptTokens(messages, estimateMessageTokens) {
@@ -1224,6 +1417,14 @@ function elidedToolOutput(message) {
   return TOOL_RESULT_ELISION_TEMPLATE
     .replace('{toolName}', () => toolName)
     .replace('{recoveryHint}', () => toolRecoveryHint(toolName, message?.details));
+}
+
+function isDeliveryReduced(message) {
+  const text = String(message?.content?.[0]?.text || '');
+  return message?.contextElided === true
+    || message?.details?.contextTruncated === true
+    || (text.startsWith('[older ') && text.includes(' output elided;'))
+    || text.includes('[tool output truncated at ');
 }
 
 function isReducedToolResult(message) {
