@@ -347,6 +347,13 @@ function buildSegments(groups) {
         }
         continue;
       }
+      // The recorder bounds the whole payload: an oversized transition becomes
+      // a truncation stub without operation or available actions. What it did
+      // is unknown, so the next action cannot be judged against older state.
+      if (event.kind === 'arc.response' && event.truncated === true && !event.operation) {
+        lastAvailable = null;
+        continue;
+      }
       if (event.kind !== 'arc.response' || !TRANSITION_OPERATIONS.has(event.operation)) continue;
       if (current && current.scope.episodeId !== (event.episodeId ?? null)) {
         close();
@@ -371,6 +378,9 @@ function buildSegments(groups) {
       current.transitions.push(event);
       current.priorAvailable.push(lastAvailable);
       current.priorObserved.push(lastObservedInScope);
+      // A guard rejection never reached the environment, so it does not
+      // replace the last real observation's available-action set.
+      if (isNormalRejection(event)) continue;
       lastAvailable = knownAvailable(event);
       lastObservedInScope = true;
     }
@@ -470,11 +480,20 @@ function detectIneffectiveActions(context, config) {
 function detectInvalidActions(context) {
   const findings = [];
   const observations = [];
+  // A forwarded transition can only be judged against the observation that
+  // preceded it inside the same episode. A missing observation means the trace
+  // is truncated; an observation without an available-action set leaves the
+  // legality unknown. Neither may be silently treated as legal.
+  let gap = null;
   for (const segment of context.segments) {
     segment.transitions.forEach((event, index) => {
       const available = segment.priorAvailable[index];
       const action = normalizeActionName(event.action);
       if (isNormalRejection(event)) return;
+      if (!gap && actionForwarded(event) && action) {
+        if (!segment.priorObserved[index]) gap = 'preceding-observation-missing';
+        else if (available === null) gap = 'preceding-availability-unknown';
+      }
       // A recorder-tagged environment response is evidence the request was
       // forwarded; without it the action's legality stays unknown.
       if (actionForwarded(event) && action && available && !available.includes(action)) {
@@ -529,18 +548,6 @@ function detectInvalidActions(context) {
       };
       if (recovered) observations.push(incident);
       else findings.push(incident);
-    });
-  }
-  // A forwarded transition can only be judged against the observation that
-  // preceded it inside the same episode. A missing observation means the trace
-  // is truncated; an observation without an available-action set leaves the
-  // legality unknown. Neither may be silently treated as legal.
-  let gap = null;
-  for (const segment of context.segments) {
-    segment.transitions.forEach((event, index) => {
-      if (gap || !actionForwarded(event) || !normalizeActionName(event.action)) return;
-      if (!segment.priorObserved[index]) gap = 'preceding-observation-missing';
-      else if (segment.priorAvailable[index] === null) gap = 'preceding-availability-unknown';
     });
   }
   return gap

@@ -186,7 +186,7 @@ test('R01 the sealed capsule object and its public projection yield the real str
   assert.equal(legacy.capabilities.strategySource, 'legacy-string');
   const legacyUnknown = analysisInputsFromReport({ provenance: { runCapsule: { policyProfile: 'guess-v9' } } });
   assert.equal(legacyUnknown.capabilities.strategy, null);
-  assert.equal(legacyUnknown.capabilities.strategyReason, 'shape-invalid');
+  assert.equal(legacyUnknown.capabilities.strategyReason, 'profile-unknown');
 });
 
 test('R02 minimal capsules report an evidenced supervisor not-applicable; current follows real trigger and delivery evidence', () => {
@@ -223,7 +223,7 @@ test('R03 missing, malformed and contradictory policy sources stay unknown with 
     ['absent capsule', undefined, 'source-missing'],
     ['missing effective', { requested: 'minimal-v1' }, 'shape-invalid'],
     ['wrong effective type', { effective: 42 }, 'shape-invalid'],
-    ['unknown effective name', { effective: 'minimal-v9' }, 'shape-invalid'],
+    ['unknown effective name', { effective: 'minimal-v9' }, 'profile-unknown'],
     ['wrong flag type', { effective: 'minimal-v1', strategyEnabled: 'yes' }, 'shape-invalid'],
     ['declared flag conflicts with effective', { effective: 'minimal-v1', strategyEnabled: true }, 'conflict'],
     ['array shape', ['minimal-v1'], 'shape-invalid'],

@@ -27,13 +27,19 @@ export function analysisInputsFromReport(report) {
   return { gameOutcomes, capabilities: strategyCapability(report?.provenance?.runCapsule?.policyProfile) };
 }
 
+// null for a non-string/empty value; undefined for a well-formed but unknown
+// profile name (e.g. from a newer build), which is not a malformed source.
 function derivedStrategy(value) {
   if (typeof value !== 'string' || !value.trim()) return null;
   try {
     return policyUsesStrategy(value);
   } catch {
-    return null;
+    return undefined;
   }
+}
+
+function strategyFailure(strategy) {
+  return strategy === undefined ? 'profile-unknown' : 'shape-invalid';
 }
 
 /**
@@ -47,8 +53,8 @@ function derivedStrategy(value) {
 function strategyCapability(profile) {
   if (typeof profile === 'string') {
     const strategy = derivedStrategy(profile);
-    return strategy === null
-      ? { strategy: null, strategyReason: 'shape-invalid', strategySource: 'legacy-string' }
+    return typeof strategy !== 'boolean'
+      ? { strategy: null, strategyReason: strategyFailure(strategy), strategySource: 'legacy-string' }
       : { strategy, strategyReason: null, strategySource: 'legacy-string' };
   }
   if (profile === undefined || profile === null) {
@@ -59,7 +65,7 @@ function strategyCapability(profile) {
   }
   const source = { strategySource: 'run-capsule-object' };
   const strategy = derivedStrategy(profile.effective);
-  if (strategy === null) return { strategy: null, strategyReason: 'shape-invalid', ...source };
+  if (typeof strategy !== 'boolean') return { strategy: null, strategyReason: strategyFailure(strategy), ...source };
   if (Object.prototype.hasOwnProperty.call(profile, 'strategyEnabled')) {
     const declared = profile.strategyEnabled;
     if (typeof declared !== 'boolean') return { strategy: null, strategyReason: 'shape-invalid', ...source };

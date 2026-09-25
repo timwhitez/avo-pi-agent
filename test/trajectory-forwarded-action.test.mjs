@@ -147,6 +147,41 @@ test('F01b an oversized response replaced by the recorder truncation digest stil
   assert.equal(violation(withoutResponse), undefined);
 });
 
+test('F07 a guard rejection does not replace the last real observation; a truncated record makes the next step unknown', () => {
+  const rejection = { ok: false, rejected: true, recoverable: true, error: 'guard' };
+  // ACTION1 alone was available. A guard rejection logged without a set sits
+  // between two legal ACTION1 forwards: the second is still judged, and legal.
+  const guarded = analyze([
+    start(),
+    open(2, { available: [1] }),
+    step(3, { action: 'ACTION2', available: null, ok: false, response: rejection }),
+    step(4, { action: 'ACTION1', available: [1] }),
+  ]);
+  assert.equal(invalidCoverage(guarded).status, 'evaluated');
+  assert.equal(invalidFindings(guarded).length, 0);
+  // A stale set on the rejection record cannot make the legal action illegal.
+  const stale = analyze([
+    start(),
+    open(2, { available: [1] }),
+    step(3, { action: 'ACTION2', available: [2], ok: false, response: rejection }),
+    step(4, { action: 'ACTION1', available: [1] }),
+  ]);
+  assert.equal(violation(stale), undefined);
+  // The recorder bounds the whole payload: an oversized transition is a stub
+  // without operation. The following forward is not judged against older state.
+  const truncatedStub = record(4, 'arc.response', { truncated: true, sha256: 'b'.repeat(64), chars: 4_000_001 });
+  const truncated = analyze([
+    start(),
+    open(2, { available: [1] }),
+    step(3, { action: 'ACTION1', available: [1] }),
+    truncatedStub,
+    step(5, { action: 'ACTION2', available: [1, 2] }),
+  ]);
+  assert.equal(violation(truncated), undefined, 'the truncated step may have changed availability');
+  assert.equal(invalidCoverage(truncated).status, 'insufficient-evidence');
+  assert.equal(invalidCoverage(truncated).reasonCode, 'preceding-availability-unknown');
+});
+
 test('F01 an unavailable action forwarded with ok:true is still a contract violation', () => {
   const analysis = analyze(unavailableThenForwarded({ ok: true, response: { ok: true } }));
   const found = violation(analysis);
