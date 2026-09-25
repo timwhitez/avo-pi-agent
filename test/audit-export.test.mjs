@@ -159,7 +159,7 @@ test('E04 recovered errors, a final error and a missing terminal are separate ou
 
   const cancelled = normalize([{ runId: 'r7', report: { runId: 'r7', games: [game('a-v1', metrics(), { state: 'NOT_FINISHED' })] },
     receipts: { schema: 'avo.trajectory-audit-receipts.v1', executionTerminals: [
-      { schema: 'avo.execution-terminal.v1', scope: { versionedGameId: 'a-v1' }, cancellation: { id: 'cancel-1', primaryReason: 'operator-cancel' } },
+      { schema: 'avo.execution-terminal.v1', scope: { runId: 'r7', versionedGameId: 'a-v1' }, cancellation: { id: 'cancel-1', primaryReason: 'operator-cancel' } },
     ] } }]).runs[0];
   assert.equal(cancelled.executionOutcome.status, 'censored');
   assert.equal(cancelled.executionOutcome.cancelRequested, true);
@@ -171,8 +171,8 @@ test('E04 recovered errors, a final error and a missing terminal are separate ou
 });
 
 test('E05 game totals win over attempt detail, resume aliases count once, local IDs stay per attempt', () => {
-  const a1 = { versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 2 }) };
-  const a2 = { versionedGameId: 'a-v1', attemptId: 'attempt-000002', mechanismMetrics: metrics({ modelCalls: 3 }) };
+  const a1 = { runId: 'r9', versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 2 }) };
+  const a2 = { runId: 'r9', versionedGameId: 'a-v1', attemptId: 'attempt-000002', mechanismMetrics: metrics({ modelCalls: 3 }) };
   const withGame = normalize([{ runId: 'r9', report: { runId: 'r9', completeness: expectedGames(['a-v1']), games: [game('a-v1', metrics({ modelCalls: 5 }))] }, attempts: [a1, a2, a1] }]).runs[0];
   assert.equal(withGame.games[0].meteringLayer, 'game');
   assert.equal(withGame.metrics.recomputedAggregate.modelCalls, 5, 'attempt detail is a cross-check, not added');
@@ -184,8 +184,8 @@ test('E05 game totals win over attempt detail, resume aliases count once, local 
   ];
   const attemptsOnly = normalize([{ runId: 'r10', report: { runId: 'r10', completeness: expectedGames(['b-v1']), games: [game('b-v1', undefined, { executions })] },
     attempts: [
-      { versionedGameId: 'b-v1', attemptId: 'attempt-000001', localToolCallId: 'call-1', mechanismMetrics: metrics({ modelCalls: 4 }) },
-      { versionedGameId: 'b-v1', attemptId: 'attempt-000002', localToolCallId: 'call-1', mechanismMetrics: metrics({ modelCalls: 6 }) },
+      { runId: 'r10', versionedGameId: 'b-v1', attemptId: 'attempt-000001', localToolCallId: 'call-1', executions: [{ executionIdSha256: 'a'.repeat(64), executionOccurrence: 0 }], mechanismMetrics: metrics({ modelCalls: 4 }) },
+      { runId: 'r10', versionedGameId: 'b-v1', attemptId: 'attempt-000002', localToolCallId: 'call-1', executions: [{ executionIdSha256: 'b'.repeat(64), executionOccurrence: 0 }], mechanismMetrics: metrics({ modelCalls: 6 }) },
     ] }]).runs[0];
   assert.equal(attemptsOnly.games[0].meteringLayer, 'attempts');
   assert.equal(attemptsOnly.metrics.recomputedAggregate.modelCalls, 10, 'the same local ID in two attempts is two attempts');
@@ -228,8 +228,8 @@ test('E07 tampered files, INDEX disagreement and conflicting attempt IDs fail va
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }
   const conflict = normalize([{ runId: 'r12', report: { runId: 'r12', games: [game('a-v1', undefined)] }, attempts: [
-    { versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 1 }) },
-    { versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 2 }) },
+    { runId: 'r12', versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 1 }) },
+    { runId: 'r12', versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 2 }) },
   ] }]).runs[0];
   assert.ok(conflict.audit.gaps.includes('ATTEMPT_ID_CONFLICT'), 'same ID with different content is never last-write-wins');
   assert.deepEqual(conflict.games[0].conflicts, ['attempt-000001']);
@@ -270,15 +270,15 @@ test('E08 unsafe paths, links and oversize input are refused and inputs stay byt
 });
 
 test('E09 identified duplicates dedupe by ID; different events with equal bodies are not merged', () => {
-  const body = { versionedGameId: 'a-v1', mechanismMetrics: metrics({ modelCalls: 2 }) };
+  const body = { runId: 'r14', versionedGameId: 'a-v1', mechanismMetrics: metrics({ modelCalls: 2 }) };
   const executions = [
     { versionedGameId: 'a-v1', executionIdSha256: 'c'.repeat(64), executionOccurrence: 0 },
     { versionedGameId: 'a-v1', executionIdSha256: 'd'.repeat(64), executionOccurrence: 0 },
   ];
   const run = normalize([{ runId: 'r14', report: { runId: 'r14', completeness: expectedGames(['a-v1']), games: [game('a-v1', undefined, { executions })] }, attempts: [
-    { ...body, attemptId: 'attempt-000001' },
-    { ...body, attemptId: 'attempt-000001' },
-    { ...body, attemptId: 'attempt-000002' },
+    { ...body, attemptId: 'attempt-000001', executions: [{ executionIdSha256: 'c'.repeat(64), executionOccurrence: 0 }] },
+    { ...body, attemptId: 'attempt-000001', executions: [{ executionIdSha256: 'c'.repeat(64), executionOccurrence: 0 }] },
+    { ...body, attemptId: 'attempt-000002', executions: [{ executionIdSha256: 'd'.repeat(64), executionOccurrence: 0 }] },
     body,
   ] }]).runs[0];
   assert.equal(run.games[0].coverage.duplicateCount, 1);
@@ -299,8 +299,8 @@ test('E10 partial legacy fields and cumulative usage snapshots are never zero-fi
 
   const executions = [{ versionedGameId: 'a-v1', executionIdSha256: 'e'.repeat(64), executionOccurrence: 0 }];
   const snapshots = normalize([{ runId: 'r16', report: { runId: 'r16', completeness: expectedGames(['a-v1']), games: [game('a-v1', undefined, { executions })] }, attempts: [
-    { versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 1, mechanismMetrics: metrics({ modelCalls: 2 }) },
-    { versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 2, mechanismMetrics: metrics({ modelCalls: 5 }) },
+    { runId: 'r16', versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 1, executions: [{ executionIdSha256: 'e'.repeat(64), executionOccurrence: 0 }], mechanismMetrics: metrics({ modelCalls: 2 }) },
+    { runId: 'r16', versionedGameId: 'a-v1', attemptId: 'attempt-000001', cumulative: true, snapshotSequence: 2, executions: [{ executionIdSha256: 'e'.repeat(64), executionOccurrence: 0 }], mechanismMetrics: metrics({ modelCalls: 5 }) },
   ] }]).runs[0];
   assert.equal(snapshots.metrics.recomputedAggregate.modelCalls, 5, 'the latest cumulative snapshot, not 7');
 });

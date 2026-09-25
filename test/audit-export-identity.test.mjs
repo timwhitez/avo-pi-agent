@@ -184,7 +184,8 @@ test('S02 attempts are counted from the attempt list and attempt->execution mapp
     completeness: completeness(['a-v1']),
     games: [game('a-v1', undefined, { executions })],
   });
-  const attempt = (attemptId, refs, modelCalls) => ({
+  const attempt = (runId, attemptId, refs, modelCalls) => ({
+    runId,
     versionedGameId: 'a-v1',
     attemptId,
     ...(refs === null ? {} : { executions: refs.map(eref) }),
@@ -193,7 +194,7 @@ test('S02 attempts are counted from the attempt list and attempt->execution mapp
 
   // One attempt produced two execution GUIDs (a full reset): one attempt, two executions.
   const oneAttemptTwoExecutions = normalize([{ runId: 's02-a', report: report([e1, e2], 's02-a'),
-    attempts: [attempt('attempt-000001', [e1, e2], 5)] }]).runs[0];
+    attempts: [attempt('s02-a', 'attempt-000001', [e1, e2], 5)] }]).runs[0];
   assert.equal(oneAttemptTwoExecutions.games[0].coverage.executions.status, 'verified');
   assert.equal(oneAttemptTwoExecutions.games[0].coverage.executions.mapped, 2);
   assert.equal(oneAttemptTwoExecutions.games[0].coverage.observedAttempts, 1);
@@ -202,13 +203,13 @@ test('S02 attempts are counted from the attempt list and attempt->execution mapp
 
   // Two attempts, one execution each.
   const twoAttempts = normalize([{ runId: 's02-b', report: report([e1, e2], 's02-b'),
-    attempts: [attempt('attempt-000001', [e1], 2), attempt('attempt-000002', [e2], 3)] }]).runs[0];
+    attempts: [attempt('s02-b', 'attempt-000001', [e1], 2), attempt('s02-b', 'attempt-000002', [e2], 3)] }]).runs[0];
   assert.equal(twoAttempts.games[0].coverage.executions.status, 'verified');
   assert.equal(twoAttempts.metrics.recomputedAggregate.modelCalls, 5);
 
   // A missing attempt leaves an execution unclaimed: partial, never complete.
   const missingAttempt = normalize([{ runId: 's02-missing', report: report([e1, e2], 's02-missing'),
-    attempts: [attempt('attempt-000001', [e1], 2)] }]).runs[0];
+    attempts: [attempt('s02-missing', 'attempt-000001', [e1], 2)] }]).runs[0];
   assert.equal(missingAttempt.games[0].coverage.executions.status, 'partial');
   assert.equal(missingAttempt.games[0].coverage.executions.unmapped, 1);
   assert.equal(missingAttempt.games[0].meteringLayer, 'partial-attempts');
@@ -217,27 +218,27 @@ test('S02 attempts are counted from the attempt list and attempt->execution mapp
 
   // The same attempt (identity plus body) is one attempt even when it is resumed.
   const duplicateAttempt = normalize([{ runId: 's02-dup', report: report([e1], 's02-dup'),
-    attempts: [attempt('attempt-000001', [e1], 4), attempt('attempt-000001', [e1], 4)] }]).runs[0];
+    attempts: [attempt('s02-dup', 'attempt-000001', [e1], 4), attempt('s02-dup', 'attempt-000001', [e1], 4)] }]).runs[0];
   assert.equal(duplicateAttempt.games[0].coverage.executions.status, 'verified');
   assert.equal(duplicateAttempt.games[0].coverage.duplicateCount, 1);
   assert.equal(duplicateAttempt.metrics.recomputedAggregate.modelCalls, 4);
 
   // An execution claimed by two attempts is a duplicate claim, not a completion.
   const doubleClaim = normalize([{ runId: 's02-double', report: report([e1], 's02-double'),
-    attempts: [attempt('attempt-000001', [e1], 2), attempt('attempt-000002', [e1], 3)] }]).runs[0];
+    attempts: [attempt('s02-double', 'attempt-000001', [e1], 2), attempt('s02-double', 'attempt-000002', [e1], 3)] }]).runs[0];
   assert.equal(doubleClaim.games[0].coverage.executions.status, 'partial');
   assert.equal(doubleClaim.games[0].coverage.executions.duplicateClaims, 1);
 
   // A foreign execution reference never substitutes for a missing claim.
   const foreign = normalize([{ runId: 's02-foreign', report: report([e1], 's02-foreign'),
-    attempts: [attempt('attempt-000001', [e2], 2)] }]).runs[0];
+    attempts: [attempt('s02-foreign', 'attempt-000001', [e2], 2)] }]).runs[0];
   assert.equal(foreign.games[0].coverage.executions.status, 'partial');
   assert.equal(foreign.games[0].coverage.executions.foreignClaims, 1);
   assert.equal(foreign.games[0].coverage.executions.unmapped, 1);
 
   // Unknown mapping is never accepted on count alone.
   const unknown = normalize([{ runId: 's02-unknown', report: report([e1, e2], 's02-unknown'),
-    attempts: [attempt('attempt-000001', null, 2), attempt('attempt-000002', null, 3)] }]).runs[0];
+    attempts: [attempt('s02-unknown', 'attempt-000001', null, 2), attempt('s02-unknown', 'attempt-000002', null, 3)] }]).runs[0];
   assert.equal(unknown.games[0].coverage.executions.status, 'unknown');
   assert.ok(unknown.audit.gaps.includes('ATTEMPT_EXECUTION_MAPPING_UNKNOWN'));
   assert.equal(unknown.audit.ready, false);
@@ -287,7 +288,7 @@ test('S03 one scope join keeps foreign runs, foreign cancels and unbound logs ou
     report: { runId: 'run-d', completeness: completeness(['a-v1']), games: [game('a-v1', metrics(), { state: 'NOT_FINISHED' })] },
     trajectory: [{ run_id: 'run-d', sequence: 1, kind: 'game.finished', game_id: 'a-v1', attempt_id: 'attempt-000002', error: false }],
     attempts: [
-      { versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 1 }) },
+      { runId: 'run-d', versionedGameId: 'a-v1', attemptId: 'attempt-000001', mechanismMetrics: metrics({ modelCalls: 1 }) },
     ],
   }]).runs[0];
   assert.equal(retry.executionOutcome.status, 'unknown', 'an attempt outside the game attempt list never completes the game');
@@ -308,8 +309,8 @@ test('S04 a game aggregate and its attempt detail count once and resumed aliases
     runId: 's04',
     report: { runId: 's04', completeness: completeness(['a-v1']), games: [game('a-v1', metrics({ modelCalls: 5 }), { executions: [e1] })] },
     attempts: [
-      { versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 2 }) },
-      { versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 2 }) },
+      { runId: 's04', versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 2 }) },
+      { runId: 's04', versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 2 }) },
     ],
   }]).runs[0];
   assert.equal(run.games[0].meteringLayer, 'game', 'the authoritative layer is selected once');
@@ -434,8 +435,8 @@ test('S07 the real CLI exports, validates and reads back a complete records/metr
       { run_id: 's07', sequence: 2, kind: 'game.finished', game_id: 'b-v1', error: false },
     ],
     attempts: [
-      { versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 3 }) },
-      { versionedGameId: 'b-v1', attemptId: 'attempt-000002', executions: [eref(e2)], mechanismMetrics: metrics({ modelCalls: 5 }) },
+      { runId: 's07', versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 3 }) },
+      { runId: 's07', versionedGameId: 'b-v1', attemptId: 'attempt-000002', executions: [eref(e2)], mechanismMetrics: metrics({ modelCalls: 5 }) },
     ],
   }]);
   try {

@@ -108,6 +108,11 @@ function optionalRelative(value, root, name) {
  *              and can never establish or change a terminal or readiness.
  *   run      - this run's own id.
  *
+ * A game identity joins only when it is unambiguous: a versioned id must equal
+ * the target, and a short family id must be proven to have exactly one version
+ * in the scope (`scope.versionsByFamily`). A short id that could name several
+ * versions is `ambiguous` and never true.
+ *
  * Callers decide what an unbound binding is allowed to do; the join only
  * classifies it.
  */
@@ -120,11 +125,29 @@ export function joinAuditScope(evidence, scope) {
   const targetGame = scope?.versionedGameId ?? null;
   const rawGame = evidence?.versionedGameId ?? evidence?.gameId ?? evidence?.game_id ?? null;
   let gameMatches = null;
-  if (targetGame !== null) {
-    if (rawGame !== null && rawGame !== undefined && rawGame !== '') {
-      const game = String(rawGame).toLowerCase();
-      const target = String(targetGame).toLowerCase();
-      gameMatches = game === target || game === target.split('-')[0];
+  let gameReason = null;
+  if (targetGame !== null && rawGame !== null && rawGame !== undefined && rawGame !== '') {
+    const game = String(rawGame).toLowerCase();
+    const target = String(targetGame).toLowerCase();
+    if (game === target) {
+      gameMatches = true;
+    } else if (game.includes('-')) {
+      gameMatches = false;
+      gameReason = 'VERSION_MISMATCH';
+    } else {
+      const versions = scope?.versionsByFamily instanceof Map ? scope.versionsByFamily.get(game) : null;
+      if (!Array.isArray(versions) || versions.length === 0) {
+        gameMatches = false;
+        gameReason = 'GAME_FAMILY_ABSENT';
+      } else if (versions.length !== 1) {
+        gameMatches = 'ambiguous';
+        gameReason = `GAME_FAMILY_${versions.length}_VERSIONS`;
+      } else if (String(versions[0]).toLowerCase() === target) {
+        gameMatches = true;
+      } else {
+        gameMatches = false;
+        gameReason = 'VERSION_MISMATCH';
+      }
     }
   }
   const attemptIds = scope?.attemptIds instanceof Set ? scope.attemptIds : null;
@@ -133,9 +156,10 @@ export function joinAuditScope(evidence, scope) {
     ? null
     : attemptIds.has(String(rawAttempt));
   return {
-    joined: binding !== 'foreign' && gameMatches !== false && attemptMatches !== false,
+    joined: binding !== 'foreign' && (gameMatches === true || gameMatches === null) && attemptMatches !== false,
     binding,
     gameMatches,
+    gameReason,
     attemptMatches,
   };
 }
@@ -173,15 +197,19 @@ function normalizeRun(run, sourceRoot, recordSource) {
   const attemptIndex = indexAttempts(attempts.value, gaps, scope);
   const attemptIdsByGame = new Map();
   for (const [versionedGameId, entries] of attemptIndex) {
-    attemptIdsByGame.set(versionedGameId, new Set(entries.map((entry) => entry.item.attemptId)));
+    attemptIdsByGame.set(versionedGameId, new Set(
+      entries.filter((entry) => entry.binding !== 'unbound').map((entry) => entry.item.attemptId),
+    ));
   }
   const finished = indexFinished(trajectory.events, adapted.games, scope, attemptIdsByGame);
   if (finished.unbound.length) gaps.push('UNBOUND_TERMINAL_EVIDENCE');
   if (finished.foreign.length) gaps.push('FOREIGN_TERMINAL_EVIDENCE');
   if (finished.mismatched.length) gaps.push('ATTEMPT_TERMINAL_MISMATCH');
+  if (finished.ambiguous.length) gaps.push('AMBIGUOUS_TERMINAL_GAME');
   const receiptTerminals = executionTerminals(receipts.value, scope, gaps);
   const terminals = receiptTerminals.bound;
   if (receiptTerminals.foreign.length) gaps.push('FOREIGN_RECEIPT_EVIDENCE');
+  if (receiptTerminals.unbound.length) gaps.push('UNBOUND_RECEIPT_EVIDENCE');
   const games = adapted.games.map((game) => normalizeGame(
     game,
     attemptIndex.get(game.versionedGameId) ?? [],
@@ -195,13 +223,14 @@ function normalizeRun(run, sourceRoot, recordSource) {
     if (!adapted.games.some((game) => game.versionedGameId === versionedGameId)) gaps.push('ATTEMPT_WITHOUT_GAME');
   }
   const metrics = runMetrics(games, adapted, gaps);
-  const executionOutcome = runOutcome(games, terminals, gaps, receiptTerminals.foreign);
+  const executionOutcome = runOutcome(games, terminals, gaps, receiptTerminals);
   const progress = runProgress(games, adapted.sourceSchema);
   if (progress.ambiguities.length) gaps.push(...progress.ambiguities);
   const score = runScore(report.value, adapted);
   const uniqueGaps = [...new Set(gaps)].sort();
   return {
     runId: run.runId,
+    reportSource: report.availability === 'present' ? report.evidence : null,
     artifactAvailability: {
       report: report.availability,
       trajectory: trajectory.availability,
@@ -242,7 +271,13 @@ function readOptionalJson(input, sourceRoot, recordSource, purpose) {
     purpose,
   });
   recordSource(evidence, input.relative);
-  return { availability: 'present', value: evidence.value };
+  return {
+    availability: 'present',
+    value: evidence.value,
+    // Bound path plus hash: the validator can re-read this exact source report
+    // when it is given the source root, without trusting the run file.
+    evidence: { relativePath: input.relative, bytes: evidence.bytes, sha256: evidence.sha256 },
+  };
 }
 
 function readTrajectory(input, recordSource) {
@@ -392,7 +427,8 @@ function legacyFields(game) {
 // is one attempt (duplicateCount), the same ID with different content is a
 // conflict, and equal bodies under different IDs remain different attempts.
 // Cumulative usage snapshots are never summed: the latest snapshot per attempt
-// is that attempt's total.
+// is that attempt's total. An attempt record with no run attribution stays
+// visible as unbound evidence but is never part of the certified attempt set.
 function indexAttempts(value, gaps, scope) {
   const byGame = new Map();
   if (value === null) return byGame;
@@ -405,7 +441,8 @@ function indexAttempts(value, gaps, scope) {
   for (const item of records) {
     // The same scope join binds attempt detail to this run: an attempt
     // attributed to another run never contributes metrics here.
-    if (joinAuditScope({ runId: item?.runId ?? item?.run_id ?? null }, scope ?? {}).binding === 'foreign') {
+    const binding = joinAuditScope({ runId: item?.runId ?? item?.run_id ?? null }, scope ?? {}).binding;
+    if (binding === 'foreign') {
       gaps.push('ATTEMPT_RUN_MISMATCH');
       continue;
     }
@@ -415,19 +452,20 @@ function indexAttempts(value, gaps, scope) {
       gaps.push('ATTEMPT_IDENTITY_MISSING');
       continue;
     }
+    if (binding === 'unbound') gaps.push('UNBOUND_ATTEMPT_EVIDENCE');
     const key = `${versionedGameId}\0${attemptId}`;
     const body = canonicalJson(item);
     const executionRefs = attemptExecutionRefs(item);
     if (item.cumulative === true) {
       const prior = seen.get(key);
       if (!prior || (Number(item.snapshotSequence) || 0) > (Number(prior.item.snapshotSequence) || 0)) {
-        seen.set(key, { item, body, executionRefs, duplicateCount: prior?.duplicateCount ?? 0, conflict: prior?.conflict ?? false, snapshot: true });
+        seen.set(key, { item, body, executionRefs, binding, duplicateCount: prior?.duplicateCount ?? 0, conflict: prior?.conflict ?? false, snapshot: true });
       }
       continue;
     }
     const prior = seen.get(key);
     if (!prior) {
-      seen.set(key, { item, body, executionRefs, duplicateCount: 0, conflict: false });
+      seen.set(key, { item, body, executionRefs, binding, duplicateCount: 0, conflict: false });
     } else if (prior.body === body) {
       prior.duplicateCount += 1;
     } else {
@@ -498,30 +536,39 @@ function executionCoverage(attemptEntries, executions) {
 }
 
 function normalizeGame(game, attempts, finished, unbound, foreign, terminals, gaps) {
-  const attemptMetrics = attempts.map((entry) => ({
+  // Only attempts attributed to this run can certify anything. Unbound attempt
+  // records stay visible (count plus diagnostic subtotal) and are excluded from
+  // the certified attempt set and from the attempt->execution mapping.
+  const shape = (entry) => ({
     attemptId: entry.item.attemptId,
     metrics: completeMetrics(entry.item.mechanismMetrics),
     duplicateCount: entry.duplicateCount,
     conflict: entry.conflict,
-  }));
+  });
+  const bound = attempts.filter((entry) => entry.binding !== 'unbound');
+  const unboundAttempts = attempts.filter((entry) => entry.binding === 'unbound');
+  const attemptMetrics = bound.map(shape);
+  const unboundMetrics = unboundAttempts.map(shape);
   const conflicts = attemptMetrics.filter((entry) => entry.conflict).map((entry) => entry.attemptId);
-  const executions = executionCoverage(attempts, game.executions);
-  // The explicit attempt list is the expected attempt set. The execution count
-  // is an execution fact and is never substituted for an attempt count.
-  const expectedAttempts = attemptMetrics.length;
+  const executions = executionCoverage(bound, game.executions);
+  // Expected attempts are proven, not counted: only a complete mapping (every
+  // execution claimed exactly once by the declared attempts) establishes them.
+  // With an unknown or partial mapping the expected attempt set stays null.
+  const expectedAttempts = executions.status === 'verified' ? executions.declaredAttempts : null;
   let meteringLayer;
   let metrics = null;
   let observedSubtotal = null;
   const discrepancies = [];
   const coverage = {
     expectedAttempts,
-    observedAttempts: attemptMetrics.length,
-    attemptsWithMetrics: attemptMetrics.filter((entry) => entry.metrics).length,
-    duplicateCount: attemptMetrics.reduce((sum, entry) => sum + entry.duplicateCount, 0),
+    observedAttempts: attemptMetrics.length + unboundMetrics.length,
+    attemptsWithMetrics: [...attemptMetrics, ...unboundMetrics].filter((entry) => entry.metrics).length,
+    unboundAttempts: unboundMetrics.length,
+    duplicateCount: [...attemptMetrics, ...unboundMetrics].reduce((sum, entry) => sum + entry.duplicateCount, 0),
     executions,
   };
   const attemptsComplete = attemptMetrics.length > 0 && !conflicts.length
-    && attemptMetrics.every((entry) => entry.metrics) && executions.status !== 'partial';
+    && attemptMetrics.every((entry) => entry.metrics) && executions.status === 'verified';
   const gameMetrics = completeMetrics(game.metrics);
   if (gameMetrics) {
     meteringLayer = 'game';
@@ -538,8 +585,11 @@ function normalizeGame(game, attempts, finished, unbound, foreign, terminals, ga
     meteringLayer = 'attempts';
     metrics = aggregateMechanismMetrics(attemptMetrics.map((entry) => entry.metrics));
   } else {
-    meteringLayer = attemptMetrics.some((entry) => entry.metrics) ? 'partial-attempts' : game.legacyReportedFields ? 'legacy-fields' : 'none';
-    const completeAttempts = attemptMetrics.filter((entry) => entry.metrics);
+    const visibleAttempts = [...attemptMetrics, ...unboundMetrics];
+    meteringLayer = visibleAttempts.some((entry) => entry.metrics) ? 'partial-attempts' : game.legacyReportedFields ? 'legacy-fields' : 'none';
+    // Diagnostic only: never a certified aggregate. Unbound detail may
+    // contribute here and is labelled by coverage.unboundAttempts.
+    const completeAttempts = [...attemptMetrics, ...unboundMetrics].filter((entry) => entry.metrics);
     observedSubtotal = completeAttempts.length ? aggregateMechanismMetrics(completeAttempts.map((entry) => entry.metrics)) : null;
     gaps.push('GAME_METRICS_INCOMPLETE');
   }
@@ -645,35 +695,52 @@ function gameOutcome(game, finished, unbound, foreign, terminals) {
 
 // game.finished events belong to a game only through the scope join: the run
 // attribution must not be another run's, and the game identity must resolve to
-// exactly one game. A versioned id must equal the game's versioned id; a short
-// id applies only when exactly one version of that short id exists in the
-// report. An event with no run attribution is unbound: it is shown, but it can
-// never establish or change a terminal.
+// exactly one game. Every listed game is offered to the shared join, so the
+// uniqueness rule lives in one place: a versioned id must equal the game's
+// versioned id, and a short id applies only when that family has exactly one
+// version in the report. An event with no run attribution is unbound: it is
+// shown, but it can never establish or change a terminal. A short id that names
+// several versions is recorded as ambiguous, never guessed onto one of them.
 function indexFinished(events, games, scope, attemptIdsByGame) {
-  const versionsByShort = new Map();
+  const versionsByFamily = new Map();
   for (const game of games) {
-    if (!versionsByShort.has(game.gameId)) versionsByShort.set(game.gameId, []);
-    versionsByShort.get(game.gameId).push(game.versionedGameId);
+    if (!versionsByFamily.has(game.gameId)) versionsByFamily.set(game.gameId, []);
+    versionsByFamily.get(game.gameId).push(game.versionedGameId);
   }
-  const gameIds = new Set(games.map((game) => game.versionedGameId));
   const byScope = new Map();
   const unboundByScope = new Map();
   const foreignByScope = new Map();
   const unbound = [];
   const foreign = [];
   const mismatched = [];
+  const ambiguous = [];
   for (const event of events) {
     if (event.kind !== 'game.finished') continue;
     const raw = String(event.game_id ?? event.gameId ?? '').trim().toLowerCase();
     if (!raw) continue;
-    let target = null;
-    if (raw.includes('-')) target = gameIds.has(raw) ? raw : null;
-    else if (versionsByShort.get(raw)?.length === 1) target = versionsByShort.get(raw)[0];
-    if (!target) continue;
-    const join = joinAuditScope(
-      { runId: event.runId, gameId: raw, attemptId: event.attemptId ?? event.attempt_id ?? null },
-      { ...scope, versionedGameId: target, attemptIds: attemptIdsByGame.get(target) ?? null },
-    );
+    const evidence = { runId: event.runId, gameId: raw, attemptId: event.attemptId ?? event.attempt_id ?? null };
+    let match = null;
+    for (const game of games) {
+      const join = joinAuditScope(evidence, {
+        ...scope,
+        versionedGameId: game.versionedGameId,
+        versionsByFamily,
+        attemptIds: attemptIdsByGame.get(game.versionedGameId) ?? null,
+      });
+      if (join.gameMatches === true) {
+        match = { game, join };
+        break;
+      }
+    }
+    if (!match) {
+      // A short family id that several games of this report share cannot be
+      // attributed. It is recorded rather than guessed or silently dropped; an
+      // id that belongs to no listed game is still out of this report's scope.
+      if ((versionsByFamily.get(raw)?.length ?? 0) > 1) ambiguous.push(event);
+      continue;
+    }
+    const target = match.game.versionedGameId;
+    const join = match.join;
     if (join.attemptMatches === false) {
       mismatched.push(event);
       continue;
@@ -697,7 +764,7 @@ function indexFinished(events, games, scope, attemptIdsByGame) {
     if (!byScope.has(target)) byScope.set(target, []);
     byScope.get(target).push(event);
   }
-  return { byGame: byScope, unboundByGame: unboundByScope, foreignByGame: foreignByScope, unbound, foreign, mismatched };
+  return { byGame: byScope, unboundByGame: unboundByScope, foreignByGame: foreignByScope, unbound, foreign, mismatched, ambiguous };
 }
 
 function finishedError(event) {
@@ -711,13 +778,14 @@ function finishedError(event) {
 export const AUDIT_RECEIPTS_SCHEMA = 'avo.trajectory-audit-receipts.v1';
 
 function executionTerminals(receipts, scope, gaps) {
-  if (receipts === null) return { bound: [], foreign: [] };
+  if (receipts === null) return { bound: [], foreign: [], unbound: [] };
   if (receipts?.schema !== AUDIT_RECEIPTS_SCHEMA || !Array.isArray(receipts.executionTerminals)) {
     gaps.push('RECEIPTS_SCHEMA_UNKNOWN');
-    return { bound: [], foreign: [] };
+    return { bound: [], foreign: [], unbound: [] };
   }
   const bound = [];
   const foreign = [];
+  const unbound = [];
   for (const [index, record] of receipts.executionTerminals.entries()) {
     const valid = record?.schema === 'avo.execution-terminal.v1' && record.scope && typeof record.scope === 'object';
     if (!valid) {
@@ -725,8 +793,9 @@ function executionTerminals(receipts, scope, gaps) {
       continue;
     }
     // A receipt that names another run is that run's terminal and never becomes
-    // this run's cancellation. An unbound legacy receipt is kept: it is only
-    // ever consulted when this run has no definite terminal of its own.
+    // this run's cancellation. An unbound legacy receipt is listed, but it
+    // carries no run attribution, so it can never set a cancellation or change
+    // a game outcome either.
     const join = joinAuditScope(
       { runId: record.scope.runId ?? record.runId ?? null, gameId: record.scope.versionedGameId ?? null },
       scope,
@@ -735,9 +804,13 @@ function executionTerminals(receipts, scope, gaps) {
       foreign.push(`receipt:${index}`);
       continue;
     }
+    if (join.binding === 'unbound') {
+      unbound.push(`receipt:${index}`);
+      continue;
+    }
     bound.push(record);
   }
-  return { bound, foreign };
+  return { bound, foreign, unbound };
 }
 
 function cancellationFor(terminals, versionedGameId) {
@@ -881,7 +954,7 @@ function legacyFieldSubtotal(games) {
   return fields;
 }
 
-function runOutcome(games, terminals, gaps, foreignReceipts = []) {
+function runOutcome(games, terminals, gaps, receiptTerminals = { foreign: [], unbound: [] }) {
   const statuses = games.map((game) => game.outcome.status);
   const conflicts = [...new Set(games.flatMap((game) => game.outcome.conflicts))];
   let status;
@@ -902,7 +975,8 @@ function runOutcome(games, terminals, gaps, foreignReceipts = []) {
     errorObserved,
     reasonCode: conflicts.length ? 'TERMINAL_CONFLICT' : status === 'unknown' ? 'TERMINAL_EVIDENCE_MISSING' : null,
     conflicts,
-    foreignEvidenceRefs: foreignReceipts,
+    foreignEvidenceRefs: receiptTerminals.foreign ?? [],
+    unboundEvidenceRefs: receiptTerminals.unbound ?? [],
     cancelRequested: terminals.some((record) => record.cancellation && typeof record.cancellation === 'object'),
   };
 }
@@ -1042,9 +1116,16 @@ function indexFor(normalized, exportId) {
  * Independently validates an export directory: file sizes and hashes, schema,
  * per-run aggregates recomputed from per-game metrics, readiness recomputed
  * from gaps and INDEX consistency. Returns field-level errors.
+ *
+ * The expected game identities live in the source report, which the run file
+ * can only restate. With `sourceRoot` the validator re-reads each bound source
+ * report (verifying its recorded sha256 first) and re-derives the expected
+ * identity set from it; without it, the result says explicitly that the
+ * expectation was not verified against source material.
  */
-export function validateTrajectoryAudit(outputDir) {
+export function validateTrajectoryAudit(outputDir, { sourceRoot = null } = {}) {
   const root = path.resolve(outputDir);
+  const boundSourceRoot = sourceRoot === null ? null : fs.realpathSync(sourceRoot);
   const errors = [];
   const fail = (file, field, reason) => errors.push({ file, field, reason });
   let manifest;
@@ -1085,6 +1166,7 @@ export function validateTrajectoryAudit(outputDir) {
     if (name !== 'MANIFEST.json' && !listed.has(name)) fail(name, null, 'UNLISTED_FILE');
   }
   const runIds = new Map();
+  let verifiedAgainstSource = 0;
   for (const [file, run] of runs) {
     if (run.schema !== AUDIT_SCHEMA || run.exportId !== manifest.exportId) fail(file, 'schema', 'SCHEMA_MISMATCH');
     if (runIds.has(run.runId)) fail(file, 'runId', 'DUPLICATE_RUN_ID');
@@ -1130,8 +1212,16 @@ export function validateTrajectoryAudit(outputDir) {
           || !['verified', 'partial', 'unknown', 'not-applicable'].includes(executions.status)) {
         fail(file, `games.${index}.coverage.executions`, 'EXECUTION_COVERAGE_INCONSISTENT');
       }
-      if (game.coverage.expectedAttempts !== game.coverage.observedAttempts) {
+      // Expected attempts are only established by a verified mapping; anything
+      // else must leave the expectation unknown rather than restating a count.
+      const expectedAttempts = game.coverage.expectedAttempts ?? null;
+      if (executions.status === 'verified'
+        ? expectedAttempts !== executions.declaredAttempts
+        : expectedAttempts !== null) {
         fail(file, `games.${index}.coverage.expectedAttempts`, 'ATTEMPT_COVERAGE_INCONSISTENT');
+      }
+      if (game.meteringLayer === 'attempts' && executions.status !== 'verified') {
+        fail(file, `games.${index}.meteringLayer`, 'METERING_LAYER_INCONSISTENT');
       }
     }
     const gaps = Array.isArray(run.audit?.gaps) ? run.audit.gaps : null;
@@ -1142,6 +1232,44 @@ export function validateTrajectoryAudit(outputDir) {
     }
     const derivedReady = Boolean(gaps) && gaps.length === 0 && derived.length === 0;
     if (run.audit?.ready !== derivedReady) fail(file, 'audit.ready', 'READY_FLAG_INCONSISTENT');
+    // The expectation itself is restated by the run file; with a source root it
+    // is re-derived from the bound source report instead of trusted.
+    if (boundSourceRoot) {
+      const bound = run.reportSource ?? null;
+      const listedSource = bound
+        ? (Array.isArray(manifest.sourceFiles) ? manifest.sourceFiles : [])
+          .find((entry) => entry?.relativePath === bound.relativePath)
+        : null;
+      if (!bound || !listedSource) {
+        fail(file, 'reportSource', 'SOURCE_NOT_BOUND');
+      } else {
+        let evidence = null;
+        try {
+          evidence = readRegularFileEvidence(path.join(boundSourceRoot, bound.relativePath), {
+            root: boundSourceRoot,
+            maxBytes: REPORT_LIMITS.maxReportBytes,
+            purpose: 'audit source report',
+          });
+        } catch {
+          fail(file, 'reportSource', 'SOURCE_UNREADABLE');
+        }
+        if (evidence && (evidence.sha256 !== listedSource.sha256 || evidence.bytes !== listedSource.bytes)) {
+          fail(file, 'reportSource', 'SOURCE_HASH_MISMATCH');
+        } else if (evidence) {
+          try {
+            const sourceReport = JSON.parse(evidence.buffer.toString('utf8'));
+            const fromSource = identityCoverage(adaptReport(sourceReport, []).expectedIdentity, games);
+            if (canonicalJson(fromSource) !== canonicalJson(run.metrics?.coverage ?? null)) {
+              fail(file, 'metrics.coverage', 'COVERAGE_SOURCE_RECOMPUTE_MISMATCH');
+            } else {
+              verifiedAgainstSource += 1;
+            }
+          } catch {
+            fail(file, 'reportSource', 'SOURCE_INVALID');
+          }
+        }
+      }
+    }
   }
   const recomputedCoverage = {
     runs: runIds.size,
@@ -1175,6 +1303,11 @@ export function validateTrajectoryAudit(outputDir) {
   return {
     ok: errors.length === 0,
     errors,
+    // True only when every exported run's expected identity set was re-derived
+    // from its bound source report; otherwise the limitation is explicit.
+    expectedIdentitiesVerifiedAgainstSource: boundSourceRoot !== null
+      && runIds.size > 0
+      && verifiedAgainstSource === runIds.size,
     runs: [...runIds.values()].map((run) => ({ runId: run.runId, auditReady: run.audit.ready, gaps: run.audit.gaps })),
   };
 }
@@ -1183,11 +1316,26 @@ export function validateTrajectoryAudit(outputDir) {
 function deriveGaps(run) {
   const gaps = [];
   const games = Array.isArray(run.games) ? run.games : [];
+  const coverage = run.metrics?.coverage ?? null;
+  const executionsStatuses = games.map((game) => game.coverage?.executions?.status ?? null);
   if (run.artifactAvailability?.report !== 'present') gaps.push('REPORT_MISSING');
   if (run.artifactAvailability?.trajectory !== 'present') gaps.push('TRAJECTORY_NOT_PRESENT');
-  if (run.metrics?.coverage?.complete !== true || run.metrics?.coverage?.expectedUnits == null) gaps.push('RUN_METRICS_INCOMPLETE');
+  if (coverage?.complete !== true || coverage?.expectedUnits == null) gaps.push('RUN_METRICS_INCOMPLETE');
+  if (coverage && coverage.expectedUnits == null) gaps.push('EXPECTED_UNITS_UNKNOWN');
+  if (coverage && coverage.identityBound !== true) gaps.push('EXPECTED_IDENTITIES_UNKNOWN');
+  else if (coverage && !coverage.expectedIdentities) gaps.push('EXPECTED_VERSIONS_UNKNOWN');
+  if (coverage?.duplicateIdentities?.length) gaps.push('GAME_IDENTITY_DUPLICATE');
+  if (coverage?.missingIdentities?.length) gaps.push('GAME_IDENTITY_MISSING');
+  if (coverage?.extraIdentities?.length) gaps.push('GAME_IDENTITY_EXTRA');
   if (run.metrics?.discrepancies?.length) gaps.push('AGGREGATE_MISMATCH');
   if (games.some((game) => !game.metrics || game.conflicts?.length || game.discrepancies?.length)) gaps.push('GAME_METRICS_INCOMPLETE');
+  if (executionsStatuses.includes('unknown')) gaps.push('ATTEMPT_EXECUTION_MAPPING_UNKNOWN');
+  if (executionsStatuses.includes('partial')) gaps.push('ATTEMPT_EXECUTION_MAPPING_PARTIAL');
+  if (games.some((game) => (game.coverage?.unboundAttempts ?? 0) > 0)) gaps.push('UNBOUND_ATTEMPT_EVIDENCE');
+  if (games.some((game) => game.outcome?.foreignEvidenceRefs?.length)) gaps.push('FOREIGN_TERMINAL_EVIDENCE');
+  if (games.some((game) => game.outcome?.unboundEvidenceRefs?.length)) gaps.push('UNBOUND_TERMINAL_EVIDENCE');
+  if (run.executionOutcome?.foreignEvidenceRefs?.length) gaps.push('FOREIGN_RECEIPT_EVIDENCE');
+  if (run.executionOutcome?.unboundEvidenceRefs?.length) gaps.push('UNBOUND_RECEIPT_EVIDENCE');
   if (!['completed', 'error'].includes(run.executionOutcome?.status)) gaps.push('OUTCOME_NOT_FINAL');
   if (run.progress?.ambiguities?.length) gaps.push('AMBIGUOUS_LEGACY_LEVEL_FIELD');
   if (run.progress?.sourceSchema !== 'avo.benchmark-report') gaps.push('LEGACY_REPORT_SCHEMA');
@@ -1198,12 +1346,16 @@ function deriveGaps(run) {
 const GAP_CLASSES = Object.freeze({
   REPORT_MISSING: ['REPORT_MISSING'],
   TRAJECTORY_NOT_PRESENT: ['TRAJECTORY_MISSING', 'TRAJECTORY_PARTIAL'],
-  RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN'],
+  RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN', 'EXPECTED_IDENTITIES_UNKNOWN', 'EXPECTED_VERSIONS_UNKNOWN', 'GAME_IDENTITY_DUPLICATE', 'GAME_IDENTITY_MISSING', 'GAME_IDENTITY_EXTRA'],
   AGGREGATE_MISMATCH: ['AGGREGATE_MISMATCH'],
-  GAME_METRICS_INCOMPLETE: ['GAME_METRICS_INCOMPLETE', 'ATTEMPT_ID_CONFLICT', 'ATTEMPT_GAME_MISMATCH'],
+  GAME_METRICS_INCOMPLETE: ['GAME_METRICS_INCOMPLETE', 'ATTEMPT_ID_CONFLICT', 'ATTEMPT_GAME_MISMATCH', 'ATTEMPT_EXECUTION_MAPPING_UNKNOWN', 'ATTEMPT_EXECUTION_MAPPING_PARTIAL', 'UNBOUND_ATTEMPT_EVIDENCE'],
   OUTCOME_NOT_FINAL: ['OUTCOME_UNKNOWN', 'OUTCOME_CENSORED', 'TERMINAL_CONFLICT'],
   AMBIGUOUS_LEGACY_LEVEL_FIELD: ['AMBIGUOUS_LEGACY_LEVEL_FIELD'],
   LEGACY_REPORT_SCHEMA: ['LEGACY_REPORT_SCHEMA'],
+  FOREIGN_TERMINAL_EVIDENCE: ['FOREIGN_TERMINAL_EVIDENCE'],
+  UNBOUND_TERMINAL_EVIDENCE: ['UNBOUND_TERMINAL_EVIDENCE'],
+  FOREIGN_RECEIPT_EVIDENCE: ['FOREIGN_RECEIPT_EVIDENCE'],
+  UNBOUND_RECEIPT_EVIDENCE: ['UNBOUND_RECEIPT_EVIDENCE'],
 });
 
 function walk(root, prefix = '') {
