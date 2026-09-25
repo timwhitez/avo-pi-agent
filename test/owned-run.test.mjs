@@ -25,6 +25,41 @@ for (const detached of [true, false]) test(`actual locked benchmark entry releas
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const detached of [true, false]) test(`stable repair entry enters its owned group before creating run evidence (detached=${detached})`, { skip: process.platform !== 'linux' }, () => {
+  // Synthetic benchmark fixture: a non-leader launch re-executes the entry in a
+  // new group, so pre-entry filesystem effects would reject the fresh run ID.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-repair-entry-'));
+  try {
+    fs.mkdirSync(path.join(root, 'scripts'));
+    fs.writeFileSync(path.join(root, 'scripts/run-real-public.mjs'),
+      "import fs from 'node:fs';\nfs.appendFileSync('benchmark-invocations', `${process.pid}\\n`);\nprocess.exitCode = 1;\n");
+    const result = spawnSync(process.execPath, [path.resolve('scripts/run-trajectory-repair-loop.mjs'), '--run-id=entry-fixture', '--max-rounds=1'], {
+      cwd: root, detached, encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1' },
+    });
+    assert.doesNotMatch(result.stderr, /already exists/);
+    assert.equal(fs.readFileSync(path.join(root, 'benchmark-invocations'), 'utf8').trim().split('\n').length, 1);
+    const summaries = result.stdout.trim().split('\n').filter((line) => line.startsWith('{'));
+    assert.equal(summaries.length, 1, result.stdout);
+    assert.equal(JSON.parse(summaries[0]).repairRunId, 'entry-fixture');
+    const summary = JSON.parse(fs.readFileSync(path.join(root, 'runs/public/trajectory-repair-entry-fixture.redacted.json'), 'utf8'));
+    assert.equal(summary.status, 'failed');
+    // The fixture leaves no round output; failing after it ran proves one full entry.
+    assert.equal(summary.failure.stage, 'orchestrator');
+    assert.match(summary.failure.message, /round memory output is missing/);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(fs.existsSync(path.join(root, 'runs/private/.local-execution.lock')), false);
+
+    const reused = spawnSync(process.execPath, [path.resolve('scripts/run-trajectory-repair-loop.mjs'), '--run-id=entry-fixture', '--max-rounds=1'], {
+      cwd: root, detached, encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1' },
+    });
+    assert.equal(reused.status, 1, reused.stderr);
+    assert.match(reused.stderr, /private root already exists; choose a fresh run ID/);
+    assert.equal(fs.readFileSync(path.join(root, 'benchmark-invocations'), 'utf8').trim().split('\n').length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('owned wrapper pauses and cleans its real runner and ARC descendants', { skip: process.platform !== 'linux' }, async (t) => {
   for (const termination of ['normal', 'normal-bootstrap', 'SIGINT', 'SIGTERM', 'abort', 'SIGKILL', 'SIGKILL-bootstrap', 'timeout']) {
     await t.test(termination, async () => {
