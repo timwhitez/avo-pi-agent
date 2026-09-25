@@ -36,12 +36,12 @@ try {
       malformedLines: receipts.malformedLines,
     }));
   } else if (args.validateOutput) {
-    const result = validateTrajectoryAudit(args.validateOutput);
+    const result = validateTrajectoryAudit(args.validateOutput, { sourceRoot: args.sourceRoot ?? null });
     console.log(JSON.stringify(result));
     process.exitCode = result.ok ? 0 : 1;
   } else {
     if (!args.inputManifest || !args.outputDir) {
-      throw new Error('usage: export-trajectory-audit --input-manifest <file> --output-dir <new-directory> [--require-audit-ready] | --validate-output <dir>');
+      throw new Error('usage: export-trajectory-audit --input-manifest <file> --output-dir <new-directory> [--require-audit-ready] | --validate-output <dir> [--source-root <authorised-dir>]');
     }
     const git = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' });
     const result = exportTrajectoryAudit({
@@ -75,7 +75,7 @@ function parseArgs(values) {
       index += 1;
       continue;
     }
-    if (!['inputManifest', 'outputDir', 'validateOutput', 'extractReceipts', 'receiptsOut'].includes(name)) throw new Error(`unknown option: ${value}`);
+    if (!['inputManifest', 'outputDir', 'validateOutput', 'sourceRoot', 'extractReceipts', 'receiptsOut'].includes(name)) throw new Error(`unknown option: ${value}`);
     const next = values[index + 1];
     if (next === undefined || next.startsWith('--')) throw new Error(`missing value for ${value}`);
     result[name] = next;
