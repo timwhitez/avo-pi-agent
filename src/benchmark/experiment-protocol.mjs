@@ -33,6 +33,20 @@ import { evaluateScorecardCoverage } from './scorecard-evidence.mjs';
 
 export { aggregateMechanismMetrics, normalizeMechanismMetrics } from './mechanism-metrics.mjs';
 
+import {
+  EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_RUN_V2_SCHEMA,
+  assertExperimentCapsuleV2,
+  assertExperimentEnvironmentV2,
+  loadExperimentRunV2,
+  sealExperimentPlanV2,
+  validateBindingForPlanV2,
+  validateExperimentPlanV2,
+  validateExperimentResultsV2,
+  validateExperimentRunBindingV2,
+} from './experiment-v2.mjs';
+
+export { EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_RUN_V2_SCHEMA };
 export const EXPERIMENT_PLAN_SCHEMA = 'avo.benchmark-experiment-plan.v1';
 export const EXPERIMENT_MANIFEST_SCHEMA = 'avo.public-game-manifest.v1';
 export const EXPERIMENT_RUN_SCHEMA = 'avo.benchmark-experiment-run.v1';
@@ -69,6 +83,7 @@ const INCIDENT_METRICS = Object.freeze({
 });
 
 export function sealExperimentPlan(definition) {
+  if (definition?.schema === EXPERIMENT_PLAN_V2_SCHEMA) return sealExperimentPlanV2(definition);
   const input = cloneRecord(definition, 'experiment plan definition');
   requireExactKeys(input, [
     'arms', 'changedVariable', 'conditions', 'createdAt', 'execution',
@@ -91,6 +106,7 @@ export function sealExperimentPlan(definition) {
 }
 
 export function validateExperimentPlan(value) {
+  if (value?.schema === EXPERIMENT_PLAN_V2_SCHEMA) return validateExperimentPlanV2(value);
   const plan = cloneRecord(value, 'experiment plan');
   requireExactKeys(plan, [
     'arms', 'changedVariable', 'conditions', 'createdAt', 'execution',
@@ -160,6 +176,7 @@ export function loadExperimentRunFromEnvironment(env = process.env) {
     return null;
   }
   const plan = loadExperimentPlan(file);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return loadExperimentRunV2(plan, env);
   const phase = String(env.AVO_EXPERIMENT_PHASE || '').trim();
   const arm = String(env.AVO_EXPERIMENT_ARM || '').trim();
   if (!PHASES.includes(phase)) throw new Error(`AVO_EXPERIMENT_PHASE must be one of: ${PHASES.join(', ')}`);
@@ -189,6 +206,7 @@ export function loadExperimentRunFromEnvironment(env = process.env) {
 }
 
 export function validateExperimentRunBinding(value) {
+  if (value?.schema === EXPERIMENT_RUN_V2_SCHEMA) return validateExperimentRunBindingV2(value);
   const binding = cloneRecord(value, 'experiment run binding');
   requireExactKeys(binding, [
     'arm', 'changedVariable', 'conditionsSha256', 'experimentId', 'gitCommit',
@@ -225,8 +243,16 @@ export function assertExperimentEnvironment(run, {
 } = {}) {
   if (!run) return true;
   const plan = validateExperimentPlan(run.plan);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) {
+    return assertExperimentEnvironmentV2(plan, run.binding, { provider, config, env, git });
+  }
   const binding = validateBindingForPlan(plan, run.binding);
-  const expected = plan.conditions;
+  return assertEnvironmentConditions(plan.conditions, binding.policyProfile, { provider, config, env, git });
+}
+
+// Effective provider/runtime/Git/profile checks shared by every plan schema;
+// they run before any provider request.
+function assertEnvironmentConditions(expected, policyProfile, { provider, config, env, git }) {
   const capabilities = assertProviderCapabilities(provider?.capabilities);
   const actualProvider = {
     wireApi: 'responses',
@@ -270,7 +296,7 @@ export function assertExperimentEnvironment(run, {
   if (git && (git.clean !== true || git.commit !== expected.gitCommit)) {
     throw new Error('effective Git commit differs from the frozen experiment plan');
   }
-  if (config?.policyProfile !== binding.policyProfile) {
+  if (config?.policyProfile !== policyProfile) {
     throw new Error('effective policy profile differs from the selected experiment arm');
   }
   return true;
@@ -279,7 +305,9 @@ export function assertExperimentEnvironment(run, {
 export function selectExperimentGames(run, discoveredGames) {
   if (!run) return discoveredGames;
   const plan = validateExperimentPlan(run.plan);
-  const binding = validateBindingForPlan(plan, run.binding);
+  const binding = plan.schema === EXPERIMENT_PLAN_SCHEMA
+    ? validateBindingForPlan(plan, run.binding)
+    : validateBindingForPlanV2(plan, run.binding);
   if (!Array.isArray(discoveredGames)) throw new Error('discovered public game set is malformed');
   const byId = new Map(discoveredGames.map((game) => [String(game?.versionedGameId || ''), game]));
   const manifest = plan.manifests[binding.phase];
@@ -287,7 +315,7 @@ export function selectExperimentGames(run, discoveredGames) {
   const selected = ids.map((gameId) => byId.get(gameId));
   const missing = ids.filter((_, index) => !selected[index]);
   if (missing.length) throw new Error(`frozen experiment games are unavailable: ${missing.join(', ')}`);
-  const runtime = plan.conditions.runtime;
+  const runtime = conditionsOf(plan).runtime;
   const observedBudgets = deriveGameBudgets(selected, {
     hardCap: runtime.maxActions,
     outerTurnHardCap: runtime.maxOuterTurns,
@@ -304,9 +332,21 @@ export function selectExperimentGames(run, discoveredGames) {
   return selected;
 }
 
+// The run's prepared initial state (mode and content hashes) must equal the
+// frozen plan before any provider request; the capsule check repeats it.
+export function assertExperimentInitialState(run, initialState) {
+  if (!run) return true;
+  const expected = conditionsOf(validateExperimentPlan(run.plan)).initialState;
+  const observed = { mode: initialState?.mode, memory: initialState?.memory, workspace: initialState?.workspace };
+  if (canonicalJson(observed) !== canonicalJson(expected)) {
+    throw new Error('prepared initial state differs from the frozen experiment plan');
+  }
+  return true;
+}
+
 export function assertExperimentArcRuntime(run, arcRuntime) {
   if (!run) return true;
-  const expected = validateExperimentPlan(run.plan).conditions.runtime.arcRuntime;
+  const expected = conditionsOf(validateExperimentPlan(run.plan)).runtime.arcRuntime;
   if (canonicalJson(arcRuntime) !== canonicalJson(expected)) {
     throw new Error('effective ARC runtime differs from the frozen experiment plan');
   }
@@ -316,12 +356,18 @@ export function assertExperimentArcRuntime(run, arcRuntime) {
 export function assertExperimentCapsule(run, capsule) {
   if (!run) return true;
   const plan = validateExperimentPlan(run.plan);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return assertExperimentCapsuleV2(plan, run.binding, capsule);
   const binding = validateBindingForPlan(plan, run.binding);
+  return assertCapsuleConditions(plan.conditions, plan.manifests[binding.phase], binding, capsule);
+}
+
+// Capsule condition checks shared by every plan schema. `conditions.gitCommit`
+// is the commit of the selected arm.
+function assertCapsuleConditions(conditions, manifest, binding, capsule) {
   const definition = capsule?.definition;
   if (!definition || canonicalJson(definition.experiment) !== canonicalJson(binding)) {
     throw new Error('run capsule is not bound to the selected experiment unit');
   }
-  const conditions = plan.conditions;
   const runtime = conditions.runtime;
   const capsuleRuntime = definition.runtime || {};
   const capsuleConfig = capsuleRuntime.config || {};
@@ -333,7 +379,7 @@ export function assertExperimentCapsule(run, capsule) {
   if (definition.git?.commit !== conditions.gitCommit
       || definition.git?.clean !== true
       || definition.policyProfile?.effective !== binding.policyProfile
-      || canonicalJson(definition.task?.versionedGameIds) !== canonicalJson(plan.manifests[binding.phase].versionedGameIds)
+      || canonicalJson(definition.task?.versionedGameIds) !== canonicalJson(manifest.versionedGameIds)
       || canonicalJson(observedState) !== canonicalJson(conditions.initialState)
       || capsuleRuntime.node !== runtime.nodeVersion
       || capsuleRuntime.dependencies?.npmVersion !== runtime.npmVersion
@@ -347,7 +393,7 @@ export function assertExperimentCapsule(run, capsule) {
       || capsuleRuntime.providerStreamTimeoutMs !== runtime.providerStreamTimeoutMs
       || capsuleRuntime.providerStreamMaxRetries !== runtime.providerStreamMaxRetries
       || canonicalJson(capsuleRuntime.actionBudgetPolicy) !== canonicalJson(runtime.actionBudgetPolicy)
-      || canonicalJson(definition.task?.gameBudgets) !== canonicalJson(plan.manifests[binding.phase].gameBudgets)
+      || canonicalJson(definition.task?.gameBudgets) !== canonicalJson(manifest.gameBudgets)
       || definition.task?.arcAuthMode !== runtime.arcAuthMode
       || definition.modelInterface?.wireApi !== conditions.provider.wireApi
       || definition.modelInterface?.reasoningEffort !== conditions.provider.reasoningEffort
@@ -377,6 +423,7 @@ export function assertExperimentCapsule(run, capsule) {
 
 export function validateExperimentResults(planValue, evidenceEntries) {
   const plan = validateExperimentPlan(planValue);
+  if (plan.schema !== EXPERIMENT_PLAN_SCHEMA) return validateExperimentResultsV2(plan, evidenceEntries);
   if (!Array.isArray(evidenceEntries) || evidenceEntries.length === 0) {
     throw new Error('experiment results require run evidence');
   }
@@ -654,6 +701,11 @@ function validateConditions(value) {
   const conditions = cloneRecord(value, 'experiment conditions');
   requireExactKeys(conditions, ['gitCommit', 'initialState', 'provider', 'runtime'], 'experiment conditions');
   if (!GIT_HASH.test(String(conditions.gitCommit || ''))) throw new Error('experiment Git commit is invalid');
+  validateConditionParts(conditions);
+}
+
+// Provider, runtime and initial-state rules shared by every plan schema.
+function validateConditionParts(conditions) {
   const provider = cloneRecord(conditions.provider, 'experiment provider conditions');
   requireExactKeys(provider, [
     'capabilities', 'capabilityManifestSha256', 'endpointSha256',
@@ -722,6 +774,19 @@ function validateConditions(value) {
     throw new Error('experiment cold-start state must be empty');
   }
 }
+
+function conditionsOf(plan) {
+  return plan.schema === EXPERIMENT_PLAN_SCHEMA ? plan.conditions : plan.commonConditions;
+}
+
+// Shared v1 validators and checks reused by the v2 contract (experiment-v2.mjs).
+export const experimentProtocolInternals = Object.freeze({
+  ARMS, PHASES, MAX_REPETITIONS, GIT_HASH, SHA256,
+  assertCapsuleConditions, assertEnvironmentConditions, assertPublicCapsuleConditions, cloneRecord,
+  comparableCapsuleCondition, deepFreeze, publicExperimentBinding, requireExactKeys,
+  requireLine, requireSafeId, requireSha, requireTimestamp, sealManifest, sha256, shortGameId,
+  strictInteger, validateConditionParts, validateExecution, validateManifest, validatePublicExperimentReport,
+});
 
 function validateStateTree(value, name) {
   const tree = cloneRecord(value, name);

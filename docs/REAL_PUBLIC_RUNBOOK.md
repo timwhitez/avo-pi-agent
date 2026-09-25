@@ -87,6 +87,16 @@ Select a sealed unit with `AVO_EXPERIMENT_PLAN_FILE`, `AVO_EXPERIMENT_PHASE`,
 `AVO_EXPERIMENT_ARM` and `AVO_EXPERIMENT_REPETITION`. This is an optional comparison
 workflow, not a prerequisite for a one-off diagnostic.
 
+Plan schema v2 ([experiment-v2.mjs](../src/benchmark/experiment-v2.mjs)) covers only
+one reviewed replacement of one tool's description literal under the same profile.
+Each arm binds its own commit, tree, component set and derived tool contracts, read from
+the Git object database. `buildDescriptionChange` derives the single-variable verdict.
+It imports each arm's committed code only with `allowImport: true` after review.
+Run each arm from its own clean checkout; its effective tool contracts, watchdog
+settings and conditions are checked before the provider preflight. Results report every
+scheduled unit (`completed`, `error`, `censored`, `not-run`, `unknown`), mark
+retrospective plans `exploratory` and keep the conclusion `undetermined`.
+
 ## State, recovery and evidence
 
 Cold start is the default: empty private memory/workspace for the run. Warm start

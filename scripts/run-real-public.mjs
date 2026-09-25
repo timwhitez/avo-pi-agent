@@ -19,6 +19,7 @@ import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.m
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
   assertExperimentArcRuntime,
+  assertExperimentInitialState,
   assertExperimentCapsule,
   assertExperimentEnvironment,
   loadExperimentRunFromEnvironment,
@@ -132,6 +133,8 @@ try {
       assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
     }
   }
+  // The prepared initial state is checked before any provider request.
+  assertExperimentInitialState(experimentRun, runState.initialState);
   stage.value = 'workspace-preflight';
   console.log('[real-run] attesting the initialized workspace capability');
   const workspaceAttestation = await attestWorkspaceCapability(config);
