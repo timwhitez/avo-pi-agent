@@ -396,7 +396,8 @@ test('T12 export -> validate: complete receipts are ready; a dropped, malformed 
       fs.mkdirSync(path.join(source, 'trajectory'), { recursive: true });
       fs.writeFileSync(path.join(source, 'report.json'), JSON.stringify({
         runId: 'run-t12',
-        completeness: { expectedCount: 1 },
+        // Production completeness shape (#357): expected identities, not a count.
+        completeness: { complete: true, expectedCount: 1, actualCount: 1, gameIds: ['receipt'], versionedGameIds: ['receipt-v1'] },
         games: [{ gameId: 'receipt-v1', state: 'GAME_OVER', levelsCompleted: 0, totalLevels: 3, actions: 0,
           mechanismMetrics: metrics({ toolCalls: run.tool.length, observeCalls: 1, trajectoryReadCalls: 1 }) }],
       }));
