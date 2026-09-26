@@ -22,6 +22,7 @@ import {
   buildToolReceipt,
   classifyRead,
   deliveredReadKeys,
+  httpSuccess,
   sha256 as receiptSha256,
   textDigest,
 } from '../trajectory/audit-events.mjs';
@@ -359,9 +360,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           ...timing,
         }));
         if (request) request.lastHttpFailed = response?.ok === false;
-        // The payload provably reached the provider; only now do its results
-        // count as delivered history (#360 H05).
-        recordDeliveredReads(receipts, requestSequence);
+        // Only a successful answer proves the provider processed the payload;
+        // only then do its results count as delivered history (#360 H05).
+        if (httpSuccess(response?.status)) recordDeliveredReads(receipts, requestSequence);
         if (telemetry && response?.ok === false) {
           telemetry.providerHttpErrors += 1;
           emitEvent({ type: 'avo_provider_incident', category: 'http-error', requestSequence });

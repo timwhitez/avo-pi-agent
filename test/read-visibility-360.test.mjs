@@ -72,14 +72,14 @@ const dispatched = ({ scope, sequence, httpAttempt = 1, cliAttempt = 1 }) => ({
   httpAttempt,
 });
 
-const responded = ({ scope, sequence, httpAttempt = 1, cliAttempt = 1 }) => ({
+const responded = ({ scope, sequence, httpAttempt = 1, cliAttempt = 1, responseStatus = 200 }) => ({
   schema: 'avo.context-receipt.v1',
   scope,
   cliAttempt,
   requestSequence: sequence,
   phase: 'response-observed',
   httpAttempt,
-  responseStatus: 200,
+  responseStatus,
 });
 
 // One logical request with the full #344/#359 evidence #359 requires.
@@ -269,6 +269,13 @@ test('H05 delivery history only counts requests whose phases prove the payload r
       prepared({ scope: a, sequence: 2, visible: [carriesFirst] }),
       dispatched({ scope: a, sequence: 2, httpAttempt: 1 }),
       dispatched({ scope: a, sequence: 2, httpAttempt: 2 }),
+    ],
+    // The provider answered, but with an error: it never processed the payload.
+    'http-error-response': [
+      prepared({ scope: a, sequence: 1, visible: [] }),
+      prepared({ scope: a, sequence: 2, visible: [carriesFirst] }),
+      dispatched({ scope: a, sequence: 2, httpAttempt: 1 }),
+      responded({ scope: a, sequence: 2, httpAttempt: 1, responseStatus: 503 }),
     ],
   };
   for (const [name, context] of Object.entries(cases)) {

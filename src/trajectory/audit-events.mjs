@@ -525,7 +525,13 @@ function deliveryProven(request) {
   const responses = [...request.responses];
   if (responses.length === 0) return false;
   if (responses.some((attempt) => !request.attempts.has(attempt))) return false;
-  return true;
+  // A 4xx/5xx answer means the provider did not process the payload.
+  return request.successfulResponses.size > 0;
+}
+
+/** A 2xx HTTP status; anything else (or unknown) never proves delivery. */
+export function httpSuccess(status) {
+  return Number.isSafeInteger(status) && status >= 200 && status < 300;
 }
 
 // One wire call id may only mean one read. A candidate whose origin request is
@@ -573,13 +579,17 @@ export function classifyReadsOffline(toolReceipts, contextReceipts) {
     const sequence = receipt.requestSequence;
     let request = stream.requests.get(sequence);
     if (!request) {
-      request = { phases: new Map(), attempts: new Set(), responses: new Set(), prepared: null, conflict: false };
+      request = { phases: new Map(), attempts: new Set(), responses: new Set(), successfulResponses: new Set(), prepared: null, conflict: false };
       stream.requests.set(sequence, request);
     }
     const phase = String(receipt.phase ?? 'unknown');
     request.phases.set(phase, (request.phases.get(phase) ?? 0) + 1);
     if (phase === 'dispatch-attempt' && Number.isSafeInteger(receipt.httpAttempt)) request.attempts.add(receipt.httpAttempt);
-    if (phase === 'response-observed' && Number.isSafeInteger(receipt.httpAttempt)) request.responses.add(receipt.httpAttempt);
+    if (phase === 'response-observed' && Number.isSafeInteger(receipt.httpAttempt)) {
+      request.responses.add(receipt.httpAttempt);
+      // Only a successful answer shows the provider accepted the payload.
+      if (httpSuccess(receipt.responseStatus)) request.successfulResponses.add(receipt.httpAttempt);
+    }
     if (phase !== 'prepared') continue;
     if (!request.prepared) request.prepared = receipt;
     else if (canonicalJson(request.prepared) !== canonicalJson(receipt)) {
