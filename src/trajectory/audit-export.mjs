@@ -911,13 +911,17 @@ function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame =
     if (binding.binding === 'unbound') unbound.push(`context:${receipt.requestSequence ?? '?'}`);
     boundContext.push(receipt);
     const versionedGameId = String(receipt.scope.versionedGameId ?? '').toLowerCase();
+    // Each Agent attempt's loop numbers its requests from 1: a logical request
+    // is identified by run/game/attempt and its requestSequence.
+    const attemptKey = receipt.scope.attemptId ?? `cli:${receipt.cliAttempt ?? ''}`;
     if (!contextByGame.has(versionedGameId)) contextByGame.set(versionedGameId, new Set());
-    if (Number.isSafeInteger(receipt.requestSequence)) contextByGame.get(versionedGameId).add(receipt.requestSequence);
+    if (Number.isSafeInteger(receipt.requestSequence)) contextByGame.get(versionedGameId).add(`${attemptKey}\0${receipt.requestSequence}`);
     if (Number.isSafeInteger(receipt.requestSequence)) {
-      const key = `${versionedGameId}\0${receipt.requestSequence}`;
+      const key = `${versionedGameId}\0${attemptKey}\0${receipt.requestSequence}`;
       if (!requestEvidence.has(key)) {
         requestEvidence.set(key, {
           versionedGameId,
+          attemptKey,
           requestSequence: receipt.requestSequence,
           phases: new Map(),
           attempts: new Set(),
