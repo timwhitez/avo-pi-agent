@@ -214,7 +214,7 @@ function normalizeRun(run, sourceRoot, recordSource) {
   const terminals = receiptTerminals.bound;
   if (receiptTerminals.foreign.length) gaps.push('FOREIGN_RECEIPT_EVIDENCE');
   if (receiptTerminals.unbound.length) gaps.push('UNBOUND_RECEIPT_EVIDENCE');
-  const receiptSummary = summarizeReceipts(receipts.value, adapted.games, gaps);
+  const receiptSummary = summarizeReceipts(receipts.value, adapted.games, gaps, scope, attemptIdsByGame);
   const terminalSummary = summarizeTerminals(terminals, adapted.games, gaps);
   const games = adapted.games.map((game) => normalizeGame(
     game,
@@ -825,12 +825,41 @@ function executionTerminals(receipts, scope, gaps) {
 // version, CLI attempt, Agent attempt and call id: the same identity with the
 // same body is one call, with a different body a conflict. Missing, malformed
 // or incomplete receipts are gaps; nothing is reconstructed from totals.
-function summarizeReceipts(receipts, games, gaps) {
+function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame = new Map()) {
   if (receipts === null || receipts?.schema !== AUDIT_RECEIPTS_SCHEMA) return null;
   const tool = Array.isArray(receipts.toolReceipts) ? receipts.toolReceipts : null;
   const context = Array.isArray(receipts.contextReceipts) ? receipts.contextReceipts : null;
   if (!tool || !context) gaps.push('RECEIPTS_INCOMPLETE');
   if (Number(receipts.malformedLines) > 0) gaps.push('RECEIPT_LOG_MALFORMED');
+  // #359: a gap the Pi loop recorded (receipt it could not build) is itself
+  // evidence the run is not fully auditable; it must never be dropped.
+  const recordedGaps = Array.isArray(receipts.auditGaps) ? receipts.auditGaps : [];
+  if (recordedGaps.length > 0) gaps.push('AUDIT_GAP_RECORDED');
+  // Every join goes through the single #357 scope join: a receipt from another
+  // run (or an unbound receipt) can never fill this run's coverage.
+  const versionsByFamily = new Map();
+  for (const game of games) {
+    if (!versionsByFamily.has(game.gameId)) versionsByFamily.set(game.gameId, []);
+    versionsByFamily.get(game.gameId).push(game.versionedGameId);
+  }
+  const bindingOf = (receipt) => {
+    const versionedGameId = typeof receipt?.scope?.versionedGameId === 'string' ? receipt.scope.versionedGameId : null;
+    return joinAuditScope(
+      {
+        runId: receipt?.scope?.runId ?? null,
+        gameId: versionedGameId,
+        attemptId: receipt?.scope?.attemptId ?? null,
+      },
+      {
+        runId: scope.runId ?? null,
+        versionedGameId,
+        versionsByFamily,
+        attemptIds: versionedGameId ? attemptIdsByGame.get(versionedGameId) ?? null : null,
+      },
+    );
+  };
+  const foreign = [];
+  const unbound = [];
   const calls = new Map();
   let duplicateCount = 0;
   const conflicts = [];
@@ -840,6 +869,11 @@ function summarizeReceipts(receipts, games, gaps) {
       gaps.push('RECEIPT_INVALID');
       continue;
     }
+    const binding = bindingOf(receipt);
+    // Another run or another attempt of this run never fills this run's
+    // coverage (#359); the join already classified both cases.
+    if (binding.binding === 'foreign' || binding.attemptMatches === false) { foreign.push(`tool:${receipt.toolCallId}`); continue; }
+    if (binding.binding === 'unbound') unbound.push(`tool:${receipt.toolCallId}`);
     const key = canonicalJson([receipt.scope.runId ?? null, receipt.scope.versionedGameId ?? null, receipt.cliAttempt ?? null,
       receipt.scope.attemptId ?? null, receipt.toolCallId]);
     const body = canonicalJson(receipt);
@@ -861,15 +895,113 @@ function summarizeReceipts(receipts, games, gaps) {
     if (observed !== reported) countDiscrepancies.push({ versionedGameId: game.versionedGameId, reportedToolCalls: reported, toolReceipts: observed });
   }
   if (countDiscrepancies.length) gaps.push('RECEIPTS_COUNT_MISMATCH');
-  const incompleteContext = (context ?? []).filter((receipt) => receipt?.schema !== CONTEXT_RECEIPT_SCHEMA
-    || receipt.coverage?.complete !== true);
+  const boundContext = [];
+  const contextByGame = new Map();
+  // Per logical request evidence: #359 requires prepared + dispatch/response
+  // evidence, or an explicit failed-before-dispatch explanation - never a count
+  // of whatever receipts happen to be present.
+  const requestEvidence = new Map();
+  for (const receipt of context ?? []) {
+    if (!receipt?.scope || typeof receipt.scope !== 'object') {
+      gaps.push('RECEIPT_INVALID');
+      continue;
+    }
+    const binding = bindingOf(receipt);
+    if (binding.binding === 'foreign' || binding.attemptMatches === false) { foreign.push(`context:${receipt.requestSequence ?? '?'}`); continue; }
+    if (binding.binding === 'unbound') unbound.push(`context:${receipt.requestSequence ?? '?'}`);
+    boundContext.push(receipt);
+    const versionedGameId = String(receipt.scope.versionedGameId ?? '').toLowerCase();
+    if (!contextByGame.has(versionedGameId)) contextByGame.set(versionedGameId, new Set());
+    if (Number.isSafeInteger(receipt.requestSequence)) contextByGame.get(versionedGameId).add(receipt.requestSequence);
+    if (Number.isSafeInteger(receipt.requestSequence)) {
+      const key = `${versionedGameId}\0${receipt.requestSequence}`;
+      if (!requestEvidence.has(key)) {
+        requestEvidence.set(key, {
+          versionedGameId,
+          requestSequence: receipt.requestSequence,
+          phases: new Map(),
+          attempts: new Set(),
+          responses: new Set(),
+        });
+      }
+      const evidence = requestEvidence.get(key);
+      const phase = String(receipt.phase ?? 'unknown');
+      evidence.phases.set(phase, (evidence.phases.get(phase) ?? 0) + 1);
+      if (phase === 'dispatch-attempt' && Number.isSafeInteger(receipt.httpAttempt)) evidence.attempts.add(receipt.httpAttempt);
+      if (phase === 'response-observed' && Number.isSafeInteger(receipt.httpAttempt)) evidence.responses.add(receipt.httpAttempt);
+    }
+  }
+  if (foreign.length) gaps.push('FOREIGN_RECEIPT_EVIDENCE');
+  if (unbound.length) gaps.push('UNBOUND_RECEIPT_EVIDENCE');
+  // A receipt that explains why a request never reached the provider is not an
+  // incomplete coverage; every other incomplete receipt is.
+  const incompleteContext = boundContext.filter((receipt) => receipt?.schema !== CONTEXT_RECEIPT_SCHEMA
+    || (receipt.coverage?.complete !== true && receipt.phase !== 'failed-before-dispatch'));
   if (incompleteContext.length) gaps.push('CONTEXT_COVERAGE_INCOMPLETE');
+  const explanationFor = (evidence) => {
+    const prepared = evidence.phases.get('prepared') ?? 0;
+    const failed = evidence.phases.get('failed-before-dispatch') ?? 0;
+    if (prepared === 0 && failed === 0) return 'missing-prepared-evidence';
+    if (prepared > 1 || failed > 1) return 'duplicate-request-phase';
+    if (prepared === 1 && evidence.attempts.size === 0) return 'missing-dispatch-evidence';
+    // A recorded response to an attempt that was never dispatched means the
+    // dispatch evidence was removed.
+    if ([...evidence.responses].some((attempt) => !evidence.attempts.has(attempt))) return 'missing-dispatch-evidence';
+    if (evidence.attempts.size) {
+      const attempts = [...evidence.attempts].sort((left, right) => left - right);
+      if (attempts[0] !== 1 || attempts.some((attempt, index) => attempt !== index + 1)) return 'missing-http-attempt';
+      const observed = evidence.phases.get('response-observed') ?? 0;
+      if (observed < attempts.length - 1) return 'missing-response-evidence';
+    }
+    return null;
+  };
+  const unexplainedRequests = [...requestEvidence.values()]
+    .map((evidence) => ({ evidence, reason: explanationFor(evidence) }))
+    .filter((entry) => entry.reason !== null);
+  if (unexplainedRequests.length) gaps.push('CONTEXT_COVERAGE_INCOMPLETE');
+  // #359: coverage is checked against the real logical request cardinality, not
+  // against the receipts that happen to be present. A proven zero-request run
+  // is complete-empty; observed model calls with no context receipt, or fewer
+  // observed requests than the reported model calls, are an explicit gap.
+  const contextCoverage = [];
+  for (const game of games) {
+    const reported = game.metrics?.modelCalls;
+    const observed = contextByGame.get(game.versionedGameId)?.size ?? 0;
+    const unexplained = unexplainedRequests.some((entry) => entry.evidence.versionedGameId === game.versionedGameId);
+    let status;
+    if (!Number.isSafeInteger(reported)) status = 'unknown';
+    else if (reported === 0 && observed === 0) status = 'complete-empty';
+    else if (observed === 0) status = 'incomplete';
+    else if (observed < reported) status = 'incomplete';
+    else status = 'complete';
+    if (unexplained) status = 'incomplete';
+    if (status === 'incomplete') gaps.push('CONTEXT_COVERAGE_INCOMPLETE');
+    contextCoverage.push({
+      versionedGameId: game.versionedGameId,
+      reportedModelCalls: Number.isSafeInteger(reported) ? reported : null,
+      observedRequests: contextByGame.has(game.versionedGameId) ? observed : null,
+      status,
+    });
+  }
+  if (contextCoverage.some((entry) => entry.status === 'unknown')) {
+    // An unknown request cardinality is never certifiable coverage.
+    gaps.push('CONTEXT_COVERAGE_UNKNOWN');
+  }
   return {
     toolReceiptCount: calls.size,
     duplicateCount,
     conflicts,
-    contextReceiptCount: context?.length ?? null,
+    // Bound context receipts only: a foreign run's receipts never fill this
+    // run's coverage, so they are not counted here either.
+    contextReceiptCount: boundContext.length,
     incompleteContextReceipts: incompleteContext.length,
+    contextCoverage,
+    unexplainedRequests: unexplainedRequests.slice(0, 64).map(({ evidence, reason }) => ({
+      versionedGameId: evidence.versionedGameId,
+      requestSequence: evidence.requestSequence,
+      reason,
+    })),
+    auditGaps: recordedGaps.length,
     countDiscrepancies,
     toolCalls: [...calls.values()].slice(0, 20_000).map(({ receipt }) => ({
       scope: receipt.scope,
@@ -912,7 +1044,10 @@ function summarizeTerminals(terminals, games, gaps) {
     if (discrepancies.length) gaps.push('TERMINAL_ACCOUNTING_MISMATCH');
     out.push({
       executionId: record.executionId ?? null,
+      processOutcome: record.processOutcome ?? null,
       executionOutcome: record.executionOutcome ?? null,
+      taskWon: typeof record.taskWon === 'boolean' ? record.taskWon : null,
+      finalErrorObserved: typeof record.finalErrorObserved === 'boolean' ? record.finalErrorObserved : null,
       primaryReason: record.cancellation?.primaryReason ?? null,
       additionalReasons: record.cancellation?.additionalReasons ?? [],
       drain: record.drain ?? null,
@@ -1077,10 +1212,17 @@ function runOutcome(games, terminals, gaps, receiptTerminals = { foreign: [], un
   const errorObserved = games.some((game) => game.outcome.errorObserved === true)
     ? true
     : games.length && games.every((game) => game.outcome.errorObserved === false) ? false : null;
+  // #361: the run-level status stays re-derived from the bound game terminals
+  // (the execution terminal only describes how the child process and its own
+  // task ended), and those task outcomes are surfaced next to it.
+  const taskOutcomes = [...new Set(terminals
+    .map((record) => (typeof record.executionOutcome === 'string' ? record.executionOutcome : null))
+    .filter(Boolean))].sort();
   if (status === 'unknown') gaps.push(conflicts.length ? 'TERMINAL_CONFLICT' : 'OUTCOME_UNKNOWN');
   if (status === 'censored') gaps.push('OUTCOME_CENSORED');
   return {
     status,
+    taskOutcomes,
     finalScope: 'run',
     terminalEvidenceRefs: games.flatMap((game) => game.outcome.terminalEvidenceRefs).slice(0, 256),
     errorObserved,
@@ -1433,7 +1575,10 @@ function deriveGaps(run) {
   if (run.artifactAvailability?.trajectory !== 'present') gaps.push('TRAJECTORY_NOT_PRESENT');
   if (run.artifactAvailability?.receipts !== 'present') gaps.push('RECEIPTS_NOT_PRESENT');
   if (run.receipts && (run.receipts.conflicts?.length || run.receipts.countDiscrepancies?.length
-      || run.receipts.incompleteContextReceipts > 0)) gaps.push('RECEIPTS_NOT_CONSISTENT');
+      || run.receipts.incompleteContextReceipts > 0
+      || (run.receipts.unexplainedRequests ?? []).length > 0
+      || (run.receipts.contextCoverage ?? []).some((entry) => entry.status === 'incomplete' || entry.status === 'unknown')
+      || receiptsLoseContextEvidence(run))) gaps.push('RECEIPTS_NOT_CONSISTENT');
   if ((run.executionTerminals ?? []).some((record) => record.auditGaps?.length || record.discrepancies?.length)) {
     gaps.push('TERMINALS_NOT_CONSISTENT');
   }
@@ -1458,6 +1603,21 @@ function deriveGaps(run) {
   if (run.progress?.sourceSchema !== 'avo.benchmark-report') gaps.push('LEGACY_REPORT_SCHEMA');
   // The derived codes are summaries; they are checked for presence by class.
   return gaps.filter((code) => !(run.audit?.gaps ?? []).some((reported) => GAP_CLASSES[code]?.includes(reported.split(':')[0])));
+}
+
+// #359: deleting the whole context-receipt class must be detectable from the
+// projected facts alone - the report's own model-call cardinality against a
+// receipt projection that carries no request evidence at all.
+function receiptsLoseContextEvidence(run) {
+  const receipts = run.receipts;
+  if (!receipts) return false;
+  const reported = (run.games ?? []).reduce(
+    (sum, game) => sum + (Number.isSafeInteger(game.metrics?.modelCalls) ? game.metrics.modelCalls : 0),
+    0,
+  );
+  if (reported <= 0) return false;
+  return (receipts.contextReceiptCount ?? 0) === 0
+    || (Array.isArray(receipts.contextCoverage) && receipts.contextCoverage.length === 0);
 }
 
 const GAP_CLASSES = Object.freeze({

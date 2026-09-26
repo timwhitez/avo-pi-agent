@@ -102,7 +102,10 @@ test('X02 operator cancel, spontaneous error exit and an unexplained signal get 
 
   const failed = await run(childScript({ exitCode: 3 }), { executionId: 'exec-x02b' });
   assert.equal(failed.terminal.receipt.cancellation, null, 'a spontaneous exit is never called a cancellation');
-  assert.equal(failed.terminal.receipt.executionOutcome, 'error');
+  // #361 Z01: a nonzero exit is a process fact, superseded by the task outcome
+  // (no trusted task terminal exists here, so the task stays unknown).
+  assert.equal(failed.terminal.receipt.processOutcome, 'error');
+  assert.equal(failed.terminal.receipt.executionOutcome, 'unknown');
   assert.equal(failed.terminal.receipt.process.exitCode, 3);
 
   // Nothing requested a cancellation: the child is killed from outside.
@@ -229,7 +232,10 @@ test('X07 only the owned child tree is terminated; no signal is sent after the c
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(kill.mock.callCount(), callsAtClose, 'a late cancel sends no signal to a closed (possibly reused) id');
     assert.equal(result.terminal.receipt.cancellation, null);
-    assert.equal(result.terminal.receipt.executionOutcome, 'completed');
+    // #361 Z01: exit 0 without any trusted task terminal proves the process
+    // completed, never the task; the assertion moved to its correct field.
+    assert.equal(result.terminal.receipt.processOutcome, 'completed');
+    assert.equal(result.terminal.receipt.executionOutcome, 'unknown');
     const cancel = new AbortController();
     await run(childScript(), { executionId: 'exec-x07b', signal: cancel.signal }, { onMessage: (m) => { if (m?.type === 'ready') cancel.abort(); } });
   } finally {

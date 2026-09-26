@@ -14,6 +14,7 @@ import {
   readAuditInputManifest,
   validateTrajectoryAudit,
 } from '../src/trajectory/audit-export.mjs';
+import { contextReceiptsFor } from './support/context-receipts.mjs';
 
 // Issue #343: synthetic, redacted fixtures only. The original exporter is
 // source-unavailable, so these are forward-contract tests of the single
@@ -328,8 +329,15 @@ test('E11 a crash before MANIFEST leaves an incomplete export and existing outpu
 test('E12 the real CLI exports, validates and reads back; exit codes follow audit readiness', () => {
   const complete = setup([{ runId: 'r18', report: { runId: 'r18', completeness: expectedGames(['a-v1']), aggregates: { mechanismMetrics: metrics({ modelCalls: 3 }) }, games: [game('a-v1', metrics({ modelCalls: 3 }))] },
     trajectory: [finished('r18', 1, 'a-v1', false)],
-    // #344: forward runs need their receipts to be audit-ready.
-    receipts: { schema: 'avo.trajectory-audit-receipts.v1', toolReceipts: [], contextReceipts: [], executionTerminals: [] } }]);
+    // #344/#359: forward runs need their receipts to be audit-ready, and the
+    // context coverage is checked against this report's own model calls, so the
+    // fixture carries real-shaped receipts for the three logical requests.
+    receipts: {
+      schema: 'avo.trajectory-audit-receipts.v1',
+      toolReceipts: [],
+      contextReceipts: contextReceiptsFor({ runId: 'r18', versionedGameId: 'a-v1', modelCalls: 3 }),
+      executionTerminals: [],
+    } }]);
   const incomplete = setup([{ runId: 'r19', report: { runId: 'r19', games: [game('a-v1', undefined)] } }]);
   try {
     const ok = spawnSync(process.execPath, ['scripts/export-trajectory-audit.mjs', '--input-manifest', complete.manifestFile,
