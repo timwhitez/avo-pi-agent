@@ -327,12 +327,21 @@ function normalizeEvent(value, sourceFile, line) {
     sourceLine: line,
     runId: value.run_id || value.runId || payload.run_id || payload.runId || null,
     gameId: normalizeGameId(value.game_id || value.gameId || payload.game_id || payload.gameId),
+    // Scope fields come from the recorder record itself; absent values stay
+    // null instead of being inferred from file names or ordering.
+    versionedGameId: normalizeVersionedGameId(value.game_id || value.gameId || payload.game_id || payload.gameId),
+    attemptId: optionalIdentifier(value.attempt_id ?? value.attemptId ?? payload.attempt_id ?? payload.attemptId),
+    episodeId: optionalEpisode(value.episode ?? value.episodeId ?? payload.episode ?? payload.episodeId),
+    clockDomain: `recorder-file:${sourceFile}`,
     kind: String(value.kind || value.type || payload.kind || payload.type || 'unknown'),
     type: value.type || payload.type || null,
     sequence: finiteNumber(value.sequence ?? value.cursor ?? payload.sequence ?? payload.cursor, line),
     monotonicNs: finiteNumber(value.monotonic_ns ?? value.monotonicNs ?? payload.monotonic_ns ?? payload.monotonicNs, 0),
     operation: String(payload.operation || response?.operation || '').toLowerCase() || null,
     action: payload.action || response?.action || payload.request?.action || null,
+    // The forwarded payload is kept only when the recorder captured it; a
+    // missing field is unknown, never an empty object or rationale-derived.
+    ...actionDataFields(payload),
     frameHash: payload.frame_sha256 || payload.frameHash || response?.frame_sha256 || response?.frameHash || null,
     state: payload.state ?? response?.state ?? null,
     levelsCompleted: payload.levels_completed ?? payload.levelsCompleted ?? response?.levels_completed ?? response?.levelsCompleted ?? null,
@@ -383,6 +392,31 @@ function finiteNumber(value, fallback) {
     if (Number.isFinite(number)) return number;
   }
   return fallback;
+}
+
+function actionDataFields(payload) {
+  for (const key of ['action_data', 'actionData']) {
+    if (Object.hasOwn(payload, key)) return { actionData: payload[key] ?? null, actionDataKnown: true };
+  }
+  if (isRecord(payload.request) && Object.hasOwn(payload.request, 'data')) {
+    return { actionData: payload.request.data ?? null, actionDataKnown: true };
+  }
+  return { actionData: null, actionDataKnown: false };
+}
+
+function normalizeVersionedGameId(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_.-]{0,127}$/.test(text) && normalizeGameId(text) ? text : null;
+}
+
+function optionalIdentifier(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(text) ? text : null;
+}
+
+function optionalEpisode(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function normalizeGameId(value) {
