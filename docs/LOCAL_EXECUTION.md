@@ -28,7 +28,12 @@ not enabled by default.
 
 - `npm run mission-control:validate`: locked UI install, tests, audit and build.
 - `npm run benchmark:local`: full public benchmark; calls external services.
-- `npm run repair:local`: experimental detector-guided repeated real runs.
+- `npm run repair:local`: one real run followed by trajectory analysis. Detector
+  findings are classified (contract violation, behavioural signal, execution
+  incident) and reported for review; none is written to agent memory
+  automatically and no further round starts on its own. Exit codes: `0` clean,
+  `2` review required (signals or evidence gaps), `1` failure (not
+  authoritative, detector error, contract violation or unrecovered incident).
 - `npm run complete:local`: combined UI/root/preflight/repair workflow.
 
 The combined and repair workflows can be expensive. They are not prerequisites

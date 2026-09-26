@@ -4,6 +4,7 @@ import {
 } from '../local/numeric.mjs';
 import { evaluatePublicRunCapsule } from '../benchmark/run-capsule-authority.mjs';
 import { evaluateScorecardCoverage } from '../benchmark/scorecard-evidence.mjs';
+import { ANALYSIS_SCHEMA, verifyAnalysisCoverage } from './analyzer.mjs';
 
 export function evaluateRoundAuthority({
   roundId,
@@ -124,15 +125,38 @@ export function evaluateRoundAuthority({
   reasons.push(...capsuleAuthority.reasons);
 
   requireCondition(String(analysis?.runId || '') === String(roundId || ''), 'trajectory analysis runId does not match the requested round', reasons);
-  requireCondition(acceptance.allRegisteredDetectorsExecuted === true, 'not every registered trajectory detector executed', reasons);
-  requireCondition(detectorCountExpected !== null && detectorCountExpected > 0, 'trajectory detector registry is empty or malformed', reasons);
-  requireCondition(
-    detectorCountExecuted !== null
-      && detectorCountExpected !== null
-      && detectorCountExecuted === detectorCountExpected,
-    'trajectory detector coverage is incomplete',
-    reasons,
-  );
+  // Current analyses are validated from their coverage records; legacy v1
+  // analyses keep the original executed-count gate unchanged.
+  const analysisSchema = analysis?.schema === undefined ? 'legacy-v1' : analysis.schema;
+  const currentSchema = analysisSchema === ANALYSIS_SCHEMA;
+  const detectorAccounting = currentSchema ? verifyAnalysisCoverage(analysis) : null;
+  if (analysisSchema !== 'legacy-v1' && !currentSchema) {
+    reasons.push('trajectory analysis schema is not supported');
+  } else if (currentSchema) {
+    requireCondition(detectorAccounting.allRegisteredDetectorsAccountedFor
+      && acceptance.allRegisteredDetectorsAccountedFor === true
+      && nonNegativeIntegerOrNull(acceptance.scopeRecordCount) === detectorAccounting.scopeRecordCount,
+    'not every registered trajectory detector is accounted for in every scope', reasons);
+    requireCondition(detectorAccounting.statusCounts.error === 0, 'one or more trajectory detectors failed', reasons);
+    requireCondition(
+      expectedGames.length > 0
+        && expectedGames.every((gameId) => Object.hasOwn(recordOrEmpty(analysis?.perGame), gameId)),
+      'trajectory analysis does not cover every expected game scope',
+      reasons,
+    );
+    requireCondition(detectorCountExpected !== null && detectorCountExpected === detectorAccounting.detectorRegistryCount,
+      'trajectory detector registry is empty or malformed', reasons);
+  } else {
+    requireCondition(acceptance.allRegisteredDetectorsExecuted === true, 'not every registered trajectory detector executed', reasons);
+    requireCondition(detectorCountExpected !== null && detectorCountExpected > 0, 'trajectory detector registry is empty or malformed', reasons);
+    requireCondition(
+      detectorCountExecuted !== null
+        && detectorCountExpected !== null
+        && detectorCountExecuted === detectorCountExpected,
+      'trajectory detector coverage is incomplete',
+      reasons,
+    );
+  }
   requireCondition(parseErrorCount !== null && parseErrorCount === 0, 'trajectory corpus contains parse errors or an invalid parse-error count', reasons);
   requireCondition(acceptance.trajectoryIntegrityPassed === true, 'trajectory-integrity gate did not pass', reasons);
   requireCondition(integrity.passed === true, 'method-aware recorder integrity did not pass', reasons);
@@ -152,10 +176,15 @@ export function evaluateRoundAuthority({
   }
 
   const authoritative = reasons.length === 0;
+  const detectorCoverageComplete = currentSchema
+    ? detectorAccounting.applicableCoverageComplete
+    : acceptance.allRegisteredDetectorsExecuted === true;
   const clean = authoritative
     && analysis?.clean === true
     && findingCount === 0
-    && openFindingCount === 0;
+    && openFindingCount === 0
+    && (!currentSchema || (detectorCoverageComplete
+      && Array.isArray(analysis?.findings) && analysis.findings.length === 0));
 
   return Object.freeze({
     schemaVersion: 4,
@@ -168,8 +197,11 @@ export function evaluateRoundAuthority({
       : { value: null, origin: String(officialScore?.origin || 'unavailable') },
     expectedGameCount: expectedGames.length,
     expectedGames,
+    analysisSchema,
     detectorCountExpected,
     detectorCountExecuted,
+    detectorCoverageComplete,
+    detectorStatusCounts: detectorAccounting?.statusCounts ?? null,
     findingCount,
     openFindingCount,
     recorderSchemaVersion,
@@ -178,8 +210,57 @@ export function evaluateRoundAuthority({
     runCapsuleHash: capsuleAuthority.capsuleHash,
     runClass: capsuleAuthority.runClass,
     runCapsuleComparable: capsuleAuthority.comparable,
-    rule: 'authoritative requires one comparable clean-worktree run capsule, a nonce-bound real-provider freshness proof, official runtime, exact duplicate-free public set, strict numeric official score and counts, method-aware recorder, complete detector coverage and zero parse/integrity errors; clean additionally requires zero findings of any status',
+    rule: 'authoritative requires one comparable clean-worktree run capsule, a nonce-bound real-provider freshness proof, official runtime, exact duplicate-free public set, strict numeric official score and counts, method-aware recorder, every detector accounted for without errors and zero parse/integrity errors; clean additionally requires complete applicable detector evidence and zero findings of any status or kind',
   });
+}
+
+/**
+ * The single post-round decision for automatic repair runners. No automatic
+ * outcome writes memory or starts another round: behavioural signals and
+ * evidence gaps require review, contract violations and unrecovered incidents
+ * require a program/execution repair, and only the unchanged clean authority
+ * completes. Exit codes: 0 complete, 2 review required, 1 failure.
+ */
+export function decideRoundOutcome({ authority, analysis } = {}) {
+  const base = { memoryWrites: 0, continueRounds: false };
+  if (authority?.authoritative !== true) {
+    return {
+      ...base, status: 'failed', stage: 'round-authority', exitCode: 1, conclusion: 'not-authoritative',
+      reasons: Array.isArray(authority?.reasons) ? authority.reasons : ['round authority is absent'],
+    };
+  }
+  const findings = Array.isArray(analysis?.findings) ? analysis.findings : [];
+  if (analysis?.schema === ANALYSIS_SCHEMA) {
+    const accounting = verifyAnalysisCoverage(analysis);
+    if (accounting.statusCounts.error > 0 || !accounting.allRegisteredDetectorsAccountedFor) {
+      return {
+        ...base, status: 'failed', stage: 'detector-error', exitCode: 1, conclusion: 'analysis-failed',
+        reasons: ['trajectory detection failed or is unaccounted; this is not a game-policy finding'],
+      };
+    }
+    const blocking = findings.filter((finding) => finding.kind === 'contract-violation'
+      || (finding.kind === 'execution-incident' && finding.resolution !== 'recovered'));
+    if (blocking.length) {
+      return {
+        ...base, status: 'repair-required', stage: 'contract-or-incident', exitCode: 1, conclusion: 'program-or-execution-repair',
+        reasons: blocking.slice(0, 20).map((finding) => `${finding.kind}: ${finding.detectorId}`),
+      };
+    }
+    if (!accounting.applicableCoverageComplete) {
+      return {
+        ...base, status: 'review-required', stage: 'detector-evidence-insufficient', exitCode: 2, conclusion: 'undetermined',
+        reasons: [`${accounting.statusCounts.insufficientEvidence} detector scope(s) lack necessary evidence`],
+      };
+    }
+  }
+  if (findings.length > 0 || authority.clean !== true) {
+    return {
+      ...base, status: 'review-required', stage: findings.length ? 'findings-require-review' : 'authority-not-clean',
+      exitCode: 2, conclusion: 'undetermined',
+      reasons: [`${findings.length} finding(s) require review; none is applied automatically`],
+    };
+  }
+  return { ...base, status: 'complete', stage: 'clean', exitCode: 0, conclusion: 'clean', reasons: [] };
 }
 
 function requireCondition(condition, reason, reasons) {

@@ -26,6 +26,8 @@ export { MEMORY_READ_SECTIONS };
 
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
+export const MEMORY_FILE_MAX_BYTES = DEFAULT_MAX_MEMORY_BYTES;
+const MAX_MEMORY_LIST_VALUES = 200;
 const MEMORY_SCHEMA_VERSION = 5;
 const MAX_CLAIMS = 1000;
 const MAX_CLAIM_REFS = 16;
@@ -504,8 +506,7 @@ export class PersistentMemory {
         this.data[key] = { ...this.data[key], ...boundedValue(patch[key]) };
       } else {
         const values = Array.isArray(patch[key]) ? patch[key] : [patch[key]];
-        const merged = [...this.data[key], ...values.map((value) => boundedValue(value))];
-        this.data[key] = dedupe(merged).slice(-200);
+        this.data[key] = appendBoundedMemoryValues(this.data[key], values);
       }
     }
     this.save();
@@ -933,6 +934,21 @@ function validIsoTime(value) {
 
 function safe(value) {
   return String(value).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+}
+
+/**
+ * Appends JSON values to a retained memory list without mutating either input.
+ * Only new values are bounded; existing values keep their stored domain. The
+ * first occurrence of a JSON-encoded value wins and the last 200 are retained.
+ */
+export function appendBoundedMemoryValues(existing, additions) {
+  if (!Array.isArray(existing) || !Array.isArray(additions)) {
+    throw new TypeError('memory list values must be arrays');
+  }
+  return dedupe([
+    ...existing,
+    ...additions.map((value) => boundedValue(value)),
+  ]).slice(-MAX_MEMORY_LIST_VALUES);
 }
 
 function dedupe(values) {
