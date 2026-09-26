@@ -20,6 +20,7 @@ import {
   receiptsFromPrivateLog,
 } from '../src/trajectory/audit-events.mjs';
 import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
+import { contextReceiptsFor } from './support/context-receipts.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 import { sendText, sendToolCall, withLoopback } from './support/responses-loopback.mjs';
 
@@ -361,6 +362,24 @@ test('V03 a pre-dispatch failure is explained; zero requests is proven, missing 
   const unknown = exportWith([], { modelCalls: null, toolCalls: 0, observeCalls: 0, trajectoryReadCalls: 0 });
   assert.ok(unknown.audit.gaps.includes('CONTEXT_COVERAGE_UNKNOWN'), JSON.stringify(unknown.audit.gaps));
   assert.equal(unknown.audit.ready, false);
+});
+
+test('V02c a second Agent attempt that restarts requestSequence is its own requests, not a duplicate phase', () => {
+  // #359: coverage is per run/game/attempt. Each attempt's Pi loop numbers its
+  // requests from 1, so attempt 2's request 1 is a different logical request.
+  const lines = [
+    ...contextReceiptsFor({ runId: RUN_ID, versionedGameId: GAME, modelCalls: 2, attemptId: 'attempt-000001', cliAttempt: 1 })
+      .map((receipt) => receiptLogLine(bindCliReceipt(receipt, { runId: RUN_ID, versionedGameId: GAME, cliAttempt: 1 }))),
+    ...contextReceiptsFor({ runId: RUN_ID, versionedGameId: GAME, modelCalls: 2, attemptId: 'attempt-000002', cliAttempt: 1 })
+      .map((receipt) => receiptLogLine(bindCliReceipt(receipt, { runId: RUN_ID, versionedGameId: GAME, cliAttempt: 1 }))),
+  ];
+  const run = exportWith(lines, { modelCalls: 4, toolCalls: 0, observeCalls: 0, trajectoryReadCalls: 0 });
+  assert.equal(run.audit.gaps.includes('CONTEXT_COVERAGE_INCOMPLETE'), false, JSON.stringify(run.audit.gaps));
+  assert.deepEqual(run.receipts.contextCoverage.map((entry) => [entry.status, entry.observedRequests]), [['complete', 4]]);
+  // Removing attempt 2's dispatch evidence is still detected per attempt.
+  const broken = exportWith(lines.filter((line) => !(line.includes('attempt-000002') && line.includes('dispatch-attempt'))),
+    { modelCalls: 4, toolCalls: 0, observeCalls: 0, trajectoryReadCalls: 0 });
+  assert.ok(broken.audit.gaps.includes('CONTEXT_COVERAGE_INCOMPLETE'), JSON.stringify(broken.audit.gaps));
 });
 
 test('V03b an unknown request cardinality is a faithful export the independent validator accepts, never audit-ready', () => {
