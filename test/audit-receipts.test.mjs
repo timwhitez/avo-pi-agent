@@ -21,6 +21,7 @@ import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs'
 import { canonicalJson } from '../src/local/canonical-json.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 import { sendText, sendToolCall, withLoopback } from './support/responses-loopback.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 // Issue #344: receipts from the real Agent + installed Pi + local Responses
 // fixture (fake key). Every assertion reads receipts the production wrapper
@@ -91,7 +92,7 @@ function scripted(calls) {
 }
 
 function tempRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'avo-receipts-'));
+  return temporaryDirectory('avo-receipts-');
 }
 
 test('T01 two ACTION6 calls with different coordinates and identical returned pixels stay distinct', async () => {

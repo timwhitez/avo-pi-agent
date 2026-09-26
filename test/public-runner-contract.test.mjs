@@ -30,9 +30,10 @@ import { buildRunLaunch, loadExactRunReport } from '../apps/mission-control-v3/l
 import { verifyLiveObservation } from './support/live-observation.mjs';
 import { readRunObservation } from '../src/benchmark/run-observation.mjs';
 import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-public-contract-'));
+  const root = temporaryDirectory('avo-public-contract-');
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
   fs.mkdirSync(path.join(root, 'runs'));

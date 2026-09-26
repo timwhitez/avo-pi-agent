@@ -14,6 +14,7 @@ import {
   validateLockedSecurityFloors,
   validateSecurityFloors,
 } from '../src/local/mission-control-validation.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const SAFE_DEPENDENCIES = Object.freeze({
   '@copilotkit/react-core': '1.2.3',
@@ -149,7 +150,7 @@ test('Mission Control child environment strips provider, ARC, GitHub and unknown
 });
 
 function makeFixture({ includeLock = true, includeTest = true } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-mission-control-'));
+  const root = temporaryDirectory('avo-mission-control-');
   const app = path.join(root, 'apps', 'mission-control-v3');
   fs.mkdirSync(path.join(app, 'test'), { recursive: true });
   const manifest = {

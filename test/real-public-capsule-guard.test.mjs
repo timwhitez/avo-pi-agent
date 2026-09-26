@@ -8,11 +8,12 @@ import crypto from 'node:crypto';
 
 import { sealRunCapsule, writeRunCapsule } from '../src/benchmark/run-capsule.mjs';
 import { summarizeEvidenceEvents } from '../src/core/evidence-store.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const runner = path.resolve('scripts/run-real-public.mjs');
 
 function interruptedRun() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-real-resume-'));
+  const root = temporaryDirectory('avo-real-resume-');
   const runId = 'resume-contract';
   const privateDir = path.join(root, 'runs', 'private', runId);
   fs.mkdirSync(privateDir, { recursive: true });

@@ -6,11 +6,12 @@ import path from 'node:path';
 import { OfflineDemoEnvironment } from '../src/arc/offline-demo.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import { frameHash } from '../src/core/observation.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const inertLoop = { kind: 'test', async run() { return { messages: [], error: null }; } };
 
 test('durable production hypotheses preserve causal ordering across restart and full reset', async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-hypothesis-order-'));
+  const memoryDir = temporaryDirectory('avo-hypothesis-order-');
   const raw = { game_id: 'ordering', frame: [[1, 0]], state: 'PLAYING',
     levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'] };
   const environment = { async start() { return raw; }, async step() { return raw; },
@@ -66,7 +67,7 @@ test('durable production hypotheses preserve causal ordering across restart and 
 });
 
 test('production tools confirm repeated predictions without claiming behavior evolution', async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-evaluator-'));
+  const memoryDir = temporaryDirectory('avo-evaluator-');
   try {
     const environment = new OfflineDemoEnvironment({ id: 'evaluator-game', size: 5 });
     const agent = new AvoArcAgent({
@@ -111,7 +112,7 @@ test('production tools confirm repeated predictions without claiming behavior ev
 });
 
 test('a predicted no-op is confirmation only and survives a durable restart', async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-evaluator-hash-'));
+  const memoryDir = temporaryDirectory('avo-evaluator-hash-');
   const raw = {
     game_id: 'evaluator-hash',
     frame: [[1, 0], [0, 0]],

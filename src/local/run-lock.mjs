@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { ensureAuthorityDirectory } from './authority-directory.mjs';
@@ -8,6 +9,7 @@ import { parseWorkspaceGuardian, workspaceGuardianClean } from './workspace-owne
 
 const LOCK_NAME = '.local-execution.lock';
 const LOCK_MAX_BYTES = 16 * 1024;
+const GUARDIAN_DIRECTORY_PREFIX = 'avo-guardian-';
 
 export function acquireLocalExecutionLock({
   root = process.cwd(),
@@ -46,6 +48,7 @@ export function acquireLocalExecutionLock({
       } catch (cause) {
         throw new Error('failed to reclaim stale local execution lock', { cause });
       }
+      removeReleasedGuardian(current.value.workspaceGuardian);
     }
   }
 
@@ -249,6 +252,36 @@ function releaseOwnedLock(authority, lockFile, token, identity) {
     throw new Error('refusing to release a local execution lock before workspace cleanup is confirmed');
   }
   removeExactLock(authority, lockFile, identity);
+  removeReleasedGuardian(current.value.workspaceGuardian);
+}
+
+// A released guardian directory holds no further evidence: its closed.json
+// receipt was the last consumer. Delete it only after the lock file itself was
+// removed, and only when every structural check proves the recorded path is the
+// throwaway directory owned by this lock. Never recurse, never follow a link.
+function removeReleasedGuardian(guardian) {
+  try {
+    if (!guardian || !workspaceGuardianClean(guardian)) return;
+    const { directory } = parseWorkspaceGuardian(guardian);
+    const resolved = path.resolve(directory);
+    if (!path.basename(resolved).startsWith(GUARDIAN_DIRECTORY_PREFIX)) return;
+    const stat = fs.lstatSync(resolved, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+    const real = fs.realpathSync(resolved);
+    if (path.dirname(real) !== fs.realpathSync(os.tmpdir())) return;
+    if (!path.basename(real).startsWith(GUARDIAN_DIRECTORY_PREFIX)) return;
+    const entries = fs.readdirSync(real);
+    if (entries.length !== 1 || entries[0] !== 'closed.json') return;
+    const receipt = path.join(real, 'closed.json');
+    const receiptStat = fs.lstatSync(receipt, { bigint: true });
+    if (receiptStat.isSymbolicLink() || !receiptStat.isFile()) return;
+    fs.unlinkSync(receipt);
+    fs.rmdirSync(real);
+  } catch (error) {
+    try {
+      process.stderr.write(`local execution lock: guardian directory cleanup skipped: ${error?.message || error}\n`);
+    } catch {}
+  }
 }
 
 function removeExactLock(authority, lockFile, identity) {

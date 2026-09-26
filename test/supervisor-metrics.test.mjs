@@ -6,9 +6,10 @@ import path from 'node:path';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
 import { aggregateAttemptTelemetry } from '../src/benchmark/report-records.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 test('production attempt counts exceed history retention and aggregate retries once', async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-supervisor-metrics-'));
+  const memoryDir = temporaryDirectory('avo-supervisor-metrics-');
   const runAttempt = async (episodes, policyProfile = 'current-v1') => {
     let actions = 0;
     const raw = () => ({ game_id: 'countergame', frame: [[0]], state: 'NOT_FINISHED',

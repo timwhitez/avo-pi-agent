@@ -30,9 +30,10 @@ import { fingerprint } from '../src/benchmark/redaction.mjs';
 import { providerCapabilityDigest } from '../src/provider-capabilities.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 import { workspaceAttestationFixture } from './support/run-capsule.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 function temporaryRoot(prefix = 'avo-capsule-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return temporaryDirectory(prefix);
 }
 
 function initialState(overrides = {}) {
