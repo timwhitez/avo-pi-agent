@@ -1,11 +1,78 @@
 import * as base from './analyzer.mjs';
+import { extractGameRecords } from '../benchmark/report-records.mjs';
+import { policyUsesStrategy } from '../core/policy-profile.mjs';
 import {
   loadMemoryByGame,
   loadTrajectoryEvents,
 } from './evidence-loader.mjs';
 
 export const DETECTOR_IDS = base.DETECTOR_IDS;
+export const ANALYSIS_SCHEMA = base.ANALYSIS_SCHEMA;
+export const verifyAnalysisCoverage = base.verifyAnalysisCoverage;
 export { loadMemoryByGame, loadTrajectoryEvents };
+
+/**
+ * Structured analysis inputs derived from one benchmark report: per-game
+ * terminal outcomes from the validated game records and the strategy
+ * capability of the sealed policy profile. Unavailable or invalid sources
+ * yield null, which detectors report as insufficient evidence.
+ */
+export function analysisInputsFromReport(report) {
+  let gameOutcomes = null;
+  try {
+    gameOutcomes = report ? extractGameRecords(report) : null;
+  } catch {
+    gameOutcomes = null;
+  }
+  return { gameOutcomes, capabilities: strategyCapability(report?.provenance?.runCapsule?.policyProfile) };
+}
+
+// null for a non-string/empty value; undefined for a well-formed but unknown
+// profile name (e.g. from a newer build), which is not a malformed source.
+function derivedStrategy(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    return policyUsesStrategy(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function strategyFailure(strategy) {
+  return strategy === undefined ? 'profile-unknown' : 'shape-invalid';
+}
+
+/**
+ * Resolves the strategy capability from the sealed capsule's policy profile.
+ * The production builder and its public projection emit an object
+ * `{requested, effective}`; `effective` is authoritative and an explicitly
+ * declared `strategyEnabled` must agree with it. A bare profile name is the
+ * known legacy report shape. Anything missing, malformed or contradictory
+ * stays null with a source/shape/conflict reason; unknown is never false.
+ */
+function strategyCapability(profile) {
+  if (typeof profile === 'string') {
+    const strategy = derivedStrategy(profile);
+    return typeof strategy !== 'boolean'
+      ? { strategy: null, strategyReason: strategyFailure(strategy), strategySource: 'legacy-string' }
+      : { strategy, strategyReason: null, strategySource: 'legacy-string' };
+  }
+  if (profile === undefined || profile === null) {
+    return { strategy: null, strategyReason: 'source-missing', strategySource: null };
+  }
+  if (typeof profile !== 'object' || Array.isArray(profile)) {
+    return { strategy: null, strategyReason: 'shape-invalid', strategySource: null };
+  }
+  const source = { strategySource: 'run-capsule-object' };
+  const strategy = derivedStrategy(profile.effective);
+  if (typeof strategy !== 'boolean') return { strategy: null, strategyReason: strategyFailure(strategy), ...source };
+  if (Object.prototype.hasOwnProperty.call(profile, 'strategyEnabled')) {
+    const declared = profile.strategyEnabled;
+    if (typeof declared !== 'boolean') return { strategy: null, strategyReason: 'shape-invalid', ...source };
+    if (declared !== strategy) return { strategy: null, strategyReason: 'conflict', ...source };
+  }
+  return { strategy, strategyReason: null, ...source };
+}
 
 export function redactedAnalysis(analysis) {
   return {
@@ -125,6 +192,19 @@ export function analyzeTrajectory(args) {
       { expectedGames: games, observedGames },
     ));
   }
+  for (const [gameId, summary] of Object.entries(analysis.perGame || {})) {
+    const conflicts = summary?.identityConflicts || {};
+    if ((conflicts.runIds || []).length || (conflicts.versionedGameIds || []).length) {
+      findings.push(integrityFinding(
+        'game-identity-conflict',
+        gameId,
+        `Trajectory events for ${gameId} carry conflicting run or versioned-game identities.`,
+        'One short game identifier maps to several run/version identities, so scoped windows cannot be merged.',
+        'Preserve both scopes and repair the recorder or corpus selection before any clean claim.',
+        { runIds: conflicts.runIds || [], versionedGameIds: conflicts.versionedGameIds || [] },
+      ));
+    }
+  }
   if (unknownOperationResponses > 0) {
     findings.push(integrityFinding(
       'unknown-arc-operation',
@@ -157,13 +237,22 @@ function integrityFinding(code, gameId, summary, rootCause, remediation, details
     id: `trajectory-integrity:${code}:${gameId || 'global'}`,
     detectorId: 'trajectory-integrity',
     gameId,
+    kind: 'contract-violation',
+    scope: { runId: null, gameId: gameId || null, versionedGameId: null, attemptId: null, episodeId: null },
+    evidenceStatus: 'sufficient',
+    automaticRepairEligible: false,
+    invariant: code,
+    expected: null,
+    observed: details,
     severity: 'critical',
-    confidence: 1,
+    confidence: null,
+    confidenceStatus: 'structural',
     status: 'open',
     summary,
     rootCause,
     remediation,
     evidenceRange: null,
+    evidenceRefs: [],
     details,
   };
 }

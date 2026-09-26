@@ -18,17 +18,17 @@ import {
 import { finiteNumberOrNull } from '../src/local/numeric.mjs';
 import { redactRuntimeSecrets } from '../src/redaction.mjs';
 import {
+  analysisInputsFromReport,
   analyzeTrajectory,
   loadMemoryByGame,
   loadTrajectoryEvents,
   redactedAnalysis,
 } from '../src/trajectory/analyzer-v2.mjs';
 import {
-  applyRepairPlan,
   buildRepairPlan,
   redactedRepairPlan,
 } from '../src/trajectory/repairs.mjs';
-import { evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
+import { decideRoundOutcome, evaluateRoundAuthority } from '../src/trajectory/round-authority.mjs';
 import { readPrivateRunCapsuleEvidence } from '../src/benchmark/run-capsule-evidence.mjs';
 import { resolveRunOutputState } from '../src/trajectory/repair-state.mjs';
 
@@ -119,6 +119,7 @@ try {
       parseErrors: loaded.parseErrors,
       expectedGames,
       requireExpectedGames: true,
+      ...analysisInputsFromReport(benchmark),
       config: {
         actionBudget: optionalInteger(process.env.AVO_MAX_ACTIONS, 1, 100_000, 'AVO_MAX_ACTIONS'),
         repeatedStateWindow: optionalInteger(process.env.AVO_STALL_WINDOW, 2, 10_000, 'AVO_STALL_WINDOW'),
@@ -139,10 +140,9 @@ try {
       analysis,
       privateCapsuleEvidence,
     });
+    // Review record only: automatic findings never obtain memory writes.
     const plan = buildRepairPlan(analysis, round);
-    const outcomes = authority.authoritative && !authority.clean && plan.infrastructureFindingCount === 0
-      ? applyRepairPlan(roundMemoryDir, plan)
-      : [];
+    const decision = decideRoundOutcome({ authority, analysis });
     const provenance = buildRoundProvenance({
       roundId,
       benchmarkFile,
@@ -175,7 +175,8 @@ try {
       openFindingCount: authority.openFindingCount,
       infrastructureFindingCount: plan.infrastructureFindingCount,
       repairDirectiveCount: plan.agentRepairableFindingCount,
-      repairOutcomes: outcomes,
+      decision,
+      memoryWrites: decision.memoryWrites,
       provenance,
       metrics: extractStrictRoundMetrics(benchmark, analysis),
     };
@@ -194,48 +195,23 @@ try {
     summary.final = publicRound(record);
     writeSummaries();
 
-    if (!authority.authoritative) {
-      summary.status = 'failed';
-      summary.failure = {
-        stage: safeStage(benchmark?.failedStage || 'round-authority'),
-        round,
-        reasons: authority.reasons,
-        message: 'The round is not authoritative and cannot be used for score comparison or agent repair.',
-      };
-      break;
-    }
-    if (authority.clean) {
-      summary.status = 'complete';
-      summary.clean = true;
-      break;
-    }
-    if (plan.infrastructureFindingCount > 0) {
-      summary.status = 'failed';
-      summary.failure = {
-        stage: 'infrastructure-findings',
-        round,
-        message: 'Trajectory infrastructure findings must be repaired before agent-quality iteration.',
-      };
-      break;
-    }
-    const applied = outcomes.filter((outcome) => outcome.applied === true).length;
-    if (applied === 0) {
-      summary.status = 'failed';
-      summary.failure = {
-        stage: 'repair-guidance-application',
-        round,
-        message: 'Authoritative dirty round produced no durable per-game repair guidance.',
-      };
-      break;
-    }
-    if (round === maxRounds - 1) {
-      summary.status = 'exhausted';
-      summary.failure = {
-        stage: 'repair-round-limit',
-        round,
-        message: 'Findings remain after the configured real-provider rounds; clean=false.',
-      };
-    }
+    // One analysed round ends the automatic run: there is no automatic memory
+    // write and no implicit rerun. Review and program repairs are explicit.
+    summary.status = decision.status;
+    summary.clean = decision.status === 'complete';
+    summary.decision = decision;
+    summary.failure = decision.status === 'complete' ? null : {
+      stage: decision.stage === 'round-authority' ? safeStage(benchmark?.failedStage || 'round-authority') : decision.stage,
+      round,
+      reasons: decision.reasons,
+      message: decision.status === 'review-required'
+        ? 'Findings or evidence gaps require review; no memory was written and no further round was started.'
+        : decision.status === 'repair-required'
+          ? 'Contract violations or unrecovered execution incidents require a program or execution repair.'
+          : 'The round is not authoritative or detection failed; it cannot be used for score comparison or agent repair.',
+    };
+    process.exitCode = decision.exitCode;
+    break;
   }
 } catch (error) {
   summary.status = interrupted ? 'interrupted' : 'failed';
@@ -272,7 +248,7 @@ console.log(JSON.stringify({
   final: summary.final,
   publicSummary: `runs/public/trajectory-repair-${baseRunId}.redacted.json`,
 }));
-if (!process.exitCode) process.exitCode = summary.clean ? 0 : 2;
+if (process.exitCode === undefined) process.exitCode = summary.clean ? 0 : 1;
 
 async function runBenchmark(roundId, traceDir, memoryRoot, workspaceRoot) {
   const child = spawn(process.execPath, ['scripts/run-real-public.mjs'], {
@@ -363,7 +339,8 @@ function writeSummaries() {
     final: summary.final,
     rounds: summary.rounds.map(publicRound),
     failure: summary.failure,
-    acceptanceRule: 'clean=true only after one comparable clean-worktree run capsule, an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector executed, zero parse errors and zero findings of any status',
+    decision: summary.decision ? { status: summary.decision.status, stage: summary.decision.stage, conclusion: summary.decision.conclusion } : null,
+    acceptanceRule: 'clean=true only after one comparable clean-worktree run capsule, an authoritative complete local real-provider public run with official score, v5 recorder integrity, every detector accounted for with complete applicable evidence, zero parse errors and zero findings of any status or kind; findings are reviewed, never written to memory automatically',
   };
   writeAuthorityJson(path.join(publicRoot, `trajectory-repair-${baseRunId}.redacted.json`), publicSummary, { root: publicRoot });
 }
@@ -384,8 +361,14 @@ function publicRound(record) {
     trajectoryFileCount: record.trajectoryFileCount,
     trajectoryBytes: record.trajectoryBytes,
     trajectoryEventCount: record.trajectoryEventCount,
+    analysisSchema: record.detectorCoverage?.schema ?? null,
     detectorsExecuted: strictNonNegativeInteger(record.detectorCoverage?.detectorCountExecuted),
     detectorsExpected: strictNonNegativeInteger(record.detectorCoverage?.detectorCountExpected),
+    detectorStatusCounts: record.detectorCoverage?.statusCounts ?? null,
+    decision: record.decision
+      ? { status: record.decision.status, stage: record.decision.stage, conclusion: record.decision.conclusion }
+      : null,
+    memoryWrites: strictNonNegativeInteger(record.memoryWrites),
     findingCount: strictNonNegativeInteger(record.findingCount),
     openFindingCount: strictNonNegativeInteger(record.openFindingCount),
     infrastructureFindingCount: strictNonNegativeInteger(record.infrastructureFindingCount),
