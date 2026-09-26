@@ -363,6 +363,38 @@ test('V03 a pre-dispatch failure is explained; zero requests is proven, missing 
   assert.equal(unknown.audit.ready, false);
 });
 
+test('V03b an unknown request cardinality is a faithful export the independent validator accepts, never audit-ready', () => {
+  // The exporter records CONTEXT_COVERAGE_UNKNOWN; the validator must accept
+  // that code for the receipt-consistency class instead of calling it omitted.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-coverage-unknown-'));
+  try {
+    const source = path.join(root, 'source');
+    fs.mkdirSync(path.join(source, 'trajectory'), { recursive: true });
+    fs.writeFileSync(path.join(source, 'report.json'), JSON.stringify({
+      runId: RUN_ID,
+      completeness: { complete: true, expectedCount: 1, actualCount: 1, gameIds: ['coverage'], versionedGameIds: [GAME] },
+      games: [{ gameId: GAME, state: 'GAME_OVER', levelsCompleted: 0, totalLevels: 3, actions: 0 }],
+    }));
+    fs.writeFileSync(path.join(source, 'trajectory', 'arc.jsonl'),
+      `${JSON.stringify({ run_id: RUN_ID, sequence: 1, kind: 'game.finished', game_id: GAME, error: false })}\n`);
+    fs.writeFileSync(path.join(source, 'receipts.json'), JSON.stringify(receiptsFromPrivateLog('')));
+    const manifestFile = path.join(root, 'input.json');
+    fs.writeFileSync(manifestFile, JSON.stringify({ schema: AUDIT_INPUT_SCHEMA, sourceRoot: source,
+      runs: [{ runId: RUN_ID, report: 'report.json', trajectoryDir: 'trajectory', receipts: 'receipts.json' }] }));
+    const output = path.join(root, 'out');
+    const exported = spawnSync(process.execPath, [CLI, '--input-manifest', manifestFile, '--output-dir', output], { encoding: 'utf8' });
+    assert.equal(exported.status, 0, `${exported.stdout}${exported.stderr}`);
+    const summary = JSON.parse(exported.stdout);
+    assert.equal(summary.valid, true, JSON.stringify(summary));
+    assert.equal(summary.runs[0].auditReady, false);
+    assert.ok(summary.runs[0].gaps.includes('CONTEXT_COVERAGE_UNKNOWN'), JSON.stringify(summary.runs[0].gaps));
+    const readBack = spawnSync(process.execPath, [CLI, '--validate-output', output], { encoding: 'utf8' });
+    assert.equal(readBack.status, 0, readBack.stdout);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('V06 deleting the gap event or the whole terminal class downgrades the run; diagnostics stay', () => {
   const gapLine = lineOf(buildAuditGap({
     scope: { runId: RUN_ID, versionedGameId: GAME },
