@@ -12,7 +12,12 @@ import {
   preflightResponsesProvider,
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
-import { openLogFile } from '../src/benchmark/process-runner.mjs';
+import {
+  assertExecutionTerminalPolicy,
+  openLogFile,
+  progressIdlePolicies,
+  readExecutionPolicy,
+} from '../src/benchmark/process-runner.mjs';
 import { assertAuditComplete, executeOwnedChild, readTaskTerminal } from '../src/benchmark/runner-execution.mjs';
 import { ledgerBaseline, reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
@@ -20,6 +25,7 @@ import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.m
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
 import {
   assertExperimentArcRuntime,
+  assertExperimentInitialState,
   assertExperimentCapsule,
   assertExperimentEnvironment,
   loadExperimentRunFromEnvironment,
@@ -65,9 +71,6 @@ if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
 
-const experimentRun = loadExperimentRunFromEnvironment(process.env);
-if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
-
 const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
 const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
 const root = process.cwd();
@@ -78,29 +81,39 @@ const privateRoot = path.join(runsRoot, 'private');
 const privateDir = path.join(privateRoot, runId);
 const publicDir = path.join(runsRoot, diagnostic ? 'diagnostic' : 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
-fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
-fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
-// AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run.
-// Comparable recovery requires the exact original run capsule; changed
-// conditions are allowed only as an explicitly non-comparable diagnostic.
-const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
+let provider = null;
+let executionPolicy = null;
+let experimentRun = null;
 let resumeContext = null;
-if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
-  if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
-  resumeContext = assertResumableContext({ privateDir, publicFile, runId });
-  console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
-  // Regenerable private artifacts from earlier passes would trip exclusive
-  // copy/write guards. The original capsule, provenance and checkpoints stay.
-  const staleRawReport = path.join(privateDir, 'raw-run-report.json');
-  if (fs.existsSync(staleRawReport)) fs.unlinkSync(staleRawReport);
-  removeAcceptedResumeArtifact(path.join(privateDir, 'manifest.private.json'), resumeContext.manifestEvidence);
-  removeAcceptedResumeArtifact(publicFile, resumeContext.publicEvidence);
-}
-if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
-
-let provider;
 const stage = { value: 'configuration' };
 try {
+  // #362: the effective execution policy (#346 watchdog) is parsed exactly
+  // once, at the configuration stage. It lives inside the failure-reporting
+  // try so a malformed value is a structured configuration failure instead of
+  // an uncaught crash, while the experiment environment check, the sealed
+  // experiment binding, the process runner's real watchdog and the execution
+  // terminal all consume this same frozen value; nothing below re-reads it.
+  executionPolicy = readExecutionPolicy(process.env);
+  experimentRun = loadExperimentRunFromEnvironment(process.env, { executionPolicy });
+  if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
+  fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
+  // AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run.
+  // Comparable recovery requires the exact original run capsule; changed
+  // conditions are allowed only as an explicitly non-comparable diagnostic.
+  const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
+  if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
+    if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
+    resumeContext = assertResumableContext({ privateDir, publicFile, runId });
+    console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
+    // Regenerable private artifacts from earlier passes would trip exclusive
+    // copy/write guards. The original capsule, provenance and checkpoints stay.
+    const staleRawReport = path.join(privateDir, 'raw-run-report.json');
+    if (fs.existsSync(staleRawReport)) fs.unlinkSync(staleRawReport);
+    removeAcceptedResumeArtifact(path.join(privateDir, 'manifest.private.json'), resumeContext.manifestEvidence);
+    removeAcceptedResumeArtifact(publicFile, resumeContext.publicEvidence);
+  }
+  if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
   if (diagnostic) {
     requestedDiagnosticGames = diagnosticSelection(process.argv.slice(2));
     if (experimentRun) throw new Error('diagnostic selection cannot override a sealed experiment plan');
@@ -112,6 +125,7 @@ try {
     provider,
     config,
     git: inspectGitCheckout(root),
+    executionPolicy,
   });
   const runState = prepareRunState({
     root,
@@ -133,6 +147,8 @@ try {
       assertRunStateMatchesInitial(runState.currentState, resumeContext.originalCapsule.definition.initialState);
     }
   }
+  // The prepared initial state is checked before any provider request.
+  assertExperimentInitialState(experimentRun, runState.initialState);
   stage.value = 'workspace-preflight';
   console.log('[real-run] attesting the initialized workspace capability');
   const workspaceAttestation = await attestWorkspaceCapability(config);
@@ -238,7 +254,7 @@ try {
   const stdoutFile = path.join(privateDir, 'runner.stdout.log');
   const stderrFile = path.join(privateDir, 'runner.stderr.log');
   console.log(`[real-run] executing ${games.length} public games with production Pi loop`);
-  const timeoutMs = benchmarkTimeout();
+  const timeoutMs = executionPolicy.jobDeadlineMs;
   const childArgs = experimentRun || diagnostic
     ? ['src/cli.mjs', 'run-public', `--game=${games.map((game) => game.versionedGameId).join(',')}`]
     : ['src/cli.mjs', 'run-public', '--all'];
@@ -300,7 +316,7 @@ try {
       // The production runner has no unfinished-work collector: the record says
       // so explicitly (`coverage: "unknown"`) instead of reporting an empty set.
       unfinished: () => null,
-      policies: progressIdlePolicies(),
+      policies: progressIdlePolicies(executionPolicy),
       reconcile: () => reconcileLedgerAccounting({
         memoryDir: runState.memoryDir,
         gameIds: ledgerGameIds,
@@ -364,6 +380,7 @@ try {
   if (child.status !== 0) {
     throw new Error(`production public runner exited status=${child.status} signal=${child.signal || 'none'} stderr_tail=${child.stderr.slice(-2000)}`);
   }
+  assertExecutionTerminalPolicy(child.terminal?.receipt ?? null, executionPolicy);
 
   stage.value = 'artifact-discovery';
   // With a pinned run ID the child writes a deterministic report filename,
@@ -557,37 +574,6 @@ try {
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
   process.exitCode = 1;
-}
-
-function progressIdlePolicies() {
-  const raw = process.env.AVO_PROGRESS_IDLE_MS;
-  if (raw === undefined || raw === '') return [];
-  const thresholdMs = Number(raw);
-  if (!Number.isSafeInteger(thresholdMs) || thresholdMs < 60_000) {
-    throw new Error('AVO_PROGRESS_IDLE_MS must be an integer of at least 60000');
-  }
-  const lastActions = new Map();
-  return [{
-    kind: 'environment-progress-idle',
-    thresholdMs,
-    activitySource: 'game.progress committed action count increase',
-    configuredSource: 'AVO_PROGRESS_IDLE_MS',
-    isActivity(message) {
-      if (message?.type !== 'game.progress' || !Number.isSafeInteger(message.actions)) return false;
-      const key = String(message.gameId);
-      const increased = message.actions > (lastActions.get(key) ?? -1);
-      lastActions.set(key, Math.max(message.actions, lastActions.get(key) ?? -1));
-      return increased;
-    },
-  }];
-}
-
-function benchmarkTimeout() {
-  const value = Number(process.env.AVO_BENCHMARK_TIMEOUT_MS || 12 * 60 * 60 * 1000);
-  if (!Number.isFinite(value) || value < 60_000 || value > 48 * 60 * 60 * 1000) {
-    throw new Error('AVO_BENCHMARK_TIMEOUT_MS must be between 60000 and 172800000');
-  }
-  return Math.trunc(value);
 }
 
 function safeRunId(value) {

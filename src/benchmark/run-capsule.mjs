@@ -80,6 +80,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/arc/bridge-client.mjs',
   'src/arc/action-budget.mjs',
   'src/benchmark/experiment-protocol.mjs',
+  'src/benchmark/experiment-v2.mjs',
   'src/benchmark/mechanism-metrics.mjs',
   'src/benchmark/resume-cache.mjs',
   'src/benchmark/report-records.mjs',

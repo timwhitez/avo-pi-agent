@@ -157,6 +157,8 @@ export function privateRunCapsuleEvidenceFixture({
   gameBudgets = null,
   trajectoryStarts = null,
   createdAt = '2026-08-30T00:00:00Z',
+  // Per-arm source identity for experiment v2 fixtures; defaults keep v1 bytes.
+  source = null,
 } = {}) {
   const capsule = privateRunCapsuleFixture({
     runId,
@@ -168,6 +170,7 @@ export function privateRunCapsuleEvidenceFixture({
     gameBudgets,
     trajectoryStarts,
     createdAt,
+    source,
   });
   const text = `${JSON.stringify(capsule, null, 2)}\n`;
   return Object.freeze({
@@ -289,10 +292,11 @@ function privateRunCapsuleFixture({
   gameBudgets,
   trajectoryStarts,
   createdAt,
+  source,
 }) {
   const capabilities = providerCapabilities('high');
   const capabilityManifestSha256 = providerCapabilityDigest(capabilities);
-  const providerToolSchemaSha256 = 'f'.repeat(64);
+  const providerToolSchemaSha256 = source?.providerToolSchemaSha256 ?? 'f'.repeat(64);
   const initialState = {
     mode: 'cold-start',
     snapshotName: 'cold-test-run',
@@ -302,7 +306,7 @@ function privateRunCapsuleFixture({
     workspace: { sha256: '2'.repeat(64), fileCount: 0, bytes: 0, empty: true },
     ...initialStateOverrides,
   };
-  const components = { 'src/cli.mjs': '3'.repeat(64) };
+  const components = source?.components ?? { 'src/cli.mjs': '3'.repeat(64) };
   const nodeTree = { name: 'avo-pi-arc-agi3', version: '0.1.0', dependencies: {} };
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
   const actionBudgetPolicy = { multiplier: 2, fallback: 80 };
@@ -319,13 +323,13 @@ function privateRunCapsuleFixture({
     versionedGameId,
     trajectoryEvidence: summarizeEvidenceEvents([]),
   }));
-  const toolContract = effectiveAvoToolContract('files-only', policyProfile);
+  const toolContract = source?.toolContract ?? effectiveAvoToolContract('files-only', policyProfile);
   return sealRunCapsule({
     schema: 'avo.run-capsule.v2',
     runId,
     git: {
       commit: gitCommit,
-      tree: '2'.repeat(40),
+      tree: source?.gitTree ?? '2'.repeat(40),
       clean: true,
       dirtyStateSha256: '4'.repeat(64),
     },
@@ -338,6 +342,7 @@ function privateRunCapsuleFixture({
       initialTemplateSha256: digest({ policyProfile, renderer: policyInitialPrompt.toString() }),
       runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
       compactionNoticeTemplateSha256: '6'.repeat(64),
+      ...source?.prompts,
     },
     tools: {
       schemaSha256: digest(toolContract),
