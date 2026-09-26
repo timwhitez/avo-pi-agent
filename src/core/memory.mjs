@@ -7,6 +7,11 @@ import { normalizeHypothesis } from './evaluator.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { wasAtomicWriteCommitted, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 import {
+  CLAIM_ID,
+  CLAIM_STATUSES,
+  MEMORY_READ_SECTIONS,
+  normalizeJournalRead,
+  normalizeMemoryRead,
   decodeCursor,
   encodeCursor,
   fitsBound,
@@ -17,36 +22,19 @@ import {
   resolveToolResultMaxChars,
 } from './bounded-read.mjs';
 
+export { MEMORY_READ_SECTIONS };
+
 const MAX_PATCH_BYTES = 64 * 1024;
 const DEFAULT_MAX_MEMORY_BYTES = 16 * 1024 * 1024;
 const MEMORY_SCHEMA_VERSION = 5;
 const MAX_CLAIMS = 1000;
 const MAX_CLAIM_REFS = 16;
 const MAX_CLAIM_CONTENT = 2000;
-const CLAIM_ID = /^claim-[0-9]{6,16}$/;
 const EVIDENCE_ID = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
-const CLAIM_STATUSES = new Set(['proposed', 'confirmed', 'contradicted', 'superseded']);
 const ACTIVE_CLAIM_STATUSES = new Set(['proposed', 'confirmed']);
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const JOURNAL_READ_SCHEMA = 'avo.journal-read.v1';
 const MEMORY_READ_SCHEMA = 'avo.memory-read.v1';
-const JOURNAL_READ_KEYS = new Set([
-  'view', 'proposalLimit', 'evaluationLimit', 'collection', 'limit', 'cursor',
-  'recordId', 'offset', 'expectedSha256',
-]);
-const MEMORY_READ_KEYS = new Set([
-  'view', 'query', 'status', 'startSequence', 'limit', 'claimId', 'section', 'offset', 'expectedSha256',
-]);
-export const MEMORY_READ_SECTIONS = Object.freeze([
-  'actionSemantics',
-  'objects',
-  'goals',
-  'invariants',
-  'failedHypotheses',
-  'provenStrategies',
-  'notes',
-  'supervisorInterventions',
-]);
 
 function initial(gameId) {
   return {
@@ -968,130 +956,6 @@ function readBound(maxChars, tool) {
     throw new Error(`${tool} requires a positive tool result bound`);
   }
   return bound;
-}
-
-function plainObject(value) {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-function readString(value, maxLength) {
-  if (typeof value !== 'string' || value.length > maxLength) {
-    throw readRequestError('INVALID_READ_REQUEST');
-  }
-  return value;
-}
-
-function readInteger(value, min, max) {
-  if (!Number.isSafeInteger(value) || value < min || value > max) {
-    throw readRequestError('INVALID_READ_REQUEST');
-  }
-  return value;
-}
-
-function readOptionalSha256(value) {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !SHA256_HEX.test(value)) {
-    throw readRequestError('INVALID_READ_REQUEST');
-  }
-  return value;
-}
-
-function assertOnlyKeys(input, allowed) {
-  for (const key of Object.keys(input)) {
-    if (!allowed.has(key)) throw readRequestError('INVALID_READ_REQUEST');
-  }
-}
-
-function normalizeJournalRead(input) {
-  if (!plainObject(input)) throw readRequestError('INVALID_READ_REQUEST');
-  assertOnlyKeys(input, JOURNAL_READ_KEYS);
-  const view = input.view === undefined ? 'recent' : input.view;
-  if (view === 'recent') {
-    assertOnlyKeys(input, new Set(['view', 'proposalLimit', 'evaluationLimit']));
-    return {
-      view,
-      proposalLimit: input.proposalLimit === undefined
-        ? 100 : readInteger(input.proposalLimit, 1, 200),
-      evaluationLimit: input.evaluationLimit === undefined
-        ? 100 : readInteger(input.evaluationLimit, 1, 200),
-    };
-  }
-  if (view === 'list') {
-    assertOnlyKeys(input, new Set(['view', 'collection', 'limit', 'cursor']));
-    if (!JOURNAL_COLLECTIONS.includes(input.collection)) {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    return {
-      view,
-      collection: input.collection,
-      limit: input.limit === undefined ? 20 : readInteger(input.limit, 1, 200),
-      cursor: input.cursor === undefined ? undefined : readString(input.cursor, 2048),
-    };
-  }
-  if (view === 'record') {
-    assertOnlyKeys(input, new Set(['view', 'collection', 'recordId', 'offset', 'expectedSha256']));
-    if (input.collection !== 'proposals' && input.collection !== 'evaluations') {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    const pattern = input.collection === 'proposals' ? PROPOSAL_ID : EVALUATION_ID;
-    if (typeof input.recordId !== 'string' || !pattern.test(input.recordId)) {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    return {
-      view,
-      collection: input.collection,
-      recordId: input.recordId,
-      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
-      expectedSha256: readOptionalSha256(input.expectedSha256),
-    };
-  }
-  throw readRequestError('INVALID_READ_REQUEST');
-}
-
-function normalizeMemoryRead(input) {
-  if (!plainObject(input)) throw readRequestError('INVALID_READ_REQUEST');
-  assertOnlyKeys(input, MEMORY_READ_KEYS);
-  const view = input.view === undefined ? 'claims' : input.view;
-  if (view === 'claims') {
-    assertOnlyKeys(input, new Set(['view', 'query', 'status', 'startSequence', 'limit']));
-    if (input.status !== undefined
-        && (typeof input.status !== 'string' || (input.status !== 'all' && !CLAIM_STATUSES.has(input.status)))) {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    return {
-      view,
-      query: input.query === undefined ? '' : readString(input.query, 1000),
-      status: input.status === undefined ? 'all' : input.status,
-      startSequence: input.startSequence === undefined
-        ? 1 : readInteger(input.startSequence, 1, Number.MAX_SAFE_INTEGER),
-      limit: input.limit === undefined ? 4 : readInteger(input.limit, 1, 8),
-    };
-  }
-  if (view === 'record') {
-    assertOnlyKeys(input, new Set(['view', 'claimId', 'offset', 'expectedSha256']));
-    if (typeof input.claimId !== 'string' || !CLAIM_ID.test(input.claimId)) {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    return {
-      view,
-      claimId: input.claimId,
-      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
-      expectedSha256: readOptionalSha256(input.expectedSha256),
-    };
-  }
-  if (view === 'section') {
-    assertOnlyKeys(input, new Set(['view', 'section', 'offset', 'expectedSha256']));
-    if (typeof input.section !== 'string' || !MEMORY_READ_SECTIONS.includes(input.section)) {
-      throw readRequestError('INVALID_READ_REQUEST');
-    }
-    return {
-      view,
-      section: input.section,
-      offset: input.offset === undefined ? 0 : readInteger(input.offset, 0, Number.MAX_SAFE_INTEGER),
-      expectedSha256: readOptionalSha256(input.expectedSha256),
-    };
-  }
-  throw readRequestError('INVALID_READ_REQUEST');
 }
 
 function readClaimSummary(claim) {

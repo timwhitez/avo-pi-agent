@@ -26,6 +26,8 @@ const runId = safeId(options.runId || `local-${Date.now().toString(36)}-${crypto
 const repositoryRoot = path.resolve('.');
 const privateExecutionRoot = path.resolve('runs/private');
 const publicRoot = path.resolve('runs/public');
+// Group entry may re-execute this script; it must precede filesystem effects.
+const scope = await enterOwnedRun();
 ensureAuthorityDirectory(privateExecutionRoot, { root: repositoryRoot, purpose: 'local completion private runtime directory' });
 ensureAuthorityDirectory(publicRoot, { root: repositoryRoot, purpose: 'local completion public report directory' });
 const reportFile = path.join(publicRoot, `local-complete-${runId}.redacted.json`);
@@ -35,7 +37,6 @@ for (const file of [reportFile, missionControlPath, repairPath]) {
   if (fs.existsSync(file)) throw new Error('local completion evidence already exists for this run ID');
 }
 
-const scope = await enterOwnedRun();
 const lock = acquireLocalExecutionLock({ runId, kind: 'complete-local' });
 process.env.AVO_LOCAL_LOCK_TOKEN = lock.token;
 let activeChild = null;

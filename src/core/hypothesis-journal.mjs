@@ -1,12 +1,10 @@
 import crypto from 'node:crypto';
 import { normalizeHypothesis } from './evaluator.mjs';
-import { previewText } from './bounded-read.mjs';
+import { EVALUATION_ID, JOURNAL_COLLECTIONS, PROPOSAL_ID, previewText } from './bounded-read.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 
 const OUTCOMES = new Set(['confirmed', 'contradicted', 'inconclusive', 'expired']);
-export const PROPOSAL_ID = /^proposal-[a-f0-9]{12}$/;
-export const EVALUATION_ID = /^(evaluation|attempt)-[a-f0-9]{12}$/;
-export const JOURNAL_COLLECTIONS = Object.freeze(['proposals', 'evaluations', 'pending']);
+export { EVALUATION_ID, JOURNAL_COLLECTIONS, PROPOSAL_ID };
 
 const SNAPSHOT_SCHEMA = 'avo.journal-collection-snapshot.v1';
 
