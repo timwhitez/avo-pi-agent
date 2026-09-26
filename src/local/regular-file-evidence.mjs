@@ -87,6 +87,23 @@ export function readRegularFileEvidence(file, {
   }
 }
 
+/**
+ * True when `file` is still the regular file described by a public identity
+ * returned from readRegularFileEvidence/readJsonFileEvidence. A best-effort
+ * change check, not a compare-and-swap.
+ */
+export function matchesRegularFileIdentity(file, expected) {
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    if (!stat.isFile()) return false;
+    const current = publicIdentity(identity(stat, Number.MAX_SAFE_INTEGER, 'file'));
+    return current.dev === expected?.dev && current.ino === expected?.ino && current.size === expected?.size
+      && current.mtimeNs === expected?.mtimeNs && current.ctimeNs === expected?.ctimeNs;
+  } catch {
+    return false;
+  }
+}
+
 export function readJsonFileEvidence(file, {
   root = path.dirname(path.resolve(file)),
   maxBytes = DEFAULT_MAX_BYTES,

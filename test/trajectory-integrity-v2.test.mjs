@@ -37,15 +37,29 @@ function transition(sequence, overrides = {}) {
 }
 
 test('accepts clean only with method-aware recorder and real frame-backed transitions', () => {
+  const withEvidence = { actionData: null, actionDataKnown: true };
   const analysis = analyzeTrajectory({
-    events: [start(), transition(2), transition(3)],
+    events: [start(), transition(2, withEvidence), transition(3, withEvidence)],
     expectedGames: ['ls20'],
+    gameOutcomes: [{ gameId: 'ls20', won: true, state: 'WIN', error: null, terminationReason: null }],
+    capabilities: { strategy: false },
   });
   assert.equal(analysis.integrity.passed, true);
   assert.equal(analysis.integrity.recorderSchemaVersion, 5);
   assert.equal(analysis.integrity.transitionGameCount, 1);
   assert.equal(analysis.acceptance.trajectoryIntegrityPassed, true);
   assert.equal(analysis.clean, true);
+
+  // #342: the same corpus without terminal outcomes, capability evidence or
+  // recorded action payloads has evidence gaps and cannot be clean.
+  const gaps = analyzeTrajectory({
+    events: [start(), transition(2), transition(3)],
+    expectedGames: ['ls20'],
+  });
+  assert.equal(gaps.integrity.passed, true);
+  assert.equal(gaps.clean, false);
+  assert.equal(gaps.acceptance.applicableCoverageComplete, false);
+  assert.ok(gaps.acceptance.statusCounts.insufficientEvidence > 0);
 });
 
 test('rejects an empty-transition corpus even when ordinary detectors find nothing', () => {
