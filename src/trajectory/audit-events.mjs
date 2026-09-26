@@ -401,11 +401,28 @@ function contentVersion(receipt) {
  * representation and chunk range. Different selectors with equal bodies stay
  * different keys. An incomplete selector has no key (no identity is made up).
  */
+// Full identity of one read stream (#357/#360): run, versioned game and the
+// real Agent attempt. The CLI attempt is a correlation aid only; it is never
+// the stream key, so two games that reuse cliAttempt=1 stay independent.
+function identityOf(receipt) {
+  const scope = receipt?.scope ?? {};
+  return {
+    runId: scope.runId ?? null,
+    versionedGameId: scope.versionedGameId ?? null,
+    gameId: scope.gameId ?? null,
+    attemptId: scope.attemptId ?? null,
+  };
+}
+
+function baseCallId(toolCallId) {
+  return String(toolCallId ?? '').split('|')[0];
+}
+
 export function readKey(receipt) {
   const version = contentVersion(receipt);
   if (!version || receipt.selectorCompleteness !== 'complete' || !receipt.selectorSha256) return null;
   return sha256(canonicalJson({
-    scope: { runId: receipt.scope?.runId ?? null, attemptId: receipt.scope?.attemptId ?? null, cliAttempt: receipt.cliAttempt ?? null },
+    identity: identityOf(receipt),
     toolName: receipt.toolName,
     selectorSha256: receipt.selectorSha256,
     contentVersion: version,
@@ -419,20 +436,30 @@ export function readKey(receipt) {
  * next request, which already contains this result) and a history of read
  * keys delivered before. Pure and deterministic; used online and offline.
  *   history: { has(key): boolean, complete: boolean }
+ *
+ * Visibility is only derivable from an origin payload we can read in full: a
+ * missing or byte-bounded origin, or history coverage that is not complete,
+ * stays unknown. An empty history is never proof that nothing was delivered,
+ * and an origin that claims full visibility against a history that never
+ * delivered the key is a conflict, not new content.
  */
 export function classifyRead(receipt, { origin = null, history }) {
   const key = readKey(receipt);
   const currentOutcome = receipt.outcome;
+  const originProven = origin !== null && origin !== undefined && origin.coverage?.complete === true;
   let priorVisibility = 'unknown';
-  if (origin && Array.isArray(origin.visibleToolResults)) {
+  if (originProven && Array.isArray(origin.visibleToolResults)) {
     const sameSelector = origin.visibleToolResults.filter((entry) => entry.selectorSha256 && entry.selectorSha256 === receipt.selectorSha256);
     const full = sameSelector.some((entry) => entry.delivery === 'complete' && entry.contentVersion === receipt.deliveredTextSha256
       && entry.wireMatchesHost !== false);
     if (full) priorVisibility = 'full';
     else if (sameSelector.some((entry) => entry.delivery === 'elided' || entry.delivery === 'truncated')) priorVisibility = 'reduced';
-    else if (origin.coverage?.complete === true) priorVisibility = 'absent';
+    else priorVisibility = 'absent';
   }
-  const seenBefore = key === null ? 'unknown' : history.has(key) ? 'yes' : history.complete ? 'no' : 'unknown';
+  const seenBefore = !originProven || key === null
+    ? 'unknown'
+    : history.has(key) ? 'yes' : history.complete === true ? 'no' : 'unknown';
+  const conflict = originProven && history.complete === true && priorVisibility === 'full' && seenBefore === 'no';
   let classification;
   let reason = null;
   if (currentOutcome !== 'success' || receipt.delivery !== 'complete') {
@@ -441,6 +468,12 @@ export function classifyRead(receipt, { origin = null, history }) {
   } else if (key === null) {
     classification = 'visibility-unknown';
     reason = 'read-key-unavailable';
+  } else if (!originProven) {
+    classification = 'visibility-unknown';
+    reason = 'origin-unproven';
+  } else if (conflict) {
+    classification = 'visibility-unknown';
+    reason = 'origin-history-conflict';
   } else if (seenBefore === 'no') {
     classification = 'new-content';
   } else if (seenBefore === 'yes' && priorVisibility === 'full') {
@@ -456,60 +489,189 @@ export function classifyRead(receipt, { origin = null, history }) {
 
 /**
  * Read keys delivered to the model: a key counts as delivered once its tool
- * result appears complete and wire-matched in a prepared request. Host receipt
- * of a result is not delivery (a sibling call in the same turn never saw it).
+ * result appears complete and wire-matched in a prepared request whose whole
+ * payload is accounted for. Host receipt of a result is not delivery (a
+ * sibling call in the same turn never saw it). `lookup` resolves a wire call id
+ * to a read key (`keyFor`) and says whether that id is a known read at all
+ * (`isRead`, undefined when the receipt behind it is missing): an entry we
+ * cannot resolve makes the delivered history incomplete, never "not seen".
  */
-export function deliveredReadKeys(prepared, readKeyByCall) {
+export function deliveredReadKeys(prepared, lookup) {
   const keys = [];
+  if (prepared?.coverage?.complete !== true || (prepared?.coverage?.omittedCount ?? 0) > 0) {
+    return { keys, unresolved: true };
+  }
+  let unresolved = false;
   for (const entry of Array.isArray(prepared?.visibleToolResults) ? prepared.visibleToolResults : []) {
     if (entry.delivery !== 'complete' || entry.wireMatchesHost !== true) continue;
-    const key = readKeyByCall.get(String(entry.toolKey?.toolCallId || '').split('|')[0]);
+    const base = baseCallId(entry.toolKey?.toolCallId);
+    const key = lookup?.keyFor?.(base) ?? null;
     if (key) keys.push(key);
+    else if (lookup?.isRead?.(base) !== false) unresolved = true;
   }
-  return keys;
+  return { keys, unresolved };
 }
 
-/** Offline recomputation over exported receipts with a complete history. */
+// A logical request only proves the model saw its payload when the whole
+// payload was prepared, every HTTP attempt it made is accounted for, and the
+// provider answered. Prepared alone, failed-before-dispatch and a retry that
+// never got a response are not delivery (#344/#359, H05).
+function deliveryProven(request) {
+  const prepared = request.prepared;
+  if (!prepared || prepared.coverage?.complete !== true || (prepared.coverage?.omittedCount ?? 0) > 0) return false;
+  const attempts = [...request.attempts].toSorted((left, right) => left - right);
+  if (attempts.length === 0) return false;
+  if (attempts[0] !== 1 || attempts.some((attempt, index) => attempt !== index + 1)) return false;
+  const responses = [...request.responses];
+  if (responses.length === 0) return false;
+  if (responses.some((attempt) => !request.attempts.has(attempt))) return false;
+  return true;
+}
+
+// One wire call id may only mean one read. A candidate whose origin request is
+// the request being interpreted or later can never have produced a result that
+// is already in it, so a later record with the same id never rewrites a past
+// request (#360 H06); equally eligible candidates that disagree are ambiguous.
+function resolveCallKey(stream, base, requestSequence) {
+  const entries = stream.calls.get(base);
+  if (!entries) return null;
+  const eligible = entries.filter((entry) => Number.isSafeInteger(entry.origin) && entry.origin < requestSequence);
+  if (eligible.length === 0) return null;
+  const keys = new Set(eligible.map((entry) => entry.key));
+  return keys.size === 1 ? eligible[0].key : null;
+}
+
+/**
+ * Offline recomputation over exported receipts. The stream is the full
+ * run/game/Agent-attempt identity; the CLI attempt is only a correlation aid.
+ * Maps are built along the verified request stream in causal order, and an
+ * `conflicts` list on the returned array names every reused id that carried
+ * more than one body.
+ */
 export function classifyReadsOffline(toolReceipts, contextReceipts) {
-  const streamOf = (receipt) => canonicalJson([receipt.scope?.runId ?? null, receipt.cliAttempt ?? null]);
-  const prepared = new Map();
-  for (const receipt of Array.isArray(contextReceipts) ? contextReceipts : []) {
-    if (receipt?.phase !== 'prepared') continue;
-    if (!prepared.has(streamOf(receipt))) prepared.set(streamOf(receipt), []);
-    prepared.get(streamOf(receipt)).push(receipt);
-  }
-  const reads = (Array.isArray(toolReceipts) ? toolReceipts : []).filter((receipt) => READ_TOOLS.has(receipt?.toolName));
-  const keyByCall = new Map();
-  for (const receipt of reads) {
-    const key = readKey(receipt);
-    if (key && receipt.outcome === 'success' && receipt.delivery === 'complete') {
-      keyByCall.set(canonicalJson([streamOf(receipt), String(receipt.toolCallId).split('|')[0]]), key);
+  const contexts = Array.isArray(contextReceipts) ? contextReceipts : [];
+  const tools = Array.isArray(toolReceipts) ? toolReceipts : [];
+  const streams = new Map();
+  const streamFor = (receipt) => {
+    const identity = identityOf(receipt);
+    const streamKey = canonicalJson(identity);
+    if (!streams.has(streamKey)) {
+      streams.set(streamKey, {
+        label: `${identity.runId ?? '-'}/${identity.versionedGameId ?? identity.gameId ?? '-'}/${identity.attemptId ?? '-'}`,
+        requests: new Map(),
+        calls: new Map(),
+        kinds: new Map(),
+        reads: [],
+        conflicts: [],
+      });
+    }
+    return streams.get(streamKey);
+  };
+  for (const receipt of contexts) {
+    if (!receipt || !Number.isSafeInteger(receipt.requestSequence)) continue;
+    const stream = streamFor(receipt);
+    const sequence = receipt.requestSequence;
+    let request = stream.requests.get(sequence);
+    if (!request) {
+      request = { phases: new Map(), attempts: new Set(), responses: new Set(), prepared: null, conflict: false };
+      stream.requests.set(sequence, request);
+    }
+    const phase = String(receipt.phase ?? 'unknown');
+    request.phases.set(phase, (request.phases.get(phase) ?? 0) + 1);
+    if (phase === 'dispatch-attempt' && Number.isSafeInteger(receipt.httpAttempt)) request.attempts.add(receipt.httpAttempt);
+    if (phase === 'response-observed' && Number.isSafeInteger(receipt.httpAttempt)) request.responses.add(receipt.httpAttempt);
+    if (phase !== 'prepared') continue;
+    if (!request.prepared) request.prepared = receipt;
+    else if (canonicalJson(request.prepared) !== canonicalJson(receipt)) {
+      // Two different payloads for one logical request: the origin is unknown.
+      request.conflict = true;
+      const conflict = `${stream.label}/request#${sequence}`;
+      if (!stream.conflicts.includes(conflict)) stream.conflicts.push(conflict);
     }
   }
+  for (const receipt of tools) {
+    if (!receipt || typeof receipt.toolName !== 'string') continue;
+    const stream = streamFor(receipt);
+    const base = baseCallId(receipt.toolCallId);
+    stream.kinds.set(base, READ_TOOLS.has(receipt.toolName) ? 'read' : 'other');
+    if (!READ_TOOLS.has(receipt.toolName)) continue;
+    const body = canonicalJson(receipt);
+    const entries = stream.calls.get(base) ?? [];
+    if (entries.some((entry) => entry.body === body)) continue; // identical bytes dedupe
+    if (entries.length > 0) {
+      // Same scope, same id, different content: an explicit gap, never a
+      // silent overwrite of the earlier call (#360 H03).
+      const conflict = `${stream.label}/${base}`;
+      if (!stream.conflicts.includes(conflict)) stream.conflicts.push(conflict);
+    }
+    entries.push({
+      origin: Number.isSafeInteger(receipt.originRequestSequence) ? receipt.originRequestSequence : null,
+      key: readKey(receipt),
+      body,
+    });
+    stream.calls.set(base, entries);
+    stream.reads.push(receipt);
+  }
+
   const results = [];
-  const byStream = new Map();
-  for (const receipt of reads) {
-    if (!byStream.has(streamOf(receipt))) byStream.set(streamOf(receipt), []);
-    byStream.get(streamOf(receipt)).push(receipt);
-  }
-  for (const [stream, list] of byStream) {
-    const requests = (prepared.get(stream) ?? []).toSorted((a, b) => a.requestSequence - b.requestSequence);
-    const bySequence = new Map(requests.map((request) => [request.requestSequence, request]));
+  for (const stream of streams.values()) {
+    const requests = [...stream.requests.entries()]
+      .toSorted(([left], [right]) => left - right)
+      .map(([sequence, request]) => ({ sequence, ...request }));
+    // A request stream that does not start at 1 and run without gaps is not
+    // complete evidence of what could have been delivered before a read.
+    let historyComplete = requests.length > 0
+      && requests[0].sequence === 1
+      && requests.every((request, index) => request.sequence === index + 1);
     const delivered = new Set();
-    let complete = true;
-    const lookup = { get: (base) => keyByCall.get(canonicalJson([stream, base])) };
     let cursor = 0;
-    for (const receipt of list.toSorted((a, b) => (a.originRequestSequence ?? 0) - (b.originRequestSequence ?? 0) || (a.startSequence ?? 0) - (b.startSequence ?? 0))) {
-      while (cursor < requests.length && requests[cursor].requestSequence <= (receipt.originRequestSequence ?? 0)) {
-        if ((requests[cursor].coverage?.omittedCount ?? 0) > 0) complete = false;
-        for (const key of deliveredReadKeys(requests[cursor], lookup)) delivered.add(key);
+    const reads = stream.reads.toSorted((left, right) =>
+      (left.originRequestSequence ?? -1) - (right.originRequestSequence ?? -1)
+      || (left.startSequence ?? 0) - (right.startSequence ?? 0));
+    for (const receipt of reads) {
+      const originSequence = Number.isSafeInteger(receipt.originRequestSequence) ? receipt.originRequestSequence : null;
+      while (cursor < requests.length && (originSequence ?? -1) >= requests[cursor].sequence) {
+        const request = requests[cursor];
         cursor += 1;
+        if (!deliveryProven(request)) {
+          // A payload we cannot prove reached the provider may or may not have
+          // shown its results to the model: never a delivered fact.
+          if (!request.prepared || request.prepared.coverage?.complete !== true
+              || (request.prepared.visibleToolResults?.length ?? 0) > 0) historyComplete = false;
+          continue;
+        }
+        const resolved = deliveredReadKeys(request.prepared, {
+          keyFor: (base) => resolveCallKey(stream, base, request.sequence),
+          isRead: (base) => (stream.kinds.has(base) ? stream.kinds.get(base) === 'read' : undefined),
+        });
+        if (resolved.unresolved) historyComplete = false;
+        for (const key of resolved.keys) delivered.add(key);
       }
-      const origin = bySequence.get(receipt.originRequestSequence) ?? null;
-      results.push({ toolCallId: receipt.toolCallId, cliAttempt: receipt.cliAttempt ?? null,
-        ...classifyRead(receipt, { origin, history: { has: (key) => delivered.has(key), complete } }) });
+      const originRequest = originSequence === null ? null : stream.requests.get(originSequence) ?? null;
+      const classification = classifyRead(receipt, {
+        origin: originRequest?.prepared ?? null,
+        history: { has: (key) => delivered.has(key), complete: historyComplete },
+      });
+      const record = {
+        scope: auditScope(receipt.scope ?? {}),
+        cliAttempt: receipt.cliAttempt ?? null,
+        toolCallId: receipt.toolCallId,
+        toolName: receipt.toolName,
+        originRequestSequence: originSequence,
+        ...classification,
+      };
+      // Two different prepared payloads for the same logical request mean the
+      // origin is unknown, whatever the label would have been.
+      if (originRequest?.conflict) {
+        record.classification = 'visibility-unknown';
+        record.reason = 'request-evidence-conflict';
+      }
+      results.push(record);
     }
   }
+  // Array with a parallel conflict list: callers that iterate records keep
+  // working, and JSON serialization of an array drops the extra property.
+  results.conflicts = [...streams.values()].flatMap((stream) => stream.conflicts);
   return results;
 }
 

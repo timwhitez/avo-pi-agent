@@ -7,9 +7,9 @@ import { sendText, sendToolCall, sendToolCalls } from './responses-loopback.mjs'
 
 // Real durable Agent + installed Pi against a loopback Responses server.
 
-export function frame(value = 0) {
+export function frame(value = 0, gameId = 'visibility-v1') {
   return {
-    game_id: 'visibility-v1',
+    game_id: gameId,
     frame: [[value, 0], [0, 0]],
     state: 'PLAYING',
     levels_completed: 0,
@@ -19,13 +19,13 @@ export function frame(value = 0) {
   };
 }
 
-export function environment({ step } = {}) {
+export function environment({ step, gameId = 'visibility-v1' } = {}) {
   let forwarded = 0;
   return {
-    async start() { return frame(0); },
-    async observe() { return frame(0); },
-    async step(action, data) { forwarded += 1; return step ? step(action, data, forwarded) : frame(forwarded); },
-    async reset() { return { ...frame(0), full_reset: false }; },
+    async start() { return frame(0, gameId); },
+    async observe() { return frame(0, gameId); },
+    async step(action, data) { forwarded += 1; return step ? step(action, data, forwarded) : frame(forwarded, gameId); },
+    async reset() { return { ...frame(0, gameId), full_reset: false }; },
     async scorecard() { return null; },
     async lifecycle() { return { gameplay_actions_forwarded: forwarded, post_terminal_gameplay_actions: 0 }; },
   };
@@ -50,7 +50,8 @@ export function scripted(turns) {
 }
 
 export async function runAgent({
-  url, root, policyProfile = 'minimal-v1', env = environment(), onPayload, maxOuterTurns = 40, stallWindow, onEvent = null,
+  url, root, policyProfile = 'minimal-v1', env = null, onPayload, maxOuterTurns = 40, stallWindow, onEvent = null,
+  gameId = 'visibility-v1', auditReceipts,
 }) {
   const events = [];
   const loop = await createPiSdkLoop({
@@ -59,12 +60,13 @@ export async function runAgent({
     policyProfile,
     // Omitted when unset, so the loop's own default is exercised.
     ...(stallWindow === undefined ? {} : { stallWindow }),
+    ...(auditReceipts === undefined ? {} : { auditReceipts }),
     maxOuterTurns,
     toolResultMaxChars: 24_000,
   }, { onEvent: onEvent ?? ((event) => events.push(event)), ...(onPayload ? { onPayload } : {}) });
   const agent = new AvoArcAgent({
-    gameId: 'visibility-v1',
-    environment: env,
+    gameId,
+    environment: env ?? environment({ gameId }),
     loop,
     config: { maxActions: 100, stallWindow: stallWindow ?? 8, memoryDir: path.join(root, 'memory'), workspaceMode: 'disabled', policyProfile, toolResultMaxChars: 24_000 },
     captureScorecard: false,

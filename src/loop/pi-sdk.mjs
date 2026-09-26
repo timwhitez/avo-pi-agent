@@ -196,6 +196,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       .filter((block) => block?.type === 'text').map((block) => block.text).join('');
     const scope = state.scope();
     const startSequence = ++state.toolSequence;
+    state.toolKinds.set(id.split('|')[0], String(event.toolName || ''));
     const emittedLifecycle = emitReceipt(state, () => buildToolReceipt({
       scope,
       resultScope: scope,
@@ -246,6 +247,28 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
   // Only the request that produced the next calls is ever an origin.
   const MAX_PREPARED = 16;
   const MAX_READ_WINDOW = 64;
+  // Keys a logical request carried are only "seen" once the provider answered
+  // it (#344/#359, H05): prepared alone, a failed-before-dispatch hook and a
+  // retry that never got a response never make a result look delivered.
+  const recordDeliveredReads = (state, requestSequence) => {
+    if (!state || state.deliveredRequests.has(requestSequence)) return;
+    const prepared = state.preparedBySequence.get(requestSequence);
+    if (!prepared) return;
+    state.deliveredRequests.add(requestSequence);
+    const resolved = deliveredReadKeys(prepared, {
+      keyFor: (base) => state.readKeyByCall.get(base) ?? null,
+      isRead: (base) => (state.toolKinds.has(base) ? READ_TOOLS.has(state.toolKinds.get(base)) : undefined),
+    });
+    if (resolved.unresolved) state.readHistoryEvicted = true;
+    for (const key of resolved.keys) {
+      state.readHistory.delete(key);
+      state.readHistory.add(key);
+      if (state.readHistory.size > MAX_READ_HISTORY) {
+        state.readHistory.delete(state.readHistory.values().next().value);
+        state.readHistoryEvicted = true;
+      }
+    }
+  };
   const classifyReadReceipt = (state, receipt) => {
     if (!state || !receipt || !READ_TOOLS.has(receipt.toolName)) return;
     const origin = state.preparedBySequence.get(receipt.originRequestSequence) ?? null;
@@ -253,9 +276,13 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       origin,
       history: { has: (key) => state.readHistory.has(key), complete: !state.readHistoryEvicted },
     });
-    // The key becomes "seen" only when a later prepared request delivers it.
+    // A wire call id stays one-to-one: a conflicting translation is ambiguity,
+    // so the history is no longer complete instead of silently overwritten.
     if (classification.readKey && receipt.outcome === 'success' && receipt.delivery === 'complete') {
-      state.readKeyByCall.set(String(receipt.toolCallId).split('|')[0], classification.readKey);
+      const base = String(receipt.toolCallId).split('|')[0];
+      const prior = state.readKeyByCall.get(base);
+      if (prior === undefined) state.readKeyByCall.set(base, classification.readKey);
+      else if (prior !== classification.readKey) state.readHistoryEvicted = true;
       if (state.readKeyByCall.size > MAX_READ_HISTORY) {
         state.readKeyByCall.delete(state.readKeyByCall.keys().next().value);
         state.readHistoryEvicted = true;
@@ -332,6 +359,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           ...timing,
         }));
         if (request) request.lastHttpFailed = response?.ok === false;
+        // The payload provably reached the provider; only now do its results
+        // count as delivered history (#360 H05).
+        recordDeliveredReads(receipts, requestSequence);
         if (telemetry && response?.ok === false) {
           telemetry.providerHttpErrors += 1;
           emitEvent({ type: 'avo_provider_incident', category: 'http-error', requestSequence });
@@ -398,16 +428,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           ...timing,
         }));
         if (receipts && preparedReceipt) {
-          // A byte-bounded visible list cannot prove what else was delivered.
-          if ((preparedReceipt.coverage?.omittedCount ?? 0) > 0) receipts.readHistoryEvicted = true;
-          for (const key of deliveredReadKeys(preparedReceipt, receipts.readKeyByCall)) {
-            receipts.readHistory.delete(key);
-            receipts.readHistory.add(key);
-            if (receipts.readHistory.size > MAX_READ_HISTORY) {
-              receipts.readHistory.delete(receipts.readHistory.values().next().value);
-              receipts.readHistoryEvicted = true;
-            }
-          }
           receipts.preparedBySequence.set(requestSequence, preparedReceipt);
           if (receipts.preparedBySequence.size > MAX_PREPARED) {
             receipts.preparedBySequence.delete(receipts.preparedBySequence.keys().next().value);
@@ -491,6 +511,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         preparedBySequence: new Map(),
         readHistory: new Set(),
         readKeyByCall: new Map(),
+        deliveredRequests: new Set(),
+        toolKinds: new Map(),
         readHistoryEvicted: false,
         readWindow: [],
         readWindowOmitted: 0,
@@ -584,6 +606,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             details,
           }));
           if (receipt) receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
+          receiptState.toolKinds.set(String(callId).split('|')[0], tool.name);
           classifyReadReceipt(receiptState, receipt);
           return {
             content: [{ type: 'text', text }],

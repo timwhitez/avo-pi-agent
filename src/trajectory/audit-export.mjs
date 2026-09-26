@@ -993,11 +993,20 @@ function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame =
   // reported as resolved offline, not rewritten.
   const offline = classifyReadsOffline([...calls.values()].map((entry) => entry.receipt), context ?? []);
   const online = Array.isArray(receipts.readVisibility) ? receipts.readVisibility : [];
-  const onlineByCall = new Map(online.map((record) => [canonicalJson([record.cliAttempt ?? null, record.toolCallId]), record]));
+  // Full identity, not cliAttempt alone: two games that reuse cliAttempt=1 and
+  // the same local call ids are independent records (#360 H02/H03).
+  const identityKey = (record) => canonicalJson([
+    record?.scope?.runId ?? null,
+    record?.scope?.versionedGameId ?? null,
+    record?.scope?.attemptId ?? null,
+    record?.cliAttempt ?? null,
+    record?.toolCallId ?? null,
+  ]);
+  const onlineByCall = new Map(online.map((record) => [identityKey(record), record]));
   const disagreements = [];
   let resolvedOffline = 0;
   for (const item of offline) {
-    const record = onlineByCall.get(canonicalJson([item.cliAttempt, item.toolCallId]));
+    const record = onlineByCall.get(identityKey(item));
     if (!record) continue;
     if (record.classification === 'visibility-unknown' && item.classification !== 'visibility-unknown') resolvedOffline += 1;
     else if (item.classification !== 'visibility-unknown' && record.classification !== item.classification) {
@@ -1005,6 +1014,9 @@ function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame =
     }
   }
   if (disagreements.length) gaps.push('READ_VISIBILITY_DISAGREEMENT');
+  // A reused call id that carried two different bodies is an explicit gap: the
+  // offline recompute refuses to attribute it to one of them.
+  if ((offline.conflicts?.length ?? 0) > 0) gaps.push('READ_VISIBILITY_AMBIGUOUS');
   const countBy = (list) => list.reduce((out, item) => ({ ...out, [item.classification]: (out[item.classification] ?? 0) + 1 }), {});
   return {
     readVisibility: {
