@@ -9,7 +9,7 @@ import { normalizeGameRecord, validateCompleteGameSet } from '../benchmark/repor
 import { REPORT_LIMITS, writeJsonAtomic } from '../benchmark/report-safe-files.mjs';
 import { evaluateScorecardCoverage } from '../benchmark/scorecard-evidence.mjs';
 import { loadTrajectoryEvents } from './evidence-loader.mjs';
-import { AUDIT_RECEIPTS_SCHEMA, CONTEXT_RECEIPT_SCHEMA, EXECUTION_TERMINAL_SCHEMA, TOOL_RECEIPT_SCHEMA } from './audit-events.mjs';
+import { AUDIT_RECEIPTS_SCHEMA, CONTEXT_RECEIPT_SCHEMA, EXECUTION_TERMINAL_SCHEMA, TOOL_RECEIPT_SCHEMA, classifyReadsOffline } from './audit-events.mjs';
 
 export { AUDIT_RECEIPTS_SCHEMA };
 
@@ -991,7 +991,51 @@ function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame =
     // An unknown request cardinality is never certifiable coverage.
     gaps.push('CONTEXT_COVERAGE_UNKNOWN');
   }
+  // #345: recompute read visibility offline over the complete exported
+  // history and compare with the online records. Determinate disagreement is
+  // a gap; an online unknown that the complete history resolves stays
+  // reported as resolved offline, not rewritten.
+  const offline = classifyReadsOffline([...calls.values()].map((entry) => entry.receipt), context ?? []);
+  const online = Array.isArray(receipts.readVisibility) ? receipts.readVisibility : [];
+  // Full identity, not cliAttempt alone: two games that reuse cliAttempt=1 and
+  // the same local call ids are independent records (#360 H02/H03).
+  const identityKey = (record) => canonicalJson([
+    record?.scope?.runId ?? null,
+    record?.scope?.versionedGameId ?? null,
+    record?.scope?.attemptId ?? null,
+    record?.cliAttempt ?? null,
+    record?.toolCallId ?? null,
+  ]);
+  const onlineByCall = new Map(online.map((record) => [identityKey(record), record]));
+  const disagreements = [];
+  let resolvedOffline = 0;
+  for (const item of offline) {
+    const record = onlineByCall.get(identityKey(item));
+    if (!record) continue;
+    if (record.classification === 'visibility-unknown' && item.classification !== 'visibility-unknown') resolvedOffline += 1;
+    else if (item.classification !== 'visibility-unknown' && record.classification !== item.classification) {
+      disagreements.push({ toolCallId: item.toolCallId, online: record.classification, offline: item.classification });
+    }
+  }
+  if (disagreements.length) gaps.push('READ_VISIBILITY_DISAGREEMENT');
+  // A reused call id that carried two different bodies is an explicit gap: the
+  // offline recompute refuses to attribute it to one of them.
+  if ((offline.conflicts?.length ?? 0) > 0) gaps.push('READ_VISIBILITY_AMBIGUOUS');
+  const countBy = (list) => list.reduce((out, item) => ({ ...out, [item.classification]: (out[item.classification] ?? 0) + 1 }), {});
   return {
+    readVisibility: {
+      online: countBy(online),
+      offline: countBy(offline),
+      onlineRecords: online.length,
+      resolvedOffline,
+      disagreements: disagreements.slice(0, 256),
+      loopTerminations: (Array.isArray(receipts.loopTerminations) ? receipts.loopTerminations : []).map((record) => ({
+        terminationReason: record.terminationReason,
+        noActionInnerTurns: record.noActionInnerTurns,
+        window: record.window,
+        coverage: record.coverage,
+      })).slice(0, 64),
+    },
     toolReceiptCount: calls.size,
     duplicateCount,
     conflicts,

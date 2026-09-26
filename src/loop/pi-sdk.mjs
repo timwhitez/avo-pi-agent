@@ -15,8 +15,14 @@ import {
 } from '../provider-capabilities.mjs';
 
 import {
+  READ_TOOLS,
   buildContextReceipt,
+  buildLoopTermination,
+  buildReadVisibility,
   buildToolReceipt,
+  classifyRead,
+  deliveredReadKeys,
+  httpSuccess,
   sha256 as receiptSha256,
   textDigest,
 } from '../trajectory/audit-events.mjs';
@@ -191,7 +197,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       .filter((block) => block?.type === 'text').map((block) => block.text).join('');
     const scope = state.scope();
     const startSequence = ++state.toolSequence;
-    emitReceipt(state, () => buildToolReceipt({
+    state.toolKinds.set(id.split('|')[0], String(event.toolName || ''));
+    const emittedLifecycle = emitReceipt(state, () => buildToolReceipt({
       scope,
       resultScope: scope,
       toolCallId: id,
@@ -206,6 +213,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       delivery: 'complete',
       details: { rejectionStage: 'harness-before-execute' },
     }));
+    classifyReadReceipt(state, emittedLifecycle);
   };
   const clockDomain = `pi-loop:${process.pid}:${process.hrtime.bigint()}`;
   // Receipts are observation only: a failure to build one degrades audit
@@ -232,6 +240,66 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     }
     if (receiptSinkEnabled) emitEvent({ type: 'avo_audit_receipt', receipt });
     return receipt;
+  };
+  // #345 phase 1 (observation only): classify each read against the request
+  // that produced its call. Nothing here feeds back into stopping, counting or
+  // the model context; the read history is bounded and declares eviction.
+  const MAX_READ_HISTORY = 4096;
+  // Only the request that produced the next calls is ever an origin.
+  const MAX_PREPARED = 16;
+  const MAX_READ_WINDOW = 64;
+  // Keys a logical request carried are only "seen" once the provider answered
+  // it (#344/#359, H05): prepared alone, a failed-before-dispatch hook and a
+  // retry that never got a response never make a result look delivered.
+  const recordDeliveredReads = (state, requestSequence) => {
+    if (!state || state.deliveredRequests.has(requestSequence)) return;
+    const prepared = state.preparedBySequence.get(requestSequence);
+    if (!prepared) return;
+    state.deliveredRequests.add(requestSequence);
+    const resolved = deliveredReadKeys(prepared, {
+      keyFor: (base) => state.readKeyByCall.get(base) ?? null,
+      isRead: (base) => (state.toolKinds.has(base) ? READ_TOOLS.has(state.toolKinds.get(base)) : undefined),
+    });
+    if (resolved.unresolved) state.readHistoryEvicted = true;
+    for (const key of resolved.keys) {
+      state.readHistory.delete(key);
+      state.readHistory.add(key);
+      if (state.readHistory.size > MAX_READ_HISTORY) {
+        state.readHistory.delete(state.readHistory.values().next().value);
+        state.readHistoryEvicted = true;
+      }
+    }
+  };
+  const classifyReadReceipt = (state, receipt) => {
+    if (!state || !receipt || !READ_TOOLS.has(receipt.toolName)) return;
+    const origin = state.preparedBySequence.get(receipt.originRequestSequence) ?? null;
+    const classification = classifyRead(receipt, {
+      origin,
+      history: { has: (key) => state.readHistory.has(key), complete: !state.readHistoryEvicted },
+    });
+    // A wire call id stays one-to-one: a conflicting translation is ambiguity,
+    // so the history is no longer complete instead of silently overwritten.
+    if (classification.readKey && receipt.outcome === 'success' && receipt.delivery === 'complete') {
+      const base = String(receipt.toolCallId).split('|')[0];
+      const prior = state.readKeyByCall.get(base);
+      if (prior === undefined) state.readKeyByCall.set(base, classification.readKey);
+      else if (prior !== classification.readKey) state.readHistoryEvicted = true;
+      if (state.readKeyByCall.size > MAX_READ_HISTORY) {
+        state.readKeyByCall.delete(state.readKeyByCall.keys().next().value);
+        state.readHistoryEvicted = true;
+      }
+    }
+    emitReceipt(state, (timing) => buildReadVisibility({ receipt, classification, ...timing }));
+    state.readWindow.push({
+      toolCallId: receipt.toolCallId,
+      toolName: receipt.toolName,
+      originRequestSequence: receipt.originRequestSequence ?? null,
+      classification: classification.classification,
+    });
+    if (state.readWindow.length > MAX_READ_WINDOW) {
+      state.readWindow.shift();
+      state.readWindowOmitted += 1;
+    }
   };
   const resilientStreamFn = (model, context, options) => {
     const requestSequence = ++providerRequestSequence;
@@ -292,6 +360,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           ...timing,
         }));
         if (request) request.lastHttpFailed = response?.ok === false;
+        // Only a successful answer proves the provider processed the payload;
+        // only then do its results count as delivered history (#360 H05).
+        if (httpSuccess(response?.status)) recordDeliveredReads(receipts, requestSequence);
         if (telemetry && response?.ok === false) {
           telemetry.providerHttpErrors += 1;
           emitEvent({ type: 'avo_provider_incident', category: 'http-error', requestSequence });
@@ -344,7 +415,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         // Digest over the JSON the transport would send (undefined fields drop).
         requestState.finalCanonicalSha256 = receiptSha256(canonicalJson(JSON.parse(JSON.stringify(finalPayload))));
         const visibility = wireVisibility(prepared, finalPayload);
-        emitReceipt(receipts, (timing) => buildContextReceipt({
+        const preparedReceipt = emitReceipt(receipts, (timing) => buildContextReceipt({
           scope: prepared?.scope,
           requestSequence,
           phase: 'prepared',
@@ -357,6 +428,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           inputChars: requestTelemetry.effective?.inputChars ?? null,
           ...timing,
         }));
+        if (receipts && preparedReceipt) {
+          receipts.preparedBySequence.set(requestSequence, preparedReceipt);
+          if (receipts.preparedBySequence.size > MAX_PREPARED) {
+            receipts.preparedBySequence.delete(receipts.preparedBySequence.keys().next().value);
+          }
+        }
         return override;
       },
     });
@@ -432,6 +509,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         selectors: new Map(),
         pendingTools: new Map(),
         wrapperCalls: new Set(),
+        preparedBySequence: new Map(),
+        readHistory: new Set(),
+        readKeyByCall: new Map(),
+        deliveredRequests: new Set(),
+        toolKinds: new Map(),
+        readHistoryEvicted: false,
+        readWindow: [],
+        readWindowOmitted: 0,
         lifecycle: new Map(),
         lifecycleReported: new Set(),
         scope: () => receiptScope(),
@@ -463,10 +548,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             result = await tool.execute(params);
           } catch (error) {
             receiptState.pendingTools.delete(callId);
-            emitReceipt(receiptState, () => buildToolReceipt({
+            classifyReadReceipt(receiptState, emitReceipt(receiptState, () => buildToolReceipt({
               scope: callScope, resultScope: ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope, toolCallId: callId, toolName: tool.name,
               startSequence, endSequence: ++receiptState.toolSequence, originRequestSequence, params, outcome: 'exception',
-            }));
+            })));
             throw error;
           }
           receiptState.pendingTools.delete(callId);
@@ -522,6 +607,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             details,
           }));
           if (receipt) receiptState.selectors.set(String(callId).split('|')[0], receipt.selectorSha256);
+          receiptState.toolKinds.set(String(callId).split('|')[0], tool.name);
+          classifyReadReceipt(receiptState, receipt);
           return {
             content: [{ type: 'text', text }],
             details,
@@ -685,18 +772,47 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       const exhaustedOuterTurns = !shouldStop() && !agent.state.errorMessage && outerTurns >= config.maxOuterTurns;
       const messages = agent.state.messages;
       const error = agent.state.errorMessage || null;
-      return {
-        messages,
-        error,
-        terminationReason: error
-          ? null
-          : noToolTurn
+      const terminationReason = error
+        ? null
+        : noToolTurn
           ? 'assistant-no-tool'
           : innerTurnNoActionLimitReached
             ? 'repeated-tool-outcome'
             : exhaustedOuterTurns
               ? 'outer-turn-budget'
-              : null,
+              : null;
+      // The original stop decision is recorded with its read window; the
+      // record never feeds back into the decision.
+      if (terminationReason) {
+        const finalStatus = (() => { try { return runtimeStatus(); } catch { return null; } })();
+        emitReceipt(runTelemetry.receipts, (timing) => buildLoopTermination({
+          scope: receiptScope(),
+          terminationReason,
+          noActionInnerTurns,
+          // The triggering window: reads issued by the last no-action turns.
+          window: (() => {
+            const firstRequest = providerRequestSequence - noActionInnerTurns + 1;
+            const reads = runTelemetry.receipts.readWindow.filter((read) => (read.originRequestSequence ?? 0) >= firstRequest);
+            const earliestRetained = runTelemetry.receipts.readWindow[0]?.originRequestSequence ?? null;
+            return {
+              firstRequestSequence: firstRequest,
+              lastRequestSequence: providerRequestSequence,
+              reads,
+              omittedCount: runTelemetry.receipts.readWindowOmitted > 0 && earliestRetained !== null && earliestRetained > firstRequest
+                ? runTelemetry.receipts.readWindowOmitted : 0,
+            };
+          })(),
+          remainingActions: Number.isSafeInteger(finalStatus?.maxActions) && Number.isSafeInteger(finalStatus?.environmentActions)
+            ? finalStatus.maxActions - finalStatus.environmentActions : null,
+          remainingOuterTurns: config.maxOuterTurns - outerTurns,
+          historyComplete: !runTelemetry.receipts.readHistoryEvicted,
+          ...timing,
+        }));
+      }
+      return {
+        messages,
+        error,
+        terminationReason,
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,

@@ -11,6 +11,20 @@ export function sendToolCall(response, { responseId, callId, name, args, itemId 
   ]);
 }
 
+// Several function calls in one assistant response (one model turn).
+export function sendToolCalls(response, responseId, calls) {
+  const items = calls.map((call) => ({ type: 'function_call', id: `fc_${call.callId}`, call_id: call.callId, name: call.name, arguments: JSON.stringify(call.args), status: 'completed' }));
+  const events = [{ type: 'response.created', response: { id: responseId } }];
+  items.forEach((item, index) => {
+    events.push({ type: 'response.output_item.added', output_index: index, item });
+    events.push({ type: 'response.function_call_arguments.done', output_index: index, item_id: item.id, arguments: item.arguments });
+    events.push({ type: 'response.output_item.done', output_index: index, item });
+  });
+  events.push({ type: 'response.completed', response: { id: responseId, status: 'completed', output: items, usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } } });
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
+}
+
 export function sendText(response, responseId, text = 'done') {
   const item = { type: 'message', id: `msg_${responseId}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] };
   sendEvents(response, responseId, item, [{ type: 'response.output_text.delta', output_index: 0, delta: text }]);
