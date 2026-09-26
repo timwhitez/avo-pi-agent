@@ -67,18 +67,9 @@ import { diagnosticSelection, selectDiagnosticGames, diagnosticReportFields } fr
 
 loadLocalEnv();
 
-// #362: the effective execution policy (#346 watchdog) is parsed exactly once
-// here. The experiment environment check, the sealed experiment binding, the
-// process runner's real watchdog and the execution terminal all consume this
-// same frozen value; nothing below re-reads the environment.
-const executionPolicy = readExecutionPolicy(process.env);
-
 if (String(process.env.GITHUB_ACTIONS || '').toLowerCase() === 'true') {
   throw new Error('real public benchmark is local-only and refuses GitHub Actions execution');
 }
-
-const experimentRun = loadExperimentRunFromEnvironment(process.env, { executionPolicy });
-if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
 
 const generatedRunId = `real-public-${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(4).toString('hex')}`;
 const runId = safeRunId(process.env.AVO_REAL_RUN_ID || generatedRunId);
@@ -90,29 +81,39 @@ const privateRoot = path.join(runsRoot, 'private');
 const privateDir = path.join(privateRoot, runId);
 const publicDir = path.join(runsRoot, diagnostic ? 'diagnostic' : 'public');
 const publicFile = path.join(publicDir, `${runId}.json`);
-fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
-fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
-// AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run.
-// Comparable recovery requires the exact original run capsule; changed
-// conditions are allowed only as an explicitly non-comparable diagnostic.
-const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
+let provider = null;
+let executionPolicy = null;
+let experimentRun = null;
 let resumeContext = null;
-if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
-  if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
-  resumeContext = assertResumableContext({ privateDir, publicFile, runId });
-  console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
-  // Regenerable private artifacts from earlier passes would trip exclusive
-  // copy/write guards. The original capsule, provenance and checkpoints stay.
-  const staleRawReport = path.join(privateDir, 'raw-run-report.json');
-  if (fs.existsSync(staleRawReport)) fs.unlinkSync(staleRawReport);
-  removeAcceptedResumeArtifact(path.join(privateDir, 'manifest.private.json'), resumeContext.manifestEvidence);
-  removeAcceptedResumeArtifact(publicFile, resumeContext.publicEvidence);
-}
-if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
-
-let provider;
 const stage = { value: 'configuration' };
 try {
+  // #362: the effective execution policy (#346 watchdog) is parsed exactly
+  // once, at the configuration stage. It lives inside the failure-reporting
+  // try so a malformed value is a structured configuration failure instead of
+  // an uncaught crash, while the experiment environment check, the sealed
+  // experiment binding, the process runner's real watchdog and the execution
+  // terminal all consume this same frozen value; nothing below re-reads it.
+  executionPolicy = readExecutionPolicy(process.env);
+  experimentRun = loadExperimentRunFromEnvironment(process.env, { executionPolicy });
+  if (experimentRun) process.env.AVO_POLICY_PROFILE = experimentRun.binding.policyProfile;
+  fs.mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(publicDir, { recursive: true, mode: 0o700 });
+  // AVO_RESUME_RUN=1 with a pinned AVO_REAL_RUN_ID restarts an interrupted run.
+  // Comparable recovery requires the exact original run capsule; changed
+  // conditions are allowed only as an explicitly non-comparable diagnostic.
+  const resuming = process.env.AVO_RESUME_RUN === '1' && process.env.AVO_REAL_RUN_ID;
+  if (fs.existsSync(privateDir) || fs.existsSync(publicFile)) {
+    if (!resuming) throw new Error(`runId already exists and cannot be reused: ${runId}`);
+    resumeContext = assertResumableContext({ privateDir, publicFile, runId });
+    console.log(`[real-run] resuming interrupted run ${runId} from existing evidence`);
+    // Regenerable private artifacts from earlier passes would trip exclusive
+    // copy/write guards. The original capsule, provenance and checkpoints stay.
+    const staleRawReport = path.join(privateDir, 'raw-run-report.json');
+    if (fs.existsSync(staleRawReport)) fs.unlinkSync(staleRawReport);
+    removeAcceptedResumeArtifact(path.join(privateDir, 'manifest.private.json'), resumeContext.manifestEvidence);
+    removeAcceptedResumeArtifact(publicFile, resumeContext.publicEvidence);
+  }
+  if (!fs.existsSync(privateDir)) fs.mkdirSync(privateDir, { recursive: false, mode: 0o700 });
   if (diagnostic) {
     requestedDiagnosticGames = diagnosticSelection(process.argv.slice(2));
     if (experimentRun) throw new Error('diagnostic selection cannot override a sealed experiment plan');

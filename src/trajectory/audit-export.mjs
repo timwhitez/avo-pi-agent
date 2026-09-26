@@ -1323,7 +1323,7 @@ export function exportTrajectoryAudit({
     fs.mkdirSync(target, { recursive: false, mode: 0o700 });
   }
   const exporter = { ...exporterIdentity(repositoryRoot), gitCommit: /^[a-f0-9]{40}$/.test(String(gitCommit)) ? gitCommit : null };
-  const exportId = `audit-${sha256(canonicalJson({ sourceFiles: normalized.sourceFiles, runs: normalized.runs.map((run) => run.runId) })).slice(0, 16)}`;
+  const exportId = auditExportId(normalized);
   const written = [];
   const write = (relative, value) => {
     const file = path.join(target, relative);
@@ -1363,6 +1363,17 @@ function indexFor(normalized, exportId) {
       recomputedModelCalls: run.metrics.recomputedAggregate?.modelCalls ?? null,
     })),
   };
+}
+
+/**
+ * The single commitment for one normalized export: the listed source files
+ * and the run ids. The writer and every reader share this one formula.
+ */
+export function auditExportId(normalized) {
+  return `audit-${sha256(canonicalJson({
+    sourceFiles: normalized.sourceFiles,
+    runs: normalized.runs.map((run) => run.runId),
+  })).slice(0, 16)}`;
 }
 
 /**

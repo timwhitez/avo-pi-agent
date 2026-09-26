@@ -14,6 +14,7 @@ import { productionProviderToolSchemaDigest, validateRunCapsule } from './run-ca
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 import {
   AUDIT_SCHEMA,
+  auditExportId,
   normalizeAuditInputs,
   readAuditInputManifest,
   validateTrajectoryAudit,
@@ -1024,17 +1025,20 @@ function resolveIncompleteEntry(plan, entry, selector) {
   }
   assertSealedExecutionPolicy(plan, capsule.definition.experiment);
   const runId = capsule.definition.runId;
-  const audited = readAuditedRun(entry.auditRun, runId, selector);
-  if (!['error', 'censored', 'unknown'].includes(audited.executionOutcome.status)) {
-    throw new Error(`experiment result ${selector.key} incomplete entry needs its run's audited error/censored/unknown outcome`);
-  }
-  const startedAt = startedAtOf(entry.privateCapsuleEvidence.value.createdAt);
-  assertProspectiveStart(plan, selector, startedAt);
+  // The public projection this unit's runner sealed; the audit's own source
+  // report must carry it, so the audit is bound to the capsule by commitment
+  // and not only by the run ID.
   const published = projectPublicRunCapsule(entry.privateCapsuleEvidence.value, {
     runClass: capsule.definition.initialState.mode,
     comparable: true,
     capsuleEvidenceSha256: entry.privateCapsuleEvidence.sha256,
   });
+  const audited = readAuditedRun(entry.auditRun, runId, selector, published);
+  if (!['error', 'censored', 'unknown'].includes(audited.executionOutcome.status)) {
+    throw new Error(`experiment result ${selector.key} incomplete entry needs its run's audited error/censored/unknown outcome`);
+  }
+  const startedAt = startedAtOf(entry.privateCapsuleEvidence.value.createdAt);
+  assertProspectiveStart(plan, selector, startedAt);
   const games = new Map();
   for (const game of audited.games) {
     const observedCost = game.metrics ?? game.observedSubtotal ?? null;
@@ -1062,11 +1066,12 @@ function resolveIncompleteEntry(plan, entry, selector) {
 /**
  * Validates one incomplete unit's exported audit directory with the real
  * #343/#357 validator bound to its own source report, then re-derives the run
- * record from the listed audit inputs. Editing the written cost, outcome,
- * source ref or coverage changes the re-derived record; only an owner of the
+ * record from the listed audit inputs and checks that source report carries
+ * the unit's sealed run-capsule commitment. Editing the written cost, outcome,
+ * source ref, coverage or capsule commitment is refused; only an owner of the
  * bound source material could reproduce it.
  */
-function readAuditedRun(auditRun, runId, selector) {
+function readAuditedRun(auditRun, runId, selector, published) {
   v1.requireExactKeys(auditRun, ['exportDir', 'inputManifest'], `experiment incomplete unit ${selector.key} audit`);
   const manifest = readAuditInputManifest(path.resolve(v1.requireLine(auditRun.inputManifest, 'audit input manifest', 4096)));
   const outputDir = path.resolve(v1.requireLine(auditRun.exportDir, 'audit export directory', 4096));
@@ -1081,18 +1086,46 @@ function readAuditedRun(auditRun, runId, selector) {
   const normalized = normalizeAuditInputs(manifest);
   const derived = normalized.runs.find((run) => run.runId === runId);
   if (!derived) throw new Error(`experiment result ${selector.key} audit export does not include run ${runId}`);
+  assertAuditedSourceReportBinding(manifest, derived, published, selector);
   const exported = readJsonFileEvidence(path.join(outputDir, 'runs', `${runId}.json`), {
     root: outputDir,
     purpose: 'audit run record',
   }).value;
-  const exportId = `audit-${sha256(canonicalJson({
-    sourceFiles: normalized.sourceFiles,
-    runs: normalized.runs.map((run) => run.runId),
-  })).slice(0, 16)}`;
+  const exportId = auditExportId(normalized);
   if (canonicalJson({ schema: AUDIT_SCHEMA, exportId, ...derived }) !== canonicalJson(exported)) {
     throw new Error(`experiment result ${selector.key} audit run record differs from its re-derived source facts`);
   }
   return derived;
+}
+
+/**
+ * The audit's source report is the evidence the exporter normalized, and it is
+ * listed in the manifest as a relative path with a recorded commitment. It
+ * must re-read to those exact bytes and carry the same public run-capsule
+ * commitment as the unit's sealed private capsule. The run ID alone is not a
+ * commitment, so a rewritten report with invented costs and no (or a
+ * different) capsule is refused here.
+ */
+function assertAuditedSourceReportBinding(manifest, derived, published, selector) {
+  const reportSource = derived.reportSource;
+  if (!reportSource || typeof reportSource.relativePath !== 'string') {
+    throw new Error(`experiment result ${selector.key} audit export has no bound source report`);
+  }
+  const evidence = readJsonFileEvidence(path.join(manifest.sourceRoot, reportSource.relativePath), {
+    root: manifest.sourceRoot,
+    purpose: 'audit source report',
+  });
+  if (evidence.sha256 !== reportSource.sha256 || evidence.bytes !== reportSource.bytes) {
+    throw new Error(`experiment result ${selector.key} audit source report changed after export`);
+  }
+  const capsuleCommitment = evidence.value?.provenance?.runCapsule ?? null;
+  const experimentBinding = evidence.value?.experiment ?? null;
+  if (capsuleCommitment === null || experimentBinding === null
+      || canonicalJson(capsuleCommitment) !== canonicalJson(published)
+      || canonicalJson(experimentBinding) !== canonicalJson(published.experiment)) {
+    throw new Error(`experiment result ${selector.key} audit source report is not bound to its sealed run capsule`);
+  }
+  return true;
 }
 
 // The sealed effective execution policy must exist and must be the plan's

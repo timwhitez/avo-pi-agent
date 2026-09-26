@@ -50,7 +50,16 @@ import {
   readExecutionPolicy,
   runProcess,
 } from '../src/benchmark/process-runner.mjs';
-import { AUDIT_INPUT_SCHEMA, exportTrajectoryAudit, validateTrajectoryAudit } from '../src/trajectory/audit-export.mjs';
+import {
+  AUDIT_INPUT_SCHEMA,
+  exportTrajectoryAudit,
+  normalizeAuditInputs,
+  readAuditInputManifest,
+  validateTrajectoryAudit,
+} from '../src/trajectory/audit-export.mjs';
+// The shared audit export-id commitment is exercised through the exporter
+// module itself rather than a copy of its formula in this suite.
+import * as auditExporter from '../src/trajectory/audit-export.mjs';
 import { AUDIT_RECEIPTS_SCHEMA, buildExecutionTerminal } from '../src/trajectory/audit-events.mjs';
 import { deriveGameBudgets } from '../src/arc/action-budget.mjs';
 import { aggregateGameMetrics, normalizeGameRecord } from '../src/benchmark/report.mjs';
@@ -439,6 +448,7 @@ function exportAudit({
   trajectory = [],
   cancelled = true,
   attempts = null,
+  capsule = null,
 }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-exp-v2-audit-'));
   auditRoots.push(root);
@@ -449,6 +459,9 @@ function exportAudit({
     schemaVersion: 2,
     runId,
     status: 'incomplete',
+    // A real interrupted report carries the public projection the runner
+    // sealed before it started; the audit must be bound to it, not just by id.
+    ...(capsule ? { provenance: { runCapsule: capsule }, experiment: capsule.experiment } : {}),
     completeness: {
       complete: false,
       expectedCount: expectedGameIds.length,
@@ -534,6 +547,16 @@ function capsuleFor(plan, phase, arm, {
   });
 }
 
+// The public projection of the sealed capsule is the identity the audit's
+// source report must carry; it is derived exactly as the results chain does.
+function publishedCapsuleFor(evidence) {
+  return projectPublicRunCapsule(evidence.value, {
+    runClass: evidence.value.definition.initialState.mode,
+    comparable: true,
+    capsuleEvidenceSha256: evidence.sha256,
+  });
+}
+
 // A full incomplete unit: the sealed capsule plus its exported #343 audit.
 function incompleteEvidence(plan, phase, arm, {
   replicate = 1,
@@ -547,13 +570,22 @@ function incompleteEvidence(plan, phase, arm, {
   attempts = null,
   experiment = expectedBindingV2(plan, phase, arm, replicate),
 } = {}) {
-  const audit = exportAudit({ runId, games, expectedGameIds, trajectory, cancelled, attempts });
+  const privateCapsuleEvidence = capsuleFor(plan, phase, arm, { replicate, runId, createdAt, initialStateOverrides, experiment });
+  const audit = exportAudit({
+    runId,
+    games,
+    expectedGameIds,
+    trajectory,
+    cancelled,
+    attempts,
+    capsule: publishedCapsuleFor(privateCapsuleEvidence),
+  });
   return {
     entry: {
       phase,
       arm,
       replicate,
-      privateCapsuleEvidence: capsuleFor(plan, phase, arm, { replicate, runId, createdAt, initialStateOverrides, experiment }),
+      privateCapsuleEvidence,
       auditRun: { exportDir: audit.exportDir, inputManifest: audit.inputManifest },
     },
     audit,
@@ -992,6 +1024,7 @@ test('P07 every scheduled unit is reported; partial pairs, duplicates and retry 
     runId: 'evaluation-intervention-censored',
     games: EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism(), { state: 'GAME_OVER' })),
     cancelled: false,
+    capsule: publishedCapsuleFor(censored.entry.privateCapsuleEvidence),
   });
   rejectIncomplete({
     ...censored.entry,
@@ -1757,4 +1790,62 @@ test('U09 partial attempt metrics are the game observed cost when the game itsel
     meteringLayers: ['partial-attempts'], completeMetering: false, complete: false,
   });
   assert.equal(result.observedCost.intervention.completedTotal, null);
+});
+
+// --- follow-up 2: bind the audit source report, keep one policy parse ------
+
+test('F2.1 an audit source report must carry the sealed run capsule, so a rewritten report with invented costs is refused', () => {
+  const plan = sealed();
+  const games = (overrides = {}) => EVALUATION_GAMES.map((versionedGameId) => auditGame(versionedGameId, mechanism(overrides)));
+  const legal = incompleteEvidence(plan, 'evaluation', 'intervention', { runId: 'f2-legal', games: games() });
+
+  // The legal partial audit passes end to end and its report carries the
+  // sealed public capsule commitment.
+  const input = readAuditInputManifest(legal.audit.inputManifest);
+  assert.equal(validateTrajectoryAudit(legal.audit.exportDir, { sourceRoot: input.sourceRoot }).ok, true);
+  const sourceReport = JSON.parse(fs.readFileSync(path.join(input.sourceRoot, 'f2-legal', 'report.json'), 'utf8'));
+  assert.deepEqual(sourceReport.provenance.runCapsule, publishedCapsuleFor(legal.entry.privateCapsuleEvidence),
+    'the legal report carries the sealed public capsule commitment');
+  const accepted = validateExperimentResults(plan, [legal.entry]);
+  assert.equal(accepted.units.find((unit) => unit.versionedGameId === EVALUATION_GAMES[0]).arms.intervention.executionStatus, 'censored');
+
+  // A forged source report keeps the run ID and invents costs, so the real
+  // exporter re-derives an internally consistent run record from it. It is
+  // refused only because it carries no run-capsule commitment.
+  const forgedCosts = games({ totalTokens: 1_000_000 });
+  const missingCommitment = exportAudit({ runId: 'f2-legal', games: forgedCosts });
+  const forgedSourceRoot = JSON.parse(fs.readFileSync(missingCommitment.inputManifest, 'utf8')).sourceRoot;
+  assert.equal(validateTrajectoryAudit(missingCommitment.exportDir, { sourceRoot: forgedSourceRoot }).ok, true,
+    'the forged export is internally valid for the #343 validator');
+  assert.throws(() => validateExperimentResults(plan, [{
+    ...legal.entry,
+    auditRun: { exportDir: missingCommitment.exportDir, inputManifest: missingCommitment.inputManifest },
+  }]), /not bound to its sealed run capsule/);
+
+  // A different commitment (the same run ID sealing another arm's source) is
+  // refused even though the report is a structurally valid capsule.
+  const otherCapsule = publishedCapsuleFor(capsuleFor(plan, 'evaluation', 'baseline', { runId: 'f2-legal' }));
+  assert.notDeepEqual(otherCapsule, publishedCapsuleFor(legal.entry.privateCapsuleEvidence));
+  const differentCommitment = exportAudit({ runId: 'f2-legal', games: forgedCosts, capsule: otherCapsule });
+  assert.throws(() => validateExperimentResults(plan, [{
+    ...legal.entry,
+    auditRun: { exportDir: differentCommitment.exportDir, inputManifest: differentCommitment.inputManifest },
+  }]), /not bound to its sealed run capsule/);
+
+  // The export id written to disk is the exporter's own shared commitment
+  // function, not a local copy re-implemented by the results chain.
+  const onDisk = JSON.parse(fs.readFileSync(path.join(legal.audit.exportDir, 'MANIFEST.json'), 'utf8'));
+  assert.equal(auditExporter.auditExportId(normalizeAuditInputs(input)), onDisk.exportId);
+});
+
+test('F2.2 an invalid execution policy is a structured configuration failure, before any provider request', async () => {
+  const plan = sealed();
+  const refusal = await runRealRunner(plan, fixture.built.sourceVerification, { AVO_PROGRESS_IDLE_MS: '30000' });
+  assert.notEqual(refusal.code, 0);
+  assert.ok(refusal.failure, 'the runner writes its redacted failure report instead of crashing');
+  assert.equal(refusal.failure.status, 'failed');
+  assert.equal(refusal.failure.failedStage, 'configuration');
+  assert.match(refusal.failure.error, /AVO_PROGRESS_IDLE_MS/);
+  assert.match(refusal.stderr, /FAILED stage=configuration/);
+  assert.doesNotMatch(`${refusal.stdout}\n${refusal.stderr}`, /provider-preflight|validating a non-mock|arc-runtime-attestation/);
 });
