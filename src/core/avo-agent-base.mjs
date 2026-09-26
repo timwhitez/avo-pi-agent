@@ -390,7 +390,7 @@ export class AvoArcAgent {
       {
         name: 'trajectory_read',
         label: 'Read exact durable trajectory evidence',
-        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid of a prior state; the current grid ships with every state-changing act, act_sequence, and reset result. When ref is present it selects exact-ref mode and startSequence/limit are ignored.',
+        description: 'Get exact prior observations/transitions by evidence ref, read one bounded grid region, diff two refs, or page bounded summaries. Use part=after for the exact grid of a prior state; the current grid ships with every state-changing act, act_sequence, and reset result. When ref is present it selects exact-ref mode and startSequence/limit are ignored. Copy refs verbatim from tool output; never guess them. If a ref is unavailable, omit ref and part (or set part=summary), then use startSequence/limit to page summaries. Region x/y are zero-based top-left cell coordinates; width/height are cell counts and the full rectangle must fit the referenced grid, which part=after can show.',
         parameters: {
           type: 'object',
           properties: {
