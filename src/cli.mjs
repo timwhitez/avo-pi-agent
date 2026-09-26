@@ -21,6 +21,7 @@ import { AvoArcAgent } from './core/avo-agent.mjs';
 import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
 import { createPiSdkLoop } from './loop/pi-sdk.mjs';
+import { bindCliReceipt, buildAuditGap, receiptLogLine } from './trajectory/audit-events.mjs';
 import {
   privateProviderIncidentEvidence,
   privateToolFailureEvidence,
@@ -269,6 +270,31 @@ async function runPublic(args) {
         if (workspaceFailure) {
           contextSequence += 1;
           process.stdout.write(`\n[avo-workspace-failure] ${JSON.stringify(workspaceFailure)}\n`);
+        }
+        if (event.type === 'avo_audit_receipt' && event.receipt) {
+          process.stdout.write(`\n${receiptLogLine(bindCliReceipt(event.receipt, {
+            runId: process.env.AVO_REAL_RUN_ID || null,
+            versionedGameId,
+            cliAttempt: activeAttempt,
+          }))}\n`);
+          return;
+        }
+        // #359: a receipt the Pi loop could not build is a real coverage gap.
+        // Persist it on the same bounded private channel so it cannot vanish
+        // from the audit chain with the event.
+        if (event.type === 'avo_audit_gap') {
+          process.stdout.write(`\n${receiptLogLine(bindCliReceipt(buildAuditGap({
+            scope: { runId: null, versionedGameId, attemptId: activeAgent?.attemptId ?? null },
+            recordSequence: event.recordSequence,
+            errorClass: event.errorClass,
+            phase: event.phase,
+            reason: event.reason,
+          }), {
+            runId: process.env.AVO_REAL_RUN_ID || null,
+            versionedGameId,
+            cliAttempt: activeAttempt,
+          }))}\n`);
+          return;
         }
         if (event.type === 'avo_provider_incident') {
           const providerIncident = privateProviderIncidentEvidence(event, incidentContext);

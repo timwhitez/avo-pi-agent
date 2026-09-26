@@ -15,6 +15,7 @@ import {
   readAuditInputManifest,
   validateTrajectoryAudit,
 } from '../src/trajectory/audit-export.mjs';
+import { contextReceiptsFor } from './support/context-receipts.mjs';
 
 // Master review of 8402852 (follow-up 2): the independent validator must
 // re-derive the scope/identity gap classes, attempts may certify metrics only
@@ -414,6 +415,15 @@ test('R2-06 the validator re-derives expected identities from the bound source r
     runId: 'r2-06',
     report: { runId: 'r2-06', completeness: completeness(['a-v1', 'b-v1']), games: [game('a-v1', metrics({ modelCalls: 3 }))] },
     trajectory: [finished('r2-06', 1, 'a-v1', false)],
+    // #344/#359: forward runs need their (versioned) receipts file to be
+    // audit-ready, and context coverage is checked against the report's own
+    // model-call cardinality, so the fixture carries real-shaped receipts.
+    receipts: {
+      schema: RECEIPTS_SCHEMA,
+      toolReceipts: [],
+      contextReceipts: contextReceiptsFor({ runId: 'r2-06', versionedGameId: 'a-v1', modelCalls: 3 }),
+      executionTerminals: [],
+    },
   });
   const fixture = setup([spec()]);
   try {

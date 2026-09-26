@@ -12,7 +12,9 @@ import {
   preflightResponsesProvider,
   requireRealProviderEnvironment,
 } from '../src/benchmark/provenance.mjs';
-import { runProcess, openLogFile } from '../src/benchmark/process-runner.mjs';
+import { openLogFile } from '../src/benchmark/process-runner.mjs';
+import { assertAuditComplete, executeOwnedChild, readTaskTerminal } from '../src/benchmark/runner-execution.mjs';
+import { ledgerBaseline, reconcileLedgerAccounting } from '../src/benchmark/execution-accounting.mjs';
 import { writeRunObservation, projectRunActivity } from '../src/benchmark/run-observation.mjs';
 import { attestPiProviderStream } from '../src/benchmark/pi-stream-attestation.mjs';
 import { attestWorkspaceCapability } from '../src/benchmark/workspace-attestation.mjs';
@@ -244,9 +246,25 @@ try {
   const invocationId = crypto.randomBytes(16).toString('hex');
   const knownGames = new Set(observation.gameIds);
   let activitySequence = 0;
+  const ledgerGameIds = games.map((game) => String(game.versionedGameId).split('-')[0]);
+  const executionLedgerBaseline = ledgerBaseline({ memoryDir: runState.memoryDir, gameIds: ledgerGameIds });
+  // #361: the child's own report, validated against the frozen game set, is the
+  // trusted task terminal; without it the task outcome stays unknown. There is
+  // no unfinished-work collector for the production runner, so unfinished
+  // coverage is explicitly unknown rather than a proven empty set.
+  const deterministicReportFile = path.join(runsRoot, `${runId}-official-public-environments.json`);
+  const taskTerminal = () => readTaskTerminal({
+    runsRoot,
+    runId,
+    games,
+    before,
+    extraFiles: [deterministicReportFile],
+  });
   let child;
   try {
-    child = await runProcess(process.execPath, childArgs, {
+    child = await executeOwnedChild({
+    command: process.execPath,
+    args: childArgs,
     cwd: root,
     env: buildAgentChildEnvironment({
       source: process.env,
@@ -268,28 +286,77 @@ try {
       },
     }),
     timeoutMs,
-    appendLogs: resuming,
-    logRoot: privateDir,
-    stdoutFile,
-    stderrFile,
-    maxTailChars: 64 * 1024,
-    onMessage(message) {
-      const projected = projectRunActivity(message, { runId, capsuleHash: capsule.capsuleHash });
-      if (!projected || !knownGames.has(projected.gameId) || projected.total !== games.length
-          || projected.sequence <= activitySequence) throw new Error('invalid or duplicate run activity');
-      activitySequence = projected.sequence;
-      const event = redact({ ...projected, invocationId, at: new Date().toISOString() }, { explicitSecrets });
-      if (!projectRunActivity(event, { runId, capsuleHash: capsule.capsuleHash })) throw new Error('activity redaction changed its binding');
-      const line = `${JSON.stringify(event)}\n`;
-      if (Buffer.byteLength(line) > 4096 || process.stdout.writableLength > 64 * 1024) {
-        throw new Error('run activity output exceeds its bounded channel');
-      }
-      fs.writeFileSync(activityFd, line);
-      process.stdout.write(line);
+    // #346: one cancellation decision and one exclusive final record per
+    // execution. The job deadline is the existing timeoutMs; a progress-idle
+    // policy exists only when explicitly configured. Final accounting is read
+    // from the committed durable ledger after the child is drained.
+    cancellation: {
+      executionId: `exec-${invocationId}`,
+      scope: { runId },
+      terminalRoot: privateDir,
+      terminalFile: path.join(privateDir, `execution-terminal.${invocationId}.json`),
+      cancelRequestFile: path.join(privateDir, `execution-cancel-request.${invocationId}.json`),
+      taskTerminal,
+      // The production runner has no unfinished-work collector: the record says
+      // so explicitly (`coverage: "unknown"`) instead of reporting an empty set.
+      unfinished: () => null,
+      policies: progressIdlePolicies(),
+      reconcile: () => reconcileLedgerAccounting({
+        memoryDir: runState.memoryDir,
+        gameIds: ledgerGameIds,
+        baseline: executionLedgerBaseline,
+      }),
+    },
+    runOptions: {
+      appendLogs: resuming,
+      logRoot: privateDir,
+      stdoutFile,
+      stderrFile,
+      maxTailChars: 64 * 1024,
+      onMessage(message) {
+        const projected = projectRunActivity(message, { runId, capsuleHash: capsule.capsuleHash });
+        if (!projected || !knownGames.has(projected.gameId) || projected.total !== games.length
+            || projected.sequence <= activitySequence) throw new Error('invalid or duplicate run activity');
+        activitySequence = projected.sequence;
+        const event = redact({ ...projected, invocationId, at: new Date().toISOString() }, { explicitSecrets });
+        if (!projectRunActivity(event, { runId, capsuleHash: capsule.capsuleHash })) throw new Error('activity redaction changed its binding');
+        const line = `${JSON.stringify(event)}\n`;
+        if (Buffer.byteLength(line) > 4096 || process.stdout.writableLength > 64 * 1024) {
+          throw new Error('run activity output exceeds its bounded channel');
+        }
+        fs.writeFileSync(activityFd, line);
+        process.stdout.write(line);
+      },
     },
     });
   } finally {
     try { fs.fsyncSync(activityFd); } finally { fs.closeSync(activityFd); }
+  }
+  // #361: the caller consumes the execution terminal's own commit status. A
+  // terminal the runner could not commit, or a token the runner could not
+  // confirm, is part of the report and of the exit status - never a silent
+  // success and never a reason to replay the games.
+  if (child.audit.auditIncomplete) {
+    stage.value = 'audit-incomplete';
+    throw new Error(`execution terminal was not committed: state=${child.audit.state ?? 'none'}`);
+  }
+  assertAuditComplete(child, 'production public runner terminal');
+  const terminalReceipt = child.receipt;
+  // The committed fact is kept even when its confirmation was lost; it is
+  // surfaced in the report and the exit status instead of being replayed.
+  const executionTerminal = Object.freeze({
+    state: child.audit.state,
+    executionId: terminalReceipt?.executionId ?? null,
+    processOutcome: terminalReceipt?.processOutcome ?? null,
+    taskOutcome: terminalReceipt?.executionOutcome ?? null,
+    unconfirmed: child.audit.unconfirmed === true,
+  });
+  // A task that ended in error has a complete audit: its game errors are
+  // reported by the normal completeness/report gates below. Only a task with
+  // no trusted terminal (unknown) or a cancelled one stops here.
+  if (terminalReceipt && !['completed', 'error'].includes(terminalReceipt.executionOutcome)) {
+    stage.value = 'audit-incomplete';
+    throw new Error(`production public runner produced no completed task: outcome=${terminalReceipt.executionOutcome} reason=${terminalReceipt.cancellation?.primaryReason ?? terminalReceipt.taskReasonCode ?? terminalReceipt.reasonCode ?? 'unknown'}`);
   }
   if (child.timedOut) {
     throw new Error(`production public runner timed out after ${timeoutMs}ms`);
@@ -410,6 +477,7 @@ try {
     aggregates,
     games: selected.records,
     experiment: experimentRun?.binding ?? null,
+    executionTerminal,
     artifacts: {
       rawRunReport: {
         file: path.basename(rawRunReport),
@@ -444,6 +512,7 @@ try {
     officialScore,
     aggregates,
     games: selected.records,
+    executionTerminal,
     experiment: provenance.runCapsule?.experiment
       ? structuredClone(provenance.runCapsule.experiment)
       : null,
@@ -457,6 +526,10 @@ try {
     console.log(`[real-run] COMPLETE score=${officialScore.value} origin=${officialScore.origin}`);
   } else {
     console.log(`[real-run] ${acceptedStatus.toUpperCase()} complete; official score withheld: ${officialScore.reason}`);
+    process.exitCode = 2;
+  }
+  if (executionTerminal.unconfirmed) {
+    console.log(`[real-run] execution terminal ${executionTerminal.executionId} was committed but unconfirmed; kept, not replayed`);
     process.exitCode = 2;
   }
   console.log(`[real-run] public report: ${path.relative(root, publicFile)}`);
@@ -484,6 +557,29 @@ try {
   console.error(`[real-run] FAILED stage=${stage.value}: ${failure.error}`);
   console.error(`[real-run] redacted failure report: ${path.relative(root, publicFile)}`);
   process.exitCode = 1;
+}
+
+function progressIdlePolicies() {
+  const raw = process.env.AVO_PROGRESS_IDLE_MS;
+  if (raw === undefined || raw === '') return [];
+  const thresholdMs = Number(raw);
+  if (!Number.isSafeInteger(thresholdMs) || thresholdMs < 60_000) {
+    throw new Error('AVO_PROGRESS_IDLE_MS must be an integer of at least 60000');
+  }
+  const lastActions = new Map();
+  return [{
+    kind: 'environment-progress-idle',
+    thresholdMs,
+    activitySource: 'game.progress committed action count increase',
+    configuredSource: 'AVO_PROGRESS_IDLE_MS',
+    isActivity(message) {
+      if (message?.type !== 'game.progress' || !Number.isSafeInteger(message.actions)) return false;
+      const key = String(message.gameId);
+      const increased = message.actions > (lastActions.get(key) ?? -1);
+      lastActions.set(key, Math.max(message.actions, lastActions.get(key) ?? -1));
+      return increased;
+    },
+  }];
 }
 
 function benchmarkTimeout() {

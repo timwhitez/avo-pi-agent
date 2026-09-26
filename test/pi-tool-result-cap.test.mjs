@@ -61,6 +61,8 @@ async function loadAdapterCapturing() {
   fs.copyFileSync(path.resolve(process.cwd(), 'src/loop/pi-sdk.mjs'), path.join(root, 'src', 'loop', 'pi-sdk.mjs'));
   fs.copyFileSync('src/provider-capabilities.mjs', path.join(root, 'src', 'provider-capabilities.mjs'));
   fs.copyFileSync('src/local/canonical-json.mjs', path.join(root, 'src', 'local', 'canonical-json.mjs'));
+  fs.mkdirSync(path.join(root, 'src', 'trajectory'), { recursive: true });
+  fs.copyFileSync('src/trajectory/audit-events.mjs', path.join(root, 'src', 'trajectory', 'audit-events.mjs'));
   fs.copyFileSync('src/core/policy-profile.mjs', path.join(root, 'src', 'core', 'policy-profile.mjs'));
   fs.copyFileSync('src/core/bounded-read.mjs', path.join(root, 'src', 'core', 'bounded-read.mjs'));
 
@@ -104,7 +106,12 @@ test('tool results are capped before entering the model context', async () => {
     assert.match(text, /trajectory_read ref=evidence-000001-123456789abc/);
     assert.equal(output.details.ok, true, 'original details survive the context marker');
     assert.equal(output.details.contextTruncated, true);
-    assert.deepEqual(events, [{
+    // #344: the wrapper also emits one tool receipt for the truncated delivery.
+    const receipts = events.filter((event) => event.type === 'avo_audit_receipt');
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].receipt.delivery, 'truncated');
+    assert.equal(receipts[0].receipt.rawTextChars, 60_000);
+    assert.deepEqual(events.filter((event) => event.type === 'avo_context_compaction'), [{
       type: 'avo_context_compaction',
       mode: 'tool_result_truncation',
       templateSha256: mod.TOOL_RESULT_TRUNCATION_NOTICE_TEMPLATE_SHA256,

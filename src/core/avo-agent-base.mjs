@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 import { MEMORY_READ_SECTIONS, PersistentMemory } from './memory.mjs';
-import { ReadRequestError, resolveToolResultMaxChars } from './bounded-read.mjs';
+import { MAX_ACTION_SEQUENCE, ReadRequestError, normalizeActionSequence, resolveToolResultMaxChars } from './bounded-read.mjs';
 import { StallSupervisor } from './supervisor.mjs';
 import { HypothesisEvaluator, normalizeHypothesis, objectiveVector } from './evaluator.mjs';
 import { ArcKnowledgeBase } from './knowledge-base.mjs';
@@ -32,7 +32,6 @@ const OBJECT_SCHEMA = { type: 'object', additionalProperties: true };
 export const CURRENT_OBSERVATION_ANCHOR_SCHEMA = 'avo.current-observation-anchor.v1';
 export const OBSERVATION_VIEW_SCHEMA = 'avo.observation-view.v1';
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
-const MAX_ACTION_SEQUENCE = 20;
 const MAX_TRAJECTORY_DIFF_CELLS = 128;
 const CLAIM_REF_SCHEMA = { type: 'string', maxLength: 32, pattern: '^claim-[0-9]{6,16}$' };
 const EVIDENCE_REF_SCHEMA = { type: 'string', maxLength: 64, pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' };
@@ -1475,65 +1474,6 @@ export class AvoArcAgent {
 }
 
 const SEALED_AVO_TOOLS = deepFreeze(AvoArcAgent.prototype.tools.call({}));
-
-function normalizeActionSequence(value) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ACTION_SEQUENCE) {
-    throw new Error(`act_sequence steps must contain 1 through ${MAX_ACTION_SEQUENCE} items`);
-  }
-  const allowed = new Set(['action', 'x', 'y', 'reasoning', 'expected']);
-  return value.map((step, index) => {
-    if (!step || typeof step !== 'object' || Array.isArray(step)
-        || Object.keys(step).some((key) => !allowed.has(key))) {
-      throw new Error(`act_sequence step ${index} is malformed`);
-    }
-    if (typeof step.action !== 'string' || step.action.length < 1 || step.action.length > 32) {
-      throw new Error(`act_sequence step ${index} action must be a bounded string`);
-    }
-    for (const coordinate of ['x', 'y']) {
-      if (step[coordinate] !== undefined && !Number.isSafeInteger(step[coordinate])) {
-        throw new Error(`act_sequence step ${index} ${coordinate} must be an integer`);
-      }
-    }
-    if (step.reasoning !== undefined
-        && (typeof step.reasoning !== 'string' || step.reasoning.length > 1000)) {
-      throw new Error(`act_sequence step ${index} reasoning exceeds its bound`);
-    }
-    return {
-      action: step.action,
-      x: step.x,
-      y: step.y,
-      reasoning: step.reasoning || '',
-      expected: normalizeActionExpectation(step.expected, index),
-    };
-  });
-}
-
-function normalizeActionExpectation(value, index) {
-  if (value === undefined) return {};
-  const allowed = new Set(['changed', 'levelDeltaAtLeast', 'state', 'afterHash']);
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some((key) => !allowed.has(key))) {
-    throw new Error(`act_sequence step ${index} expected postcondition is malformed`);
-  }
-  if (value.changed !== undefined && typeof value.changed !== 'boolean') {
-    throw new Error(`act_sequence step ${index} expected.changed must be boolean`);
-  }
-  if (value.levelDeltaAtLeast !== undefined
-      && (!Number.isSafeInteger(value.levelDeltaAtLeast)
-        || value.levelDeltaAtLeast < 0 || value.levelDeltaAtLeast > 10_000)) {
-    throw new Error(`act_sequence step ${index} expected.levelDeltaAtLeast is invalid`);
-  }
-  if (value.state !== undefined
-      && (typeof value.state !== 'string' || value.state.length < 1 || value.state.length > 64
-        || /[\r\n\0]/.test(value.state))) {
-    throw new Error(`act_sequence step ${index} expected.state is invalid`);
-  }
-  if (value.afterHash !== undefined
-      && (typeof value.afterHash !== 'string' || !/^[a-f0-9]{16}$/.test(value.afterHash))) {
-    throw new Error(`act_sequence step ${index} expected.afterHash is invalid`);
-  }
-  return structuredClone(value);
-}
 
 function expectationMismatches(expected, before, after) {
   const actual = {

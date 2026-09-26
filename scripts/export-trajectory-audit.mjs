@@ -4,6 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { exportTrajectoryAudit, validateTrajectoryAudit } from '../src/trajectory/audit-export.mjs';
+import { receiptsFromPrivateLog } from '../src/trajectory/audit-events.mjs';
+import { readJsonFileEvidence, readRegularFileEvidence } from '../src/local/regular-file-evidence.mjs';
+import { writeJsonAtomic } from '../src/benchmark/report-safe-files.mjs';
 
 // Single entry for trajectory audit exports (#343). Exit codes: 0 export (or
 // validation) complete; 2 export complete but a run is not audit-ready while
@@ -13,7 +16,26 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const args = parseArgs(process.argv.slice(2));
 
 try {
-  if (args.validateOutput) {
+  if (args.extractReceipts) {
+    // Builds the versioned receipts file from a private run log; malformed
+    // tagged lines are counted, never repaired.
+    if (!args.receiptsOut) throw new Error('--extract-receipts requires --receipts-out <new-file>');
+    const log = readRegularFileEvidence(path.resolve(args.extractReceipts), { maxBytes: 512 * 1024 * 1024, purpose: 'private run log' });
+    const receipts = receiptsFromPrivateLog(log.buffer.toString('utf8'));
+    // Execution terminal records are separate exclusive files next to the log.
+    for (const file of args.terminal ?? []) {
+      const record = readJsonFileEvidence(path.resolve(file), { purpose: 'execution terminal record' }).value;
+      receipts.executionTerminals.push(record);
+    }
+    const out = path.resolve(args.receiptsOut);
+    writeJsonAtomic(out, receipts, { root: path.dirname(out), maxBytes: 256 * 1024 * 1024, exclusive: true });
+    console.log(JSON.stringify({
+      toolReceipts: receipts.toolReceipts.length,
+      contextReceipts: receipts.contextReceipts.length,
+      executionTerminals: receipts.executionTerminals.length,
+      malformedLines: receipts.malformedLines,
+    }));
+  } else if (args.validateOutput) {
     const result = validateTrajectoryAudit(args.validateOutput, { sourceRoot: args.sourceRoot ?? null });
     console.log(JSON.stringify(result));
     process.exitCode = result.ok ? 0 : 1;
@@ -46,7 +68,14 @@ function parseArgs(values) {
     if (value === '--require-audit-ready') { result.requireAuditReady = true; continue; }
     if (!value.startsWith('--')) throw new Error(`unexpected argument: ${value}`);
     const name = value.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    if (!['inputManifest', 'outputDir', 'validateOutput', 'sourceRoot'].includes(name)) throw new Error(`unknown option: ${value}`);
+    if (name === 'terminal') {
+      const next = values[index + 1];
+      if (next === undefined || next.startsWith('--')) throw new Error('missing value for --terminal');
+      (result.terminal ??= []).push(next);
+      index += 1;
+      continue;
+    }
+    if (!['inputManifest', 'outputDir', 'validateOutput', 'sourceRoot', 'extractReceipts', 'receiptsOut'].includes(name)) throw new Error(`unknown option: ${value}`);
     const next = values[index + 1];
     if (next === undefined || next.startsWith('--')) throw new Error(`missing value for ${value}`);
     result[name] = next;

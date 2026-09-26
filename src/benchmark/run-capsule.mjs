@@ -117,6 +117,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/local/regular-file-evidence.mjs',
   'src/loop/pi-sdk.mjs',
   'src/provider-capabilities.mjs',
+  'src/trajectory/audit-events.mjs',
 ]);
 const STATE_MODES = new Set(['cold-start', 'warm-start']);
 const RESUME_MODES = new Set(['recovered', 'migrated']);
