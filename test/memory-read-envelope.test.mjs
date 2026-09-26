@@ -12,6 +12,7 @@ import { resolveToolResultMaxChars } from '../src/core/bounded-read.mjs';
 import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
 import { effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
 import { providerCapabilities } from './support/provider.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const INERT_LOOP = { kind: 'test', async run() { return { error: null }; } };
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
@@ -139,7 +140,7 @@ let fixture = null;
 
 async function historyFixture() {
   if (fixture) return fixture;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-envelope-'));
+  const dir = temporaryDirectory('avo-memory-envelope-');
   const gameId = 'memory-read-history';
   const agent = await startAgent({
     dir,
@@ -374,7 +375,7 @@ test('M04 the resolved bound is shared and a mismatched loop initialization is r
 });
 
 test('M05 a shortened page advances from the last emitted claim, even with sequence gaps', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-page-'));
+  const dir = temporaryDirectory('avo-memory-page-');
   const gameId = 'memory-read-page';
   const agent = await startAgent({
     dir,
@@ -468,7 +469,7 @@ test('M07 oversized records and sections recover every field on the last page', 
 });
 
 test('M08 changed content, invalid offsets and absent IDs report the exact codes', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-changed-'));
+  const dir = temporaryDirectory('avo-memory-changed-');
   const gameId = 'memory-read-changed';
   const agent = await startAgent({
     dir,
@@ -521,7 +522,7 @@ test('M08 changed content, invalid offsets and absent IDs report the exact codes
 });
 
 test('M15 a valid section continuation reports STALE_READ after the section shrinks', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-memory-shrink-'));
+  const dir = temporaryDirectory('avo-memory-shrink-');
   const gameId = 'memory-read-shrink';
   const agent = await startAgent({
     dir,

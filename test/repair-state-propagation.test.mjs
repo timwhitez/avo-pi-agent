@@ -6,9 +6,10 @@ import test from 'node:test';
 
 import { prepareRunState } from '../src/benchmark/run-capsule.mjs';
 import { resolveRunOutputState } from '../src/trajectory/repair-state.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 test('the next repair round receives the preceding agent-owned durable state', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-repair-state-'));
+  const root = temporaryDirectory('avo-repair-state-');
   const seedMemory = path.join(root, 'seed', 'memory');
   const seedWorkspace = path.join(root, 'seed', 'workspace');
   fs.mkdirSync(seedMemory, { recursive: true });

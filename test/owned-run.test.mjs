@@ -29,13 +29,18 @@ for (const detached of [true, false]) test(`stable repair entry enters its owned
   // Synthetic benchmark fixture: a non-leader launch re-executes the entry in a
   // new group, so pre-entry filesystem effects would reject the fresh run ID.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-repair-entry-'));
+  // Confine the owned-run guardian temp directory to the test root so the
+  // post-entry failure path (private root already exists) cannot orphan a
+  // directory under the shared os.tmpdir().
+  const childTmp = path.join(root, 'tmp');
+  fs.mkdirSync(childTmp, { recursive: true });
   try {
     fs.mkdirSync(path.join(root, 'scripts'));
     fs.writeFileSync(path.join(root, 'scripts/run-real-public.mjs'),
       "import fs from 'node:fs';\nfs.appendFileSync('benchmark-invocations', `${process.pid}\\n`);\nprocess.exitCode = 1;\n");
     const result = spawnSync(process.execPath, [path.resolve('scripts/run-trajectory-repair-loop.mjs'), '--run-id=entry-fixture', '--max-rounds=1'], {
       cwd: root, detached, encoding: 'utf8', timeout: 20_000,
-      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1' },
+      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1', TMPDIR: childTmp },
     });
     assert.doesNotMatch(result.stderr, /already exists/);
     assert.equal(fs.readFileSync(path.join(root, 'benchmark-invocations'), 'utf8').trim().split('\n').length, 1);
@@ -52,7 +57,7 @@ for (const detached of [true, false]) test(`stable repair entry enters its owned
 
     const reused = spawnSync(process.execPath, [path.resolve('scripts/run-trajectory-repair-loop.mjs'), '--run-id=entry-fixture', '--max-rounds=1'], {
       cwd: root, detached, encoding: 'utf8', timeout: 20_000,
-      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1' },
+      env: { PATH: process.env.PATH, AVO_DISABLE_DOTENV: '1', TMPDIR: childTmp },
     });
     assert.equal(reused.status, 1, reused.stderr);
     assert.match(reused.stderr, /private root already exists; choose a fresh run ID/);

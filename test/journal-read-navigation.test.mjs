@@ -10,6 +10,7 @@ import { canonicalJson } from '../src/local/canonical-json.mjs';
 import { decodeCursor } from '../src/core/bounded-read.mjs';
 import { boundTranscript, toTypeBox } from '../src/loop/pi-sdk.mjs';
 import { effectiveAvoToolNames } from '../src/core/avo-agent-base.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const INERT_LOOP = { kind: 'test', async run() { return { error: null }; } };
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
@@ -205,7 +206,7 @@ let sharedFixture = null;
 
 async function changingFixture() {
   if (sharedFixture) return sharedFixture;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-nav-'));
+  const dir = temporaryDirectory('avo-journal-nav-');
   const gameId = 'journal-nav';
   const agent = await startAgent({
     dir,
@@ -260,7 +261,7 @@ test('J01 retained records stay addressable beyond the latest-200 window', async
 });
 
 test('J02 every retained-count and page-size boundary has no gap or duplicate', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-boundary-'));
+  const dir = temporaryDirectory('avo-journal-boundary-');
   const gameId = 'journal-boundary';
   const agent = await startAgent({
     dir,
@@ -324,7 +325,7 @@ test('J03 the oldest records reassemble exactly and do not trigger re-evaluation
 });
 
 test('J04 a changed collection invalidates its cursor while an unchanged one stays readable', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-stale-'));
+  const dir = temporaryDirectory('avo-journal-stale-');
   const gameId = 'journal-stale';
   const agent = await startAgent({
     dir,
@@ -364,7 +365,7 @@ test('J04 a changed collection invalidates its cursor while an unchanged one sta
 });
 
 test('J05 malformed, foreign and cross-game cursors fail explicitly and write nothing', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-cursor-'));
+  const dir = temporaryDirectory('avo-journal-cursor-');
   const gameId = 'journal-cursor';
   const agent = await startAgent({
     dir,
@@ -374,7 +375,7 @@ test('J05 malformed, foreign and cross-game cursors fail explicitly and write no
   });
   const tools = toolMap(agent);
   const bound = agent.toolResultMaxChars;
-  const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-other-'));
+  const otherDir = temporaryDirectory('avo-journal-other-');
   try {
     for (let index = 0; index < 3; index += 1) await runExperiment(tools, index);
     const page = (await journalRead(tools, { view: 'list', collection: 'proposals', limit: 2 }, bound)).value;
@@ -436,7 +437,7 @@ test('J05 malformed, foreign and cross-game cursors fail explicitly and write no
 });
 
 test('J06 oversized records with escapes, CJK and emoji reassemble under two bounds', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-unicode-'));
+  const dir = temporaryDirectory('avo-journal-unicode-');
   const gameId = 'journal-unicode';
   const unicode = '计划 "quoted" \\ backslash\nnewline 😀👩‍💻 tab\t';
   const agent = await startAgent({
@@ -487,7 +488,7 @@ test('J06 oversized records with escapes, CJK and emoji reassemble under two bou
 });
 
 test('J07 invalid offsets, missing or stale hashes and absent IDs return explicit codes', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-offset-'));
+  const dir = temporaryDirectory('avo-journal-offset-');
   const gameId = 'journal-offset';
   const agent = await startAgent({
     dir,
@@ -615,8 +616,8 @@ test('J09 reads use no write path and leave the store byte-identical', async () 
 });
 
 test('J10 lifecycle records keep their identity and unretained IDs report READ_NOT_FOUND', async () => {
-  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-legacy-'));
-  const retryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-lifecycle-'));
+  const legacyDir = temporaryDirectory('avo-journal-legacy-');
+  const retryDir = temporaryDirectory('avo-journal-lifecycle-');
   try {
     const legacyGame = 'legacy-game';
     fs.writeFileSync(path.join(legacyDir, `${legacyGame}.json`), JSON.stringify({
@@ -730,7 +731,7 @@ test('J11 only current-v1 exposes the read tools and the derived schema matches'
 });
 
 test('J12 legacy pages and navigation survive a large supervisor history and small bounds', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-joint-'));
+  const dir = temporaryDirectory('avo-journal-joint-');
   const gameId = 'journal-joint';
   const agent = await startAgent({
     dir,
@@ -793,7 +794,7 @@ test('J12 legacy pages and navigation survive a large supervisor history and sma
 });
 
 test('J10b DurableMemory keeps conclusive records while evicting expired ones', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-journal-retention-'));
+  const dir = temporaryDirectory('avo-journal-retention-');
   try {
     const memory = new DurableMemory(dir, 'retention-game', { maxPending: 1, maxEvaluations: 2 }).load();
     for (let index = 0; index < 3; index += 1) {

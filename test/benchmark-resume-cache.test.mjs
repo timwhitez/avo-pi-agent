@@ -15,11 +15,12 @@ import {
 import { canonicalJson, inspectRunState } from '../src/benchmark/run-capsule.mjs';
 import { hashExecutionId, normalizeScorecardSnapshot } from '../src/benchmark/scorecard-evidence.mjs';
 import { trajectoryEvidenceFixture } from './support/run-capsule.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
 import { aggregateGameMetrics } from '../src/benchmark/report-records.mjs';
 
 function sandbox() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-resume-'));
+  const root = temporaryDirectory('avo-resume-');
   fs.mkdirSync(path.join(root, 'runs', 'private'), { recursive: true });
   return root;
 }

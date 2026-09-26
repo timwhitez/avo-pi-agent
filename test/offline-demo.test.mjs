@@ -6,9 +6,10 @@ import path from 'node:path';
 import { OfflineDemoEnvironment } from '../src/arc/offline-demo.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import { createPortablePiLoop } from '../src/loop/portable-pi.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 test('portable contract loop wins all levels and writes no provider data', async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-demo-'));
+  const memoryDir = temporaryDirectory('avo-demo-');
   const config = { maxActions: 200, stallWindow: 8, memoryDir };
   const environment = new OfflineDemoEnvironment({ id: 'test-contract', size: 5 });
   const loop = createPortablePiLoop({ maxSteps: 200 });

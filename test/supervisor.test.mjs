@@ -6,9 +6,10 @@ import path from 'node:path';
 import { StallSupervisor } from '../src/core/supervisor.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import { DurableMemory } from '../src/core/durable-memory.mjs';
+import { temporaryDirectory } from './support/temp-directories.mjs';
 
 for (const period of [3, 4]) test(`production period-${period} cycle injects and persists only bounded guidance`, async () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-supervisor-cycle-'));
+  const memoryDir = temporaryDirectory('avo-supervisor-cycle-');
   let phase = 0;
   const raw = () => ({ game_id: 'cycle-game', frame: [Array.from({ length: period }, (_, index) => index === phase ? 1 : 0)],
     state: 'PLAYING', levels_completed: 0, win_levels: 1, available_actions: ['ACTION1'] });
@@ -58,7 +59,7 @@ for (const period of [3, 4]) test(`production period-${period} cycle injects and
 });
 
 test('evidence-scoped supervisor identities retain bounded history without losing distinct records', () => {
-  const memoryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-supervisor-retention-'));
+  const memoryDir = temporaryDirectory('avo-supervisor-retention-');
   try {
     const memory = new DurableMemory(memoryDir, 'retention').load();
     const supervisor = new StallSupervisor(1, { maxEvents: 2, maxInterventions: 3, maxEscalations: 0 });
