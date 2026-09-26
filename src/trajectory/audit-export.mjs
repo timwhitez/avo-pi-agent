@@ -911,13 +911,17 @@ function summarizeReceipts(receipts, games, gaps, scope = {}, attemptIdsByGame =
     if (binding.binding === 'unbound') unbound.push(`context:${receipt.requestSequence ?? '?'}`);
     boundContext.push(receipt);
     const versionedGameId = String(receipt.scope.versionedGameId ?? '').toLowerCase();
+    // Each Agent attempt's loop numbers its requests from 1: a logical request
+    // is identified by run/game/attempt and its requestSequence.
+    const attemptKey = receipt.scope.attemptId ?? `cli:${receipt.cliAttempt ?? ''}`;
     if (!contextByGame.has(versionedGameId)) contextByGame.set(versionedGameId, new Set());
-    if (Number.isSafeInteger(receipt.requestSequence)) contextByGame.get(versionedGameId).add(receipt.requestSequence);
+    if (Number.isSafeInteger(receipt.requestSequence)) contextByGame.get(versionedGameId).add(`${attemptKey}\0${receipt.requestSequence}`);
     if (Number.isSafeInteger(receipt.requestSequence)) {
-      const key = `${versionedGameId}\0${receipt.requestSequence}`;
+      const key = `${versionedGameId}\0${attemptKey}\0${receipt.requestSequence}`;
       if (!requestEvidence.has(key)) {
         requestEvidence.set(key, {
           versionedGameId,
+          attemptKey,
           requestSequence: receipt.requestSequence,
           phases: new Map(),
           attempts: new Set(),
@@ -1668,7 +1672,7 @@ const GAP_CLASSES = Object.freeze({
   REPORT_MISSING: ['REPORT_MISSING'],
   TRAJECTORY_NOT_PRESENT: ['TRAJECTORY_MISSING', 'TRAJECTORY_PARTIAL'],
   RECEIPTS_NOT_PRESENT: ['RECEIPTS_MISSING'],
-  RECEIPTS_NOT_CONSISTENT: ['RECEIPT_ID_CONFLICT', 'RECEIPTS_COUNT_MISMATCH', 'CONTEXT_COVERAGE_INCOMPLETE'],
+  RECEIPTS_NOT_CONSISTENT: ['RECEIPT_ID_CONFLICT', 'RECEIPTS_COUNT_MISMATCH', 'CONTEXT_COVERAGE_INCOMPLETE', 'CONTEXT_COVERAGE_UNKNOWN'],
   TERMINALS_NOT_CONSISTENT: ['TERMINAL_RECORD_CONFLICT', 'TERMINAL_RECORD_GAPS', 'TERMINAL_ACCOUNTING_MISMATCH'],
   RUN_METRICS_INCOMPLETE: ['RUN_METRICS_INCOMPLETE', 'EXPECTED_UNITS_UNKNOWN', 'EXPECTED_IDENTITIES_UNKNOWN', 'EXPECTED_VERSIONS_UNKNOWN', 'GAME_IDENTITY_DUPLICATE', 'GAME_IDENTITY_MISSING', 'GAME_IDENTITY_EXTRA'],
   AGGREGATE_MISMATCH: ['AGGREGATE_MISMATCH'],
