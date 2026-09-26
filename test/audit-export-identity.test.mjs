@@ -15,6 +15,7 @@ import {
   readAuditInputManifest,
   validateTrajectoryAudit,
 } from '../src/trajectory/audit-export.mjs';
+import { contextReceiptsFor } from './support/context-receipts.mjs';
 
 // Integration acceptance for #357 on top of #343: identity sets (not counts),
 // attempt vs execution scope, one run/game/attempt scope join, and an
@@ -438,8 +439,18 @@ test('S07 the real CLI exports, validates and reads back a complete records/metr
       { runId: 's07', versionedGameId: 'a-v1', attemptId: 'attempt-000001', executions: [eref(e1)], mechanismMetrics: metrics({ modelCalls: 3 }) },
       { runId: 's07', versionedGameId: 'b-v1', attemptId: 'attempt-000002', executions: [eref(e2)], mechanismMetrics: metrics({ modelCalls: 5 }) },
     ],
-    // #344: forward runs need their (versioned) receipts file to be audit-ready.
-    receipts: { schema: 'avo.trajectory-audit-receipts.v1', toolReceipts: [], contextReceipts: [], executionTerminals: [] },
+    // #344/#359: forward runs need their (versioned) receipts file to be
+    // audit-ready, and context coverage is checked against the report's own
+    // model-call cardinality, so the fixture carries real-shaped receipts.
+    receipts: {
+      schema: 'avo.trajectory-audit-receipts.v1',
+      toolReceipts: [],
+      contextReceipts: [
+        ...contextReceiptsFor({ runId: 's07', versionedGameId: 'a-v1', modelCalls: 3 }),
+        ...contextReceiptsFor({ runId: 's07', versionedGameId: 'b-v1', modelCalls: 5 }),
+      ],
+      executionTerminals: [],
+    },
   }]);
   try {
     const exported = spawnSync(process.execPath, [CLI, '--input-manifest', fixture.manifestFile, '--output-dir', fixture.output, '--require-audit-ready'], { encoding: 'utf8' });

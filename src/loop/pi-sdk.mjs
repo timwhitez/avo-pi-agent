@@ -210,6 +210,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
   const clockDomain = `pi-loop:${process.pid}:${process.hrtime.bigint()}`;
   // Receipts are observation only: a failure to build one degrades audit
   // coverage (an explicit gap event) and never changes the tool or request.
+  // The sink can be switched off entirely (#358 Q06) without changing what the
+  // model is sent or which tools run: the selector bookkeeping the payload
+  // visibility uses stays.
+  const receiptSinkEnabled = config.auditReceipts !== false;
   const emitReceipt = (state, build) => {
     if (!state) return null;
     state.recordSequence += 1;
@@ -221,10 +225,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         clockDomain,
       });
     } catch (error) {
-      emitEvent({ type: 'avo_audit_gap', recordSequence: state.recordSequence, errorClass: String(error?.name || 'Error').slice(0, 80) });
+      if (receiptSinkEnabled) {
+        emitEvent({ type: 'avo_audit_gap', recordSequence: state.recordSequence, errorClass: String(error?.name || 'Error').slice(0, 80) });
+      }
       return null;
     }
-    emitEvent({ type: 'avo_audit_receipt', receipt });
+    if (receiptSinkEnabled) emitEvent({ type: 'avo_audit_receipt', receipt });
     return receipt;
   };
   const resilientStreamFn = (model, context, options) => {
@@ -346,7 +352,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           visibleToolResults: visibility.visibleToolResults,
           coverage: visibility.coverage,
           payloadCanonicalSha256: requestState.finalCanonicalSha256,
-          inputChars: requestTelemetry.inputChars ?? null,
+          // #359 V07: inputChars lives on the effective request telemetry; a
+          // phase that measured no payload keeps null rather than a zero.
+          inputChars: requestTelemetry.effective?.inputChars ?? null,
           ...timing,
         }));
         return override;

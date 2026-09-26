@@ -291,19 +291,72 @@ function createCancellationControl(config, { timeoutMs }) {
     async finalize({ status, signal, drainTimedOut, streamFailed }) {
       if (decision) decision.additionalReasons = [...additionalReasons].sort();
       const exitCode = Number.isSafeInteger(status) ? status : null;
-      let executionOutcome;
+      // #361: processOutcome describes how the child ended and nothing more.
+      // A graceful exit 0 after SIGTERM is still a cancelled process.
+      let processOutcome;
       let reasonCode = null;
-      // A cancelled execution is censored whatever its exit code: a graceful
-      // exit 0 after SIGTERM does not prove the task finished.
       if (decision) {
-        executionOutcome = 'censored';
+        processOutcome = 'censored';
         reasonCode = 'CANCELLED_BEFORE_EXIT';
-      } else if (exitCode === 0 && !signal && !streamFailed) executionOutcome = 'completed';
-      else if (exitCode !== null && exitCode !== 0) executionOutcome = 'error';
+      } else if (exitCode === 0 && !signal && !streamFailed) processOutcome = 'completed';
+      else if (exitCode !== null && exitCode !== 0) processOutcome = 'error';
       else {
-        executionOutcome = 'unknown';
+        processOutcome = 'unknown';
         reasonCode = 'EXIT_CAUSE_UNKNOWN';
       }
+      // Task completion needs a trusted, same-scope terminal: exit 0 with no
+      // task terminal is unknown, a terminal that finished is completed even
+      // when it did not win, a final error is never erased by a late cancel,
+      // and a conflicting terminal stays unknown with an explicit gap.
+      // Reading the task terminal must never prevent the execution terminal
+      // from being committed: a read failure is an unknown task outcome.
+      let task = null;
+      let taskReadError = null;
+      if (typeof config.taskTerminal === 'function') {
+        try {
+          task = config.taskTerminal();
+        } catch (error) {
+          taskReadError = String(error?.name || 'Error').slice(0, 80);
+        }
+      }
+      let executionOutcome;
+      let taskWon = null;
+      let taskReason = null;
+      let finalErrorObserved = null;
+      const conflict = Boolean(task && typeof task === 'object' && task.conflict === true);
+      if (taskReadError) {
+        executionOutcome = 'unknown';
+        taskReason = 'TASK_TERMINAL_READ_FAILED';
+      } else if (task && task.rejected === true) {
+        executionOutcome = 'unknown';
+        taskReason = 'TASK_TERMINAL_REJECTED';
+      } else if (conflict) {
+        executionOutcome = 'unknown';
+        taskReason = 'TASK_TERMINAL_CONFLICT';
+      } else if (task && task.error === true) {
+        // A final task error is never erased by a cancel.
+        executionOutcome = 'error';
+        finalErrorObserved = true;
+        taskReason = 'TASK_TERMINAL_ERROR';
+      } else if (task && task.finished === true) {
+        // A finished scope is never overridden by a late cancel.
+        executionOutcome = 'completed';
+        taskWon = task.won === true;
+        finalErrorObserved = false;
+      } else if (decision) {
+        // Justified censor: the cancellation happened before any terminal.
+        executionOutcome = 'censored';
+        taskReason = 'CANCELLED_BEFORE_TERMINAL';
+      } else if (!task || typeof task.finished !== 'boolean') {
+        executionOutcome = 'unknown';
+        taskReason = 'TASK_TERMINAL_UNAVAILABLE';
+      } else {
+        executionOutcome = 'unknown';
+        taskReason = 'TASK_TERMINAL_UNFINISHED';
+      }
+      const terminalEvidenceRefs = Array.isArray(task?.evidenceRefs)
+        ? task.evidenceRefs.filter((ref) => typeof ref === 'string' && /^evidence-[0-9]{6,}-[a-f0-9]{12}$/.test(ref))
+        : [];
       const gaps = [];
       let accounting = null;
       try {
@@ -314,7 +367,11 @@ function createCancellationControl(config, { timeoutMs }) {
       if (!accounting) gaps.push('ACCOUNTING_UNAVAILABLE');
       else if (accounting.coverage !== 'complete') gaps.push('ACCOUNTING_PARTIAL');
       if (drainTimedOut) gaps.push('DRAIN_TIMEOUT');
+      if (streamFailed) gaps.push('DRAIN_FORCED');
+      if (taskReadError) gaps.push('TASK_TERMINAL_READ_FAILED');
+      else if (task?.rejected === true) gaps.push('TASK_TERMINAL_REJECTED');
       if (decision?.requestRecordError) gaps.push('CANCEL_REQUEST_RECORD_FAILED');
+      if (conflict) gaps.push('TASK_TERMINAL_CONFLICT');
       const unfinished = config.unfinished ? config.unfinished() : null;
       // Usage has its own authority (the report's aggregated metrics); it is a
       // gap here only when this record is declared the usage source.
@@ -325,9 +382,17 @@ function createCancellationControl(config, { timeoutMs }) {
         policies,
         cancellation: decision,
         process: { exitCode, signal: signal ?? null, closedAt: clock.wallIso(), closeObserved: true },
-        drain: { complete: !drainTimedOut, timeoutObserved: drainTimedOut },
+        // A forced stream teardown means the tail was truncated: never claim a
+        // complete drain for it.
+        drain: { complete: !drainTimedOut && !streamFailed, timeoutObserved: drainTimedOut, forced: Boolean(streamFailed) },
+        processOutcome,
         executionOutcome,
+        taskWon,
+        terminalEvidenceRefs,
+        finalErrorObserved,
         reasonCode,
+        ...(taskReason ? { taskReasonCode: taskReason } : {}),
+        ...(task?.rejected === true ? { taskTerminalRejection: String(task.reason ?? '').slice(0, 200) } : {}),
         accounting,
         usage: config.usage ? config.usage() : null,
         unfinished,

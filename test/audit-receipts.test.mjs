@@ -18,6 +18,7 @@ import {
 } from '../src/trajectory/audit-events.mjs';
 import { AUDIT_INPUT_SCHEMA, normalizeAuditInputs, readAuditInputManifest } from '../src/trajectory/audit-export.mjs';
 import { MECHANISM_METRIC_FIELDS } from '../src/benchmark/mechanism-metrics.mjs';
+import { canonicalJson } from '../src/local/canonical-json.mjs';
 import { providerCapabilities } from './support/provider.mjs';
 import { sendText, sendToolCall, withLoopback } from './support/responses-loopback.mjs';
 
@@ -428,6 +429,186 @@ test('T12 export -> validate: complete receipts are ready; a dropped, malformed 
     assert.ok(conflict.audit.gaps.includes('RECEIPT_ID_CONFLICT'));
     for (const run of [dropped, malformed, conflict]) assert.equal(run.audit.ready, false);
     assert.equal(AUDIT_RECEIPTS_SCHEMA, 'avo.trajectory-audit-receipts.v1');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #358: selectors must describe the real tool parameters.
+// ---------------------------------------------------------------------------
+
+test('Q01 act_sequence receipts keep the real steps: coordinates and order stay distinct', async () => {
+  const root = tempRoot();
+  try {
+    await withLoopback(scripted([
+      { callId: 'call_seq_a', name: 'act_sequence', args: { steps: [{ action: 'ACTION6', x: 1, y: 2 }] } },
+      { callId: 'call_seq_b', name: 'act_sequence', args: { steps: [{ action: 'ACTION6', x: 30, y: 40 }] } },
+    ]), async ({ url }) => {
+      const { tool, agent } = await runAgent({ url, root });
+      const sequences = tool.filter((receipt) => receipt.toolName === 'act_sequence');
+      assert.equal(sequences.length, 2);
+      assert.deepEqual(sequences.map((receipt) => receipt.selector.steps), [
+        [{ action: 'ACTION6', x: 1, y: 2, expected: {} }],
+        [{ action: 'ACTION6', x: 30, y: 40, expected: {} }],
+      ]);
+      assert.notEqual(sequences[0].selectorSha256, sequences[1].selectorSha256);
+      assert.ok(sequences.every((receipt) => receipt.selectorCompleteness === 'complete'));
+      // The requested selector coordinates match the executed environment evidence.
+      const executed = agent.evidenceLedger.filter((entry) => entry.type === 'environment-action');
+      assert.deepEqual(executed.map((entry) => entry.data), [{ x: 1, y: 2 }, { x: 30, y: 40 }]);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Q02 order and expected conditions are preserved; requested, executed and skipped stay distinct', async () => {
+  const root = tempRoot();
+  try {
+    await withLoopback(scripted([
+      { callId: 'call_order1', name: 'act_sequence', args: { steps: [{ action: 'ACTION1' }, { action: 'ACTION6', x: 5, y: 5 }] } },
+      { callId: 'call_order2', name: 'act_sequence', args: { steps: [{ action: 'ACTION6', x: 5, y: 5 }, { action: 'ACTION1' }] } },
+      {
+        callId: 'call_cancel',
+        name: 'act_sequence',
+        args: {
+          steps: [
+            { action: 'ACTION1', expected: { changed: true } },
+            { action: 'ACTION3' },
+            { action: 'ACTION1' },
+          ],
+        },
+      },
+    ]), async ({ url }) => {
+      const { tool } = await runAgent({ url, root });
+      const order1 = tool.find((receipt) => receipt.toolCallId.startsWith('call_order1'));
+      const order2 = tool.find((receipt) => receipt.toolCallId.startsWith('call_order2'));
+      assert.notEqual(order1.selectorSha256, order2.selectorSha256, 'order is part of the selector');
+      const cancelled = tool.find((receipt) => receipt.toolCallId.startsWith('call_cancel'));
+      assert.deepEqual(cancelled.selector.steps.map((step) => step.action), ['ACTION1', 'ACTION3', 'ACTION1']);
+      assert.deepEqual(cancelled.selector.steps[0].expected, { changed: true });
+      assert.deepEqual(
+        { requested: cancelled.sequenceExecution.requested, executed: cancelled.sequenceExecution.executedCount, skipped: cancelled.sequenceExecution.skippedCount },
+        { requested: 3, executed: 1, skipped: 2 },
+        'a cancelled tail is recorded as skipped, not executed',
+      );
+      assert.deepEqual(cancelled.sequenceExecution.skipped.map((entry) => entry.index), [1, 2]);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Q03 legal omitted defaults and explicit effective defaults give the same selector; distinct reads stay distinct', async () => {
+  const root = tempRoot();
+  try {
+    await withLoopback(scripted([
+      { callId: 'call_mem_a', name: 'memory_read', args: { view: 'section', section: 'notes' } },
+      { callId: 'call_mem_b', name: 'memory_read', args: { view: 'section', section: 'notes', offset: 0 } },
+      { callId: 'call_mem_c', name: 'memory_read', args: { view: 'section', section: 'notes', offset: 1 } },
+      { callId: 'call_journal_a', name: 'journal_read', args: {} },
+      { callId: 'call_journal_b', name: 'journal_read', args: { view: 'recent', proposalLimit: 100, evaluationLimit: 100 } },
+      { callId: 'call_traj_region', name: 'trajectory_read', args: { ref: 'evidence-000001-aaaaaaaaaaaa', part: 'region', x: 0, y: 0, width: 1, height: 1 } },
+      { callId: 'call_traj_event', name: 'trajectory_read', args: { ref: 'evidence-000001-aaaaaaaaaaaa', part: 'event' } },
+    ]), async ({ url }) => {
+      const { tool } = await runAgent({ url, root, policyProfile: 'current-v1', maxOuterTurns: 12 });
+      const at = (prefix) => tool.find((receipt) => receipt.toolCallId.startsWith(prefix));
+      assert.equal(at('call_mem_a').selectorSha256, at('call_mem_b').selectorSha256, 'omitted and explicit offset=0 are the same read');
+      assert.notEqual(at('call_mem_a').selectorSha256, at('call_mem_c').selectorSha256, 'a different offset is a different read');
+      assert.equal(at('call_journal_a').selectorSha256, at('call_journal_b').selectorSha256, 'omitted and explicit journal defaults agree');
+      assert.notEqual(at('call_traj_region').selectorSha256, at('call_traj_event').selectorSha256, 'region and event are different reads');
+      assert.ok([at('call_mem_a'), at('call_journal_a'), at('call_traj_region')]
+        .every((receipt) => receipt.selectorCompleteness === 'complete'));
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Q04 invalid, legacy, missing or unsupported selector input is never complete', () => {
+  const legacyActions = normalizeSelector('act_sequence', { actions: [{ action: 'ACTION6', x: 1, y: 2 }] });
+  assert.equal(legacyActions.selectorCompleteness, 'partial');
+  assert.equal(legacyActions.selector, null);
+  assert.equal(normalizeSelector('act_sequence', {}).selectorCompleteness, 'partial');
+  assert.equal(normalizeSelector('act_sequence', { steps: null }).selectorCompleteness, 'partial');
+  assert.equal(normalizeSelector('memory_read', { view: null }).selectorCompleteness, 'partial');
+  assert.equal(normalizeSelector('memory_read', { view: 'record' }).selectorCompleteness, 'partial');
+  const oversized = normalizeSelector('trajectory_read', { ref: 'evidence-000001-' + 'a'.repeat(300) });
+  assert.equal(oversized.selectorCompleteness, 'omitted');
+  assert.notEqual(oversized.selectorCompleteness, 'complete');
+  assert.equal(normalizeSelector('workspace_write', { path: 'a', content: 'b' }).selectorCompleteness, 'omitted');
+});
+
+test('Q05 the exported selector agrees with the real exposed call and its executed evidence', async () => {
+  const root = tempRoot();
+  try {
+    await withLoopback(scripted([
+      { callId: 'call_export_seq', name: 'act_sequence', args: { steps: [{ action: 'ACTION1' }, { action: 'ACTION6', x: 9, y: 9 }] } },
+    ]), async ({ url }) => {
+      const { tool } = await runAgent({ url, root });
+      const receipt = tool.find((item) => item.toolCallId.startsWith('call_export_seq'));
+      const bound = bindCliReceipt(receipt, { runId: 'run-q05', versionedGameId: 'receipt-v1', cliAttempt: 1 });
+      const exported = receiptsFromPrivateLog(receiptLogLine(bound));
+      const [exportedReceipt] = exported.toolReceipts;
+      assert.deepEqual(exportedReceipt.selector.steps.map((step) => step.action), ['ACTION1', 'ACTION6']);
+      assert.equal(exportedReceipt.selectorSha256, receipt.selectorSha256);
+      assert.equal(exportedReceipt.selectorCompleteness, 'complete');
+      assert.equal(exportedReceipt.sequenceExecution.executedCount, 2);
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Q06 the real receipt sink is observation only: switching it off changes no request, tool order or counter', async () => {
+  const root = tempRoot();
+  try {
+    const calls = [
+      { callId: 'call_q6a', name: 'observe', args: {} },
+      { callId: 'call_q6b', name: 'trajectory_read', args: {} },
+    ];
+    const order = (list) => list.flatMap((event) => (event.type === 'tool_execution_start' ? [event.toolName] : []));
+
+    let sinkOn = null;
+    await withLoopback(scripted(calls), async ({ url, bodies }) => {
+      const run = await runAgent({ url, root });
+      assert.ok(run.tool.length >= 2, 'the receipt sink is on by default');
+      sinkOn = { bodies, order: order(run.events), metrics: run.result.mechanismMetrics };
+    });
+
+    let sinkOff = null;
+    await withLoopback(scripted(calls), async ({ url, bodies }) => {
+      const events = [];
+      const loop = await createPiSdkLoop({
+        provider: { baseUrl: url, apiKey: process.env.OPENAI_API_KEY, model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max') },
+        workspaceMode: 'disabled', policyProfile: 'minimal-v1', stallWindow: 8, maxOuterTurns: 6, toolResultMaxChars: 24_000,
+        auditReceipts: false,
+      }, { onEvent: (event) => events.push(event) });
+      const agent = new AvoArcAgent({
+        gameId: 'receipt-v1', environment: environment(), loop,
+        config: { maxActions: 20, stallWindow: 8, memoryDir: path.join(root, 'memory2'), workspaceMode: 'disabled', policyProfile: 'minimal-v1', toolResultMaxChars: 24_000 },
+        captureScorecard: false,
+      });
+      await agent.initialize();
+      const result = await agent.run();
+      assert.equal(events.some((event) => event.type === 'avo_audit_receipt'), false, 'the sink is off');
+      sinkOff = { bodies, order: order(events), metrics: result.mechanismMetrics };
+    });
+
+    // Each run gets a fresh evidence store, so the comparison masks only the
+    // volatile identity material (evidence refs, their derived digests and
+    // timestamps) and never the structure or content of the request.
+    const maskVolatile = (value) => canonicalJson(value)
+      .replace(/evidence-[0-9]{6,}-[a-f0-9]{12}/g, 'evidence-ref')
+      .replace(/[a-f0-9]{12,}/g, 'digest')
+      .replace(/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z/g, 'timestamp');
+    assert.equal(maskVolatile(sinkOff.bodies), maskVolatile(sinkOn.bodies), 'identical model request bodies');
+    assert.deepEqual(sinkOff.order, ['observe', 'trajectory_read']);
+    assert.deepEqual(sinkOff.order, sinkOn.order, 'identical tool order');
+    const timing = /(Ms|At)$|Latency|Duration|Time$/;
+    const counters = (metrics) => Object.fromEntries(Object.entries(metrics).filter(([key]) => !timing.test(key)));
+    assert.deepEqual(counters(sinkOff.metrics), counters(sinkOn.metrics), 'identical non-timing counters');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
