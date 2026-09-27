@@ -1479,6 +1479,9 @@ export function boundTranscript(messages, {
 
   const selection = evidenceSelection(messages, anchor);
   const keepTools = new Set(toolIndices.slice(-Math.max(1, recentToolResults)));
+  for (const index of toolTurnGroups(messages).freshIndexes) {
+    if (messages[index]?.role === 'toolResult') keepTools.add(index);
+  }
   // The current observation group is protected by host authority. Without an
   // anchor (legacy interface) the most recently consulted evidence is kept as
   // before, but it is never reported as current.
@@ -1548,23 +1551,7 @@ function hardBoundTranscript(messages, {
 }) {
   // Retain whole tool turns: Pi synthesizes error results for any retained
   // call whose real result was trimmed. Keep reasoning blocks with their turn.
-  const resultIndexes = new Map();
-  messages.forEach((message, index) => {
-    if (message?.role === 'toolResult') {
-      resultIndexes.set(String(message.toolCallId || '').split('|')[0], index);
-    }
-  });
-  const groups = new Map();
-  messages.forEach((message, index) => {
-    if (message?.role !== 'assistant' || !Array.isArray(message.content)) return;
-    const group = [index];
-    for (const block of message.content) {
-      if (block?.type !== 'toolCall') continue;
-      const resultIndex = resultIndexes.get(String(block.id || '').split('|')[0]);
-      if (resultIndex !== undefined) group.push(resultIndex);
-    }
-    for (const member of group) groups.set(member, group);
-  });
+  const { groups, freshIndexes } = toolTurnGroups(messages);
   const includeGroups = (indexes) => new Set([...indexes].flatMap((index) => groups.get(index) || [index]));
   const taskIndex = messages.findIndex((message) => message?.role === 'user'
     && !isRuntimeStatus(message)
@@ -1596,6 +1583,15 @@ function hardBoundTranscript(messages, {
     throw new Error(anchor
       ? 'transcript bounds cannot preserve the original task and the runtime status with the current observation anchor'
       : 'transcript bounds cannot preserve the original task and current runtime status');
+  }
+  // A completed result must reach the next model request. The verified host
+  // anchor can recover older current text, but it cannot substitute a new read.
+  if (anchor && freshIndexes.length) {
+    const withFresh = includeGroups([...selected, ...freshIndexes]);
+    if (!fits(withFresh)) {
+      throw new Error('transcript bounds cannot preserve the latest completed tool turn with the task and current observation anchor');
+    }
+    for (const index of withFresh) selected.add(index);
   }
   // With an anchor the protected group is the current observation; when it
   // does not fit, the status still carries the current ref and recovery read
@@ -1652,13 +1648,40 @@ function hardBoundTranscript(messages, {
   return retained;
 }
 
+function toolTurnGroups(messages) {
+  const resultIndexes = new Map();
+  messages.forEach((message, index) => {
+    if (message?.role === 'toolResult') resultIndexes.set(String(message.toolCallId || '').split('|')[0], index);
+  });
+  const groups = new Map();
+  let freshIndexes = [];
+  messages.forEach((message, index) => {
+    if (message?.role !== 'assistant') return;
+    freshIndexes = [];
+    if (!Array.isArray(message.content)) return;
+    const calls = message.content.filter((block) => block?.type === 'toolCall');
+    const group = [index];
+    for (const call of calls) {
+      const resultIndex = resultIndexes.get(String(call.id || '').split('|')[0]);
+      if (resultIndex !== undefined) group.push(resultIndex);
+    }
+    for (const member of group) groups.set(member, group);
+    if (calls.length && group.length === calls.length + 1
+        && new Set(group).size === group.length
+        && group.slice(1).every((member) => member > index && messages[member]?.contextElided !== true)) {
+      freshIndexes = group;
+    }
+  });
+  return { groups, freshIndexes };
+}
+
 /**
  * Source of every function that decides what a bounded request keeps; sealed
  * as the transcript policy identity so selection changes change the hash.
  */
 export function transcriptPolicySource() {
   return [
-    boundTranscript, hardBoundTranscript, evidenceSelection, currentRepresentation,
+    boundTranscript, hardBoundTranscript, toolTurnGroups, evidenceSelection, currentRepresentation,
     selectionTelemetry, compactionNotice, repairToolPairs, isDeliveryReduced,
     isReducedToolResult, validateCurrentAnchor,
   ].map((fn) => fn.toString()).join('\n');
