@@ -30,6 +30,39 @@ function user(index) {
   return { role: 'user', content: [{ type: 'text', text: `prompt ${index}` }], timestamp: index };
 }
 
+test('the next request keeps every result from the latest completed tool turn', () => {
+  for (const count of [1, 6, 7]) {
+    const calls = Array.from({ length: count }, (_, index) => ({
+      type: 'toolCall', id: `fresh-${index}|wire-${index}`, name: 'workspace_read', arguments: { path: `note-${index}.txt` },
+    }));
+    const messages = [user(0), {
+      role: 'assistant', content: [{ type: 'toolCall', id: 'old', name: 'workspace_read', arguments: {} }],
+    }, {
+      role: 'toolResult', toolCallId: 'old', toolName: 'workspace_read', content: [{ type: 'text', text: 'old' }],
+    }, { role: 'assistant', content: calls }, ...calls.map((call, index) => ({
+      role: 'toolResult', toolCallId: call.id, toolName: call.name,
+      content: [{ type: 'text', text: `fresh-unique-result-${index}` }],
+      isError: index === 3,
+    }))];
+    const original = JSON.stringify(messages);
+    const bounded = boundTranscript(messages);
+    for (let index = 0; index < count; index += 1) {
+      const result = bounded.find((message) => message.toolCallId === calls[index].id);
+      assert.equal(result?.contextElided, undefined);
+      assert.equal(result?.content[0].text, `fresh-unique-result-${index}`);
+      assert.equal(result?.isError, index === 3);
+    }
+    if (count === 7) {
+      assert.equal(bounded.find((message) => message.toolCallId === 'old').contextElided, true);
+      assert.deepEqual(boundTranscript(bounded), bounded, 'repeated compaction does not grow or lose the fresh turn');
+      const afterOrdinaryReply = boundTranscript([...messages, { role: 'assistant', content: [{ type: 'text', text: 'done' }] }]);
+      assert.equal(afterOrdinaryReply.find((message) => message.toolCallId === calls[0].id).contextElided, true,
+        'an older turn becomes eligible after a normal assistant reply');
+    }
+    assert.equal(JSON.stringify(messages), original);
+  }
+});
+
 test('multi-tool hard compaction retains complete successful turns through pinned Responses conversion', () => {
   const model = { id: 'fixture', provider: 'fixture', api: 'openai-responses', input: ['text'] };
   const ref = 'evidence-000002-aaaaaaaaaaaa';

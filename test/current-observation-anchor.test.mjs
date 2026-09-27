@@ -61,7 +61,7 @@ function scriptedEnvironment(steps, { start = frame(0), onReset = null } = {}) {
   };
 }
 
-async function makeAgent({ root, environment, toolResultMaxChars = 24_000, loop = INERT_LOOP, policyProfile = 'minimal-v1' }) {
+async function makeAgent({ root, environment, toolResultMaxChars = 24_000, loop = INERT_LOOP, policyProfile = 'minimal-v1', workspaceMode = 'disabled' }) {
   const agent = new AvoArcAgent({
     gameId: 'anchor-v1',
     environment,
@@ -70,7 +70,7 @@ async function makeAgent({ root, environment, toolResultMaxChars = 24_000, loop 
       maxActions: 50,
       stallWindow: 8,
       memoryDir: path.join(root, 'memory'),
-      workspaceMode: 'disabled',
+      workspaceMode,
       policyProfile,
       toolResultMaxChars,
     },
@@ -157,6 +157,91 @@ test('C01 reading an older ref never replaces the current anchor under soft or h
     assert.equal(hardEvent.currentObservationRetained, true);
     assert.doesNotMatch(hard.text, new RegExp(`current_observation_ref=${initialRef}`));
     assert.equal(agent.runtimeStatus().currentObservation.observationRef, current, 'the anchor itself is unchanged');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fresh history read takes priority over optional old current body at the message cap', async () => {
+  const root = tempRoot();
+  try {
+    const agent = await makeAgent({ root, environment: scriptedEnvironment([frame(1)]) });
+    const t = tools(agent);
+    const initialRef = agent.currentObservationRef;
+    const act = await t.act.execute({ action: 'ACTION1', reasoning: 'probe' });
+    const currentRef = agent.currentObservationRef;
+    const read = await t.trajectory_read.execute({ ref: initialRef, part: 'after' });
+    const { bounded, events } = prepareRequest(agent, transcript([['act', act], ['trajectory_read', read]]), {
+      maxMessages: 5,
+    });
+    assert.equal(bounded.length <= 5, true);
+    assert.equal(bounded.find((message) => message.toolCallId === 'call-1-0')?.content[0].text, read.text);
+    assert.equal(bounded.some((message) => message.toolCallId === 'call-0-0'), false);
+    assert.match(statusText(bounded), new RegExp(`current_observation_ref=${currentRef}`));
+    assert.equal(events.at(-1).currentRepresentation, 'reference-only');
+    assert.equal(events.at(-1).currentObservationRef, currentRef);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a mixed act and historical read stays paired and keeps the act as current', async () => {
+  const root = tempRoot();
+  try {
+    const agent = await makeAgent({ root, environment: scriptedEnvironment([frame(1)]) });
+    const t = tools(agent);
+    const initialRef = agent.currentObservationRef;
+    const act = await t.act.execute({ action: 'ACTION1', reasoning: 'probe' });
+    const read = await t.trajectory_read.execute({ ref: initialRef, part: 'after' });
+    const messages = transcript([['trajectory_read', read], [['act', act], ['trajectory_read', read]]]);
+    const { bounded, events } = prepareRequest(agent, messages, {
+      maxMessages: 5,
+    });
+    assert.equal(bounded.filter((message) => message.role === 'toolResult').length, 2);
+    assert.equal(events.at(-1).currentRepresentation, 'grid-and-header');
+    assert.equal(events.at(-1).currentObservationRef, agent.currentObservationRef);
+    assert.equal(events.at(-1).lastConsultedEvidenceRef, initialRef);
+    assert.equal(transformMessages(bounded, { api: 'openai-responses', provider: 'openai', id: 'offline', input: ['text'] }).length, bounded.length);
+    assert.throws(() => prepareRequest(agent, messages, {
+      maxMessages: 4,
+    }), /cannot preserve the latest completed tool turn/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('installed Pi token estimator preserves a large fresh read and its continuation over old current text', async () => {
+  const root = tempRoot();
+  try {
+    const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
+    const { estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry));
+    const estimate = (messages) => estimateContextTokens({ systemPrompt: 'system', messages, tools: [] }).tokens;
+    const agent = await makeAgent({ root, environment: scriptedEnvironment([frame(1, { size: 40 })]), workspaceMode: 'files-only' });
+    const t = tools(agent);
+    const act = await t.act.execute({ action: 'ACTION1', reasoning: 'probe' });
+    const currentRef = agent.currentObservationRef;
+    agent.workspace.write('large.txt', 'fresh-large-marker-'.repeat(1200));
+    const read = await t.workspace_read.execute({ path: 'large.txt', limit: 16_000 });
+    assert.match(read.text, /WORKSPACE_PAGE .*"nextOffset":16000/);
+    const status = runtimeStatusMessage(agent.runtimeStatus(), { outerTurns: 1, maxOuterTurns: 10, policyProfile: 'minimal-v1' });
+    const messages = replaceRuntimeStatus(transcript([['act', act], ['workspace_read', read]]), status.text);
+    for (const message of messages) {
+      if (message.role === 'assistant') message.usage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    }
+    const necessary = messages.filter((_message, index) => [0, 3, 4, 5].includes(index));
+    const minimum = estimate(necessary);
+    const full = estimate(messages);
+    assert.ok(full > minimum + 100);
+    const events = [];
+    const bounded = boundTranscript(messages, {
+      currentAnchor: status.anchor, maxMessages: 160, maxTokens: Math.floor((minimum + full) / 2),
+      estimateContextTokens: estimate, onCompaction: (event) => events.push(event),
+    });
+    assert.equal(bounded.find((message) => message.toolCallId === 'call-1-0')?.content[0].text, read.text);
+    assert.equal(bounded.some((message) => message.toolCallId === 'call-0-0'), false);
+    assert.equal(events.at(-1).currentRepresentation, 'reference-only');
+    assert.match(statusText(bounded), new RegExp(`current_observation_ref=${currentRef}`));
+    assert.ok(estimate(bounded) <= Math.floor((minimum + full) / 2));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -349,6 +434,27 @@ function sendToolCall(response, { responseId, callId, name, args }) {
   response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
 }
 
+function sendToolCalls(response, responseId, calls) {
+  const items = calls.map(({ callId, name, args }) => ({
+    type: 'function_call', id: `fc_${callId}`, call_id: callId,
+    name, arguments: JSON.stringify(args), status: 'completed',
+  }));
+  const events = [{ type: 'response.created', response: { id: responseId } }];
+  items.forEach((item, output_index) => {
+    events.push(
+      { type: 'response.output_item.added', output_index, item },
+      { type: 'response.function_call_arguments.done', output_index, item_id: item.id, arguments: item.arguments },
+      { type: 'response.output_item.done', output_index, item },
+    );
+  });
+  events.push({ type: 'response.completed', response: {
+    id: responseId, status: 'completed', output: items,
+    usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 },
+  } });
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
+}
+
 function sendText(response, responseId) {
   const item = { type: 'message', id: `msg_${responseId}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'done' }] };
   const events = [
@@ -389,7 +495,7 @@ async function withLoopback(script, fn, env = {}) {
   }
 }
 
-async function productionLoop(url, { toolResultMaxChars = 24_000, maxOuterTurns = 6 } = {}) {
+async function productionLoop(url, { toolResultMaxChars = 24_000, maxOuterTurns = 6, policyProfile = 'minimal-v1', workspaceMode = 'disabled', onEvent = () => {} } = {}) {
   return createPiSdkLoop({
     provider: {
       baseUrl: url,
@@ -398,12 +504,12 @@ async function productionLoop(url, { toolResultMaxChars = 24_000, maxOuterTurns 
       reasoningEffort: 'max',
       capabilities: providerCapabilities('max'),
     },
-    workspaceMode: 'disabled',
-    policyProfile: 'minimal-v1',
+    workspaceMode,
+    policyProfile,
     stallWindow: 8,
     maxOuterTurns,
     toolResultMaxChars,
-  });
+  }, { onEvent });
 }
 
 function inputText(request) {
@@ -441,6 +547,64 @@ test('C07 installed Pi final requests carry the current anchor on the first turn
       assert.match(third, /AVO_RUNTIME_STATUS v2/);
       assert.ok(third.includes('call_read') && third.includes(firstRef), 'the historical read is visible but only as history');
     }, { AVO_TRANSCRIPT_MAX_MESSAGES: '6', AVO_TRANSCRIPT_RECENT_TOOL_RESULTS: '1' });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('installed Pi sends all seven fresh workspace reads on the next Responses request', async () => {
+  for (const policyProfile of ['minimal-v1', 'current-v1']) {
+    const root = tempRoot();
+    try {
+      await withLoopback((index, response) => {
+        if (index === 1) {
+          sendToolCalls(response, 'r1', Array.from({ length: 7 }, (_, i) => ({
+            callId: `read_${i}`, name: 'workspace_read', args: { path: `note-${i}.txt` },
+          })));
+        } else sendText(response, `r${index}`);
+      }, async ({ requests, url }) => {
+        const events = [];
+        const loop = await productionLoop(url, { policyProfile, workspaceMode: 'files-only', onEvent: (event) => events.push(event) });
+        const agent = await makeAgent({ root, environment: scriptedEnvironment([]), loop, policyProfile, workspaceMode: 'files-only' });
+        for (let i = 0; i < 7; i += 1) agent.workspace.write(`note-${i}.txt`, `fresh-wire-marker-${i}`);
+        const result = await agent.run();
+        assert.equal(result.error ?? null, null, String(result.error));
+        assert.ok(requests.length >= 2);
+        const calls = requests[1].input.filter((item) => item.type === 'function_call');
+        const outputs = requests[1].input.filter((item) => item.type === 'function_call_output');
+        assert.equal(outputs.length, 7);
+        for (let i = 0; i < 7; i += 1) {
+          assert.ok(calls.some((call) => call.call_id === `read_${i}`));
+          assert.match(outputs.find((output) => output.call_id === `read_${i}`)?.output ?? '', new RegExp(`fresh-wire-marker-${i}`));
+        }
+        const prepared = events.filter((event) => event.type === 'avo_audit_receipt')
+          .map((event) => event.receipt).find((receipt) => receipt?.schema === 'avo.context-receipt.v1'
+            && receipt.phase === 'prepared' && receipt.requestSequence === 2);
+        assert.equal(prepared?.coverage.complete, true);
+        assert.equal(prepared?.visibleToolResults.length, 7);
+        assert.ok(prepared.visibleToolResults.every((entry) => entry.delivery === 'complete' && entry.wireMatchesHost === true));
+        assert.match(inputText(requests[1]), new RegExp(`current_observation_ref=${agent.currentObservationRef}`));
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('installed Pi stops before a request that cannot carry its latest complete tool turn', async () => {
+  const root = tempRoot();
+  try {
+    await withLoopback((index, response) => {
+      if (index === 1) sendToolCalls(response, 'r1', [{ callId: 'read_0', name: 'workspace_read', args: { path: 'note.txt' } }]);
+      else sendText(response, `r${index}`);
+    }, async ({ requests, url }) => {
+      const loop = await productionLoop(url, { workspaceMode: 'files-only' });
+      const agent = await makeAgent({ root, environment: scriptedEnvironment([]), loop, workspaceMode: 'files-only' });
+      agent.workspace.write('note.txt', 'new result');
+      const result = await agent.run();
+      assert.match(String(result.error), /cannot preserve the latest completed tool turn/);
+      assert.equal(requests.length, 1);
+    }, { AVO_TRANSCRIPT_MAX_MESSAGES: '2' });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -496,19 +660,20 @@ test('C09 a later-sequence event with an equal payload or a prior attempt never 
     assert.notEqual(latest, current, 'a later transition event exists with the same observation');
     assert.equal(agent.runtimeStatus().currentObservation.observationRef, current, 'not the largest sequence');
     const laterEvent = await t.trajectory_read.execute({ ref: latest, part: 'event' });
-    const messages = transcript([['trajectory_read', laterEvent]]);
-    const { events } = prepareRequest(agent, messages, { recentToolResults: 1, maxMessages: 3 });
+    const messages = transcript([['trajectory_read', laterEvent], ['trajectory_read', laterEvent]]);
+    const { events } = prepareRequest(agent, messages, { recentToolResults: 1, maxMessages: 4 });
     assert.equal(events.at(-1).currentRepresentation, 'reference-only');
     assert.equal(events.at(-1).lastConsultedEvidenceRef, latest);
 
-    const legacy = transcript([['act', { text: 'legacy output without observation view', details: { evidenceRef: current } }]]);
-    const legacyRequest = prepareRequest(agent, legacy, { recentToolResults: 1, maxMessages: 3 });
+    const legacyResult = { text: 'legacy output without observation view', details: { evidenceRef: current } };
+    const legacy = transcript([['act', legacyResult], ['act', legacyResult]]);
+    const legacyRequest = prepareRequest(agent, legacy, { recentToolResults: 1, maxMessages: 4 });
     assert.equal(legacyRequest.events.at(-1).currentRepresentation, 'reference-only', 'no metadata is fabricated');
 
     const restarted = await makeAgent({ root, environment: scriptedEnvironment([frame(1)]) });
     const oldAttemptRead = await tools(restarted).trajectory_read.execute({ ref: current, part: 'after' });
     assert.notEqual(oldAttemptRead.details.observationView.scope.attemptId, restarted.runtimeStatus().currentObservation.attemptId);
-    const crossAttempt = prepareRequest(restarted, transcript([['trajectory_read', oldAttemptRead]]), { recentToolResults: 1, maxMessages: 3 });
+    const crossAttempt = prepareRequest(restarted, transcript([['trajectory_read', oldAttemptRead], ['trajectory_read', oldAttemptRead]]), { recentToolResults: 1, maxMessages: 4 });
     assert.equal(crossAttempt.events.at(-1).currentRepresentation, 'reference-only');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
