@@ -8,11 +8,16 @@ import { once } from 'node:events';
 
 import { convertResponsesMessages } from '@earendil-works/pi-ai/api/openai-responses-shared';
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages';
+import { Type } from '@earendil-works/pi-ai';
 
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
+import { policyInitialPrompt } from '../src/core/policy-profile.mjs';
+import { canonicalJson } from '../src/local/canonical-json.mjs';
 import {
   boundTranscript,
   createPiSdkLoop,
+  effectivePiSystemPrompt,
+  piToolContract,
   replaceRuntimeStatus,
   runtimeStatusMessage,
 } from '../src/loop/pi-sdk.mjs';
@@ -210,39 +215,90 @@ test('a mixed act and historical read stays paired and keeps the act as current'
   }
 });
 
-test('installed Pi token estimator preserves a large fresh read and its continuation over old current text', async () => {
+test('installed Pi delivers a large memory section and its continuation under a token bound', async () => {
+  const probeRoot = tempRoot();
   const root = tempRoot();
+  const notes = Array.from({ length: 30 }, (_, index) => `memory-marker-${index}-${'x'.repeat(900)}`);
+  const readArgs = { view: 'section', section: 'notes' };
   try {
     const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
     const { estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry));
-    const estimate = (messages) => estimateContextTokens({ systemPrompt: 'system', messages, tools: [] }).tokens;
-    const agent = await makeAgent({ root, environment: scriptedEnvironment([frame(1, { size: 40 })]), workspaceMode: 'files-only' });
-    const t = tools(agent);
-    const act = await t.act.execute({ action: 'ACTION1', reasoning: 'probe' });
-    const currentRef = agent.currentObservationRef;
-    agent.workspace.write('large.txt', 'fresh-large-marker-'.repeat(1200));
-    const read = await t.workspace_read.execute({ path: 'large.txt', limit: 16_000 });
-    assert.match(read.text, /WORKSPACE_PAGE .*"nextOffset":16000/);
-    const status = runtimeStatusMessage(agent.runtimeStatus(), { outerTurns: 1, maxOuterTurns: 10, policyProfile: 'minimal-v1' });
-    const messages = replaceRuntimeStatus(transcript([['act', act], ['workspace_read', read]]), status.text);
+    const probe = await makeAgent({ root: probeRoot, environment: scriptedEnvironment([frame(1, { size: 64 })]),
+      policyProfile: 'current-v1', workspaceMode: 'files-only' });
+    probe.memory.merge({ notes });
+    const initialPrompt = policyInitialPrompt({ policyProfile: 'current-v1', gameId: probe.gameId,
+      initialEvidence: probe.currentObservationRef, frameDescription: probe.describe(null, probe.currentObservationRef), relevantMemory: [] });
+    const probeTools = tools(probe);
+    const act = await probeTools.act.execute({ action: 'ACTION1', reasoning: 'probe' });
+    const read = await probeTools.memory_read.execute(readArgs);
+    assert.ok(read.text.length <= 24_000);
+    assert.ok(JSON.parse(read.text).nextRequest);
+    const status = runtimeStatusMessage(probe.runtimeStatus(), { outerTurns: 2, maxOuterTurns: 6, policyProfile: 'current-v1' });
+    const messages = replaceRuntimeStatus(transcript([['act', act], ['memory_read', read]]), status.text);
+    messages[0].content[0].text = initialPrompt;
+    messages[3].content[0].arguments = readArgs;
     for (const message of messages) {
       if (message.role === 'assistant') message.usage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     }
-    const necessary = messages.filter((_message, index) => [0, 3, 4, 5].includes(index));
-    const minimum = estimate(necessary);
+    const piTools = probe.exposedTools().map((tool) => piToolContract(tool, Type));
+    const estimate = (value) => estimateContextTokens({
+      systemPrompt: effectivePiSystemPrompt(probe.systemPrompt(), 'files-only'), messages: value, tools: piTools,
+    }).tokens;
+    const minimum = estimate(messages.filter((_message, index) => [0, 3, 4, 5].includes(index)));
     const full = estimate(messages);
-    assert.ok(full > minimum + 100);
-    const events = [];
-    const bounded = boundTranscript(messages, {
-      currentAnchor: status.anchor, maxMessages: 160, maxTokens: Math.floor((minimum + full) / 2),
-      estimateContextTokens: estimate, onCompaction: (event) => events.push(event),
-    });
-    assert.equal(bounded.find((message) => message.toolCallId === 'call-1-0')?.content[0].text, read.text);
-    assert.equal(bounded.some((message) => message.toolCallId === 'call-0-0'), false);
-    assert.equal(events.at(-1).currentRepresentation, 'reference-only');
-    assert.match(statusText(bounded), new RegExp(`current_observation_ref=${currentRef}`));
-    assert.ok(estimate(bounded) <= Math.floor((minimum + full) / 2));
+    assert.ok(full > minimum + 500);
+    const maxTokens = Math.floor((minimum + full) / 2);
+
+    let firstEnvelope = null;
+    await withLoopback((index, response, requests) => {
+      // Zero usage makes the installed Pi estimator count the actual message text;
+      // this local provider fixture does not claim real token accounting.
+      const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+      if (index === 1) sendToolCall(response, { responseId: 'r1', callId: 'call_act', name: 'act',
+        args: { action: 'ACTION1', reasoning: 'probe' }, usage });
+      else if (index === 2) sendToolCall(response, { responseId: 'r2', callId: 'call_memory_1',
+        name: 'memory_read', args: readArgs, usage });
+      else if (index === 3) {
+        const output = requests[2].input.find((item) => item.type === 'function_call_output' && item.call_id === 'call_memory_1');
+        if (output) firstEnvelope = JSON.parse(output.output);
+        if (firstEnvelope?.nextRequest) sendToolCall(response, { responseId: 'r3', callId: 'call_memory_2',
+          name: 'memory_read', args: firstEnvelope.nextRequest, usage });
+        else sendText(response, 'r3');
+      } else sendText(response, `r${index}`);
+    }, async ({ requests, url }) => {
+      const events = [];
+      const loop = await productionLoop(url, { policyProfile: 'current-v1', workspaceMode: 'files-only', onEvent: (event) => events.push(event) });
+      const agent = await makeAgent({ root, environment: scriptedEnvironment([frame(1, { size: 64 })]),
+        loop, policyProfile: 'current-v1', workspaceMode: 'files-only' });
+      agent.memory.merge({ notes });
+      const result = await agent.run();
+      assert.equal(result.error ?? null, null, String(result.error));
+      assert.ok(requests.length >= 4, `requests=${requests.length}`);
+      assert.equal(firstEnvelope?.ok, true);
+      assert.equal(firstEnvelope?.view, 'section');
+      assert.ok(firstEnvelope.chunk.length > 15_000);
+      assert.equal(firstEnvelope.nextRequest.view, 'section');
+      const third = requests[2].input;
+      assert.equal(third.some((item) => item.type === 'function_call_output' && item.call_id === 'call_act'), false);
+      assert.match(inputText(requests[2]), new RegExp(`current_observation_ref=${agent.currentObservationRef}`));
+      const hard = events.find((event) => event.type === 'avo_context_compaction' && event.mode === 'hard');
+      assert.equal(hard?.currentRepresentation, 'reference-only');
+      const continuationCall = requests[3].input.find((item) => item.type === 'function_call' && item.call_id === 'call_memory_2');
+      assert.deepEqual(JSON.parse(continuationCall?.arguments ?? '{}'), firstEnvelope.nextRequest);
+      const continuationOutput = requests[3].input.find((item) => item.type === 'function_call_output' && item.call_id === 'call_memory_2');
+      const secondEnvelope = JSON.parse(continuationOutput?.output ?? '{}');
+      assert.equal(secondEnvelope.ok, true);
+      assert.equal(firstEnvelope.chunk + secondEnvelope.chunk, canonicalJson(agent.memory.data.notes));
+      assert.equal(secondEnvelope.nextRequest, null);
+      const prepared = events.filter((event) => event.type === 'avo_audit_receipt').map((event) => event.receipt)
+        .find((receipt) => receipt?.schema === 'avo.context-receipt.v1'
+          && receipt.phase === 'prepared' && receipt.requestSequence === 3);
+      assert.equal(prepared?.coverage.complete, true);
+      assert.equal(prepared?.visibleToolResults.find((entry) => entry.toolKey.toolCallId.startsWith('call_memory_1'))?.delivery, 'complete');
+      assert.equal(prepared?.visibleToolResults.find((entry) => entry.toolKey.toolCallId.startsWith('call_memory_1'))?.wireMatchesHost, true);
+    }, { AVO_TRANSCRIPT_MAX_TOKENS: String(maxTokens) });
   } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -421,14 +477,14 @@ test('C06 an oversized after read advertises a real partitioned region read, and
   }
 });
 
-function sendToolCall(response, { responseId, callId, name, args }) {
+function sendToolCall(response, { responseId, callId, name, args, usage = { input_tokens: 10, output_tokens: 1, total_tokens: 11 } }) {
   const item = { type: 'function_call', id: `fc_${callId}`, call_id: callId, name, arguments: JSON.stringify(args), status: 'completed' };
   const events = [
     { type: 'response.created', response: { id: responseId } },
     { type: 'response.output_item.added', output_index: 0, item },
     { type: 'response.function_call_arguments.done', output_index: 0, item_id: item.id, arguments: item.arguments },
     { type: 'response.output_item.done', output_index: 0, item },
-    { type: 'response.completed', response: { id: responseId, status: 'completed', output: [item], usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } } },
+    { type: 'response.completed', response: { id: responseId, status: 'completed', output: [item], usage } },
   ];
   response.writeHead(200, { 'content-type': 'text/event-stream' });
   response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
