@@ -95,7 +95,7 @@ test('Responses preflight checks visible output separately from reasoning over H
     for await (const chunk of req) body += chunk;
     const request = JSON.parse(body);
     assert.equal(request.reasoning.effort, 'max');
-    assert.equal(request.max_output_tokens, 128);
+    assert.equal(request.max_output_tokens, 1024);
     res.writeHead(200, { 'Content-Type': 'application/json', Connection: 'close' });
     res.end(JSON.stringify({ id: 'resp-http-fixture', status: 'completed', output: [
       { type: 'reasoning', content: [{ type: 'reasoning_text', text: reasoning }] },
@@ -169,6 +169,18 @@ test('Responses preflight rejects missing identity/output and malformed challeng
       fetchImpl: async () => response({ id: 'resp-1' }),
     }),
     /lacks output text/,
+  );
+  await assert.rejects(
+    () => preflightResponsesProvider(config, {
+      nonce: challenge,
+      fetchImpl: async () => response({
+        id: 'resp-truncated',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output: [{ type: 'reasoning' }],
+      }),
+    }),
+    /lacks output text \(max_output_tokens\)/,
   );
   await assert.rejects(
     () => preflightResponsesProvider(config, {
