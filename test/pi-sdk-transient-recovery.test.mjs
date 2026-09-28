@@ -47,6 +47,9 @@ async function loadLoopWith(script) {
         if (step === '__NO_TOOL__') {
           this.state.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'I am done.' }] });
           this.state.errorMessage = undefined;
+        } else if (step === '__TOOL__') {
+          this.state.messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'observe', arguments: {} }] });
+          this.state.errorMessage = undefined;
         } else if (step) this.state.errorMessage = step;
         else this.state.errorMessage = undefined;
       }
@@ -172,12 +175,32 @@ test('non-transient session errors still end the run with the error preserved', 
 });
 
 test('assistant turns without a tool call get one continuation rather than consuming the outer-turn budget', async () => {
+  process.env.AVO_NO_TOOL_CONTINUATIONS = '1';
+  try {
+    const { result, continues } = await runLoop(['__NO_TOOL__'], 20);
+    assert.equal(continues, 2);
+    assert.equal(result.noToolContinuations, 1);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'assistant-no-tool');
+    assert.equal(result.exhaustedOuterTurns, false);
+  } finally {
+    delete process.env.AVO_NO_TOOL_CONTINUATIONS;
+  }
+});
+
+test('consecutive no-tool turns are nudged up to the configured allowance before terminating', async () => {
   const { result, continues } = await runLoop(['__NO_TOOL__'], 20);
-  assert.equal(continues, 2);
-  assert.equal(result.noToolContinuations, 1);
+  assert.equal(continues, 4);
+  assert.equal(result.noToolContinuations, 3);
   assert.equal(result.error, null);
   assert.equal(result.terminationReason, 'assistant-no-tool');
-  assert.equal(result.exhaustedOuterTurns, false);
+});
+
+test('a tool-calling turn re-arms the no-tool allowance so isolated prose turns do not forfeit the game', async () => {
+  const { result } = await runLoop(['__NO_TOOL__', '__TOOL__', '__NO_TOOL__', '__TOOL__', null], 50);
+  assert.equal(result.noToolContinuations, 0);
+  assert.notEqual(result.terminationReason, 'assistant-no-tool');
+  assert.equal(result.error, null);
 });
 
 test('recovery budget is bounded by AVO_TRANSIENT_TURN_RECOVERIES', async () => {

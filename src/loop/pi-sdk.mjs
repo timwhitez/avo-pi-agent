@@ -730,9 +730,16 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       // replay them all. Only an explicit transient allowlist recovers, and
       // only up to a bounded number of times per game.
       const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
+      // A prose-only assistant turn is a protocol deviation, not a terminal
+      // state: nudge with the runtime status and continue, bounded by
+      // consecutive deviations. A tool-calling turn re-arms the allowance, so
+      // isolated prose turns across a long game no longer forfeit the
+      // remaining action budget (observed: a game ended at 0/924 actions
+      // after two prose turns in three turns, one of which called 4 tools).
+      const maxNoToolContinuations = positiveEnvInt('AVO_NO_TOOL_CONTINUATIONS', 3);
+      let noToolContinuations = 0;
       const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|server_is_overloaded|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
-      let noToolContinuations = 0;
       for (;;) {
         const sessionError = agent.state.errorMessage;
         if (sessionError) {
@@ -750,11 +757,19 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
           transientRecoveries += 1;
           agent.state.errorMessage = undefined;
+          // The recovered turn stands as whatever the last assistant message
+          // actually contains; the streak must not reset just because the
+          // error was cleared.
+          noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
         }
         if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
         if (noToolTurn) {
-          if (noToolContinuations >= 1 || runtimeStatus()?.state !== 'ACTIVE') break;
+          if (noToolContinuations >= maxNoToolContinuations || runtimeStatus()?.state !== 'ACTIVE') break;
           noToolContinuations += 1;
+        } else if (noToolContinuations > 0) {
+          // The last turn called tools: the deviation count is consecutive,
+          // not cumulative over the whole game.
+          noToolContinuations = 0;
         }
         agent.state.messages = injectRuntimeStatus(agent.state.messages, {
           runtimeStatus,

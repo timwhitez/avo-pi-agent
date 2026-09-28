@@ -1093,9 +1093,9 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const contextRecords = result.stdout.split('\n')
     .filter((line) => line.startsWith('[avo-context] '))
     .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
-  assert.equal(contextRecords.length, 53);
-  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status').length, 27);
-  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status' && record.gameId === 'g25').length, 2);
+  assert.equal(contextRecords.length, 55);
+  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status').length, 29);
+  assert.equal(contextRecords.filter((record) => record.type === 'avo_runtime_status' && record.gameId === 'g25').length, 4);
   const providerRecords = contextRecords.filter((record) => record.type === 'avo_provider_request');
   assert.equal(providerRecords.length, 26);
   assert.ok(providerRecords.every((record) => (
