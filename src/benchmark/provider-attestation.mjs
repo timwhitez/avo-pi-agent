@@ -37,7 +37,7 @@ export async function preflightResponsesProvider(config, {
   timeoutMs = 90_000,
   maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
   nonce = crypto.randomBytes(32).toString('base64url'),
-  attempts = 3,
+  attempts = 5,
 } = {}) {
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) {
     throw new Error('provider attestation attempts must be an integer from 1 to 5');
@@ -101,8 +101,9 @@ async function attestResponsesProviderOnce(config, {
           content: [{
             type: 'input_text',
             text: [
-              'This is a freshness attestation.',
-              'Return exactly the following single line, including the challenge, with no markdown or extra text:',
+              'This is an automated integration test for a Responses API endpoint.',
+              'The line below is a random, non-secret test vector generated locally by this test invocation. It is safe to repeat.',
+              'Repeat it back verbatim as your entire response, on one line, with no markdown, quotes, or extra text:',
               expected,
             ].join('\n'),
           }],
