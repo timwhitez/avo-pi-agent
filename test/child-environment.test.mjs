@@ -38,6 +38,9 @@ function hostileSource() {
     AVO_RUN_CAPSULE_HASH: 'a'.repeat(64),
     AVO_RUN_CLASS: 'cold-start',
     AVO_GAME_ATTEMPTS: '3',
+    AVO_TRANSIENT_TURN_RECOVERIES: '5',
+    AVO_NO_TOOL_CONTINUATIONS: '3',
+    AVO_PRIVATE_ASSISTANT_LOG: '1',
     AVO_TRANSCRIPT_MAX_MESSAGES: '160',
     AVO_TRANSCRIPT_MAX_TOKENS: '120000',
     AVO_MEMORY_SURFACE_LIMIT: '0',
@@ -71,6 +74,9 @@ test('agent child receives only explicit runtime values and clears anonymous ARC
   assert.equal(env.AVO_RUN_CAPSULE_HASH, 'a'.repeat(64));
   assert.equal(env.AVO_RUN_CLASS, 'cold-start');
   assert.equal(env.AVO_GAME_ATTEMPTS, '3');
+  assert.equal(env.AVO_TRANSIENT_TURN_RECOVERIES, '5');
+  assert.equal(env.AVO_NO_TOOL_CONTINUATIONS, '3');
+  assert.equal(env.AVO_PRIVATE_ASSISTANT_LOG, '1');
   assert.equal(env.AVO_BASELINE_ACTION_MULTIPLIER, '2');
   assert.equal(env.AVO_FALLBACK_ACTIONS, '80');
   assert.equal(env.AVO_TRANSCRIPT_MAX_MESSAGES, '160');
