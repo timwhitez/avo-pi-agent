@@ -35,16 +35,22 @@ test('assistant turns record text, tool calls and metadata; other roles are igno
       { type: 'toolCall', name: 'act', id: 'call-1' },
     ],
   };
-  const record = assistantTurnRecord(message, { gameId: 'g1', attempt: 2, now: 0 });
+  const record = assistantTurnRecord(message, { gameId: 'g1', versionedGameId: 'g1-v1',
+    attempt: 2, capsuleHash: 'a'.repeat(64), requestSequence: 3, now: 0 });
   assert.equal(record.schema, 'avo.assistant-turn-log.v1');
   assert.equal(record.gameId, 'g1');
   assert.equal(record.attempt, 2);
+  assert.equal(record.versionedGameId, 'g1-v1');
+  assert.equal(record.capsuleHash, 'a'.repeat(64));
+  assert.equal(record.requestSequence, 3);
   assert.equal(record.at, '1970-01-01T00:00:00.000Z');
   assert.equal(record.stopReason, 'tool_calls');
   assert.equal(record.text, 'Considering the next probe.');
   assert.deepEqual(record.toolCalls, [{ name: 'act', callId: 'call-1' }]);
   assert.equal(assistantTurnRecord({ role: 'user', content: [] }, { gameId: 'g1' }), null);
   assert.equal(assistantTurnRecord(null, { gameId: 'g1' }), null);
+  assert.equal(assistantTurnRecord(message, { requestSequence: -1 }).requestSequence, null);
+  assert.equal(assistantTurnRecord(message, { capsuleHash: 'not-a-hash' }).capsuleHash, null);
 });
 
 test('prose text is capped with an explicit truncation marker', () => {
@@ -68,11 +74,11 @@ test('appendAssistantTurn writes one JSON line per turn and never throws', () =>
       role: 'assistant',
       stopReason: 'stop',
       content: [{ type: 'text', text: 'I am done reasoning about this puzzle.' }],
-    }, { gameId: 'g1', attempt: 1 });
+    }, { gameId: 'g1', attempt: 1, root });
     const second = appendAssistantTurn(file, {
       role: 'assistant',
       content: [{ type: 'toolCall', name: 'observe' }],
-    }, { gameId: 'g1', attempt: 1 });
+    }, { gameId: 'g1', attempt: 1, root });
     assert.equal(first, true);
     assert.equal(second, true);
     const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
@@ -88,6 +94,29 @@ test('appendAssistantTurn writes one JSON line per turn and never throws', () =>
     assert.equal(appendAssistantTurn(path.join(root, 'x.jsonl'), {
       role: 'assistant', content: [],
     }, { maxTextChars: 0 }), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('private assistant logging rejects links and restores private file permissions', () => {
+  const root = tempRoot();
+  try {
+    const file = path.join(root, 'assistant-log.jsonl');
+    const outside = path.join(root, 'existing.txt');
+    const message = { role: 'assistant', content: [] };
+    fs.writeFileSync(outside, 'unchanged');
+    fs.symlinkSync(outside, file);
+    assert.equal(appendAssistantTurn(file, message), false);
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'unchanged');
+    fs.unlinkSync(file);
+    fs.linkSync(outside, file);
+    assert.equal(appendAssistantTurn(file, message), false);
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'unchanged');
+    fs.unlinkSync(file);
+    fs.writeFileSync(file, '', { mode: 0o644 });
+    assert.equal(appendAssistantTurn(file, message), true);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

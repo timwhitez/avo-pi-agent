@@ -45,6 +45,8 @@ export function projectPublicRunCapsule(capsule, {
       gameConcurrency: definition.runtime.gameConcurrency,
       gameAttempts: definition.runtime.gameAttempts,
       transientTurnRecoveries: definition.runtime.transientTurnRecoveries,
+      ...(Object.hasOwn(definition.runtime, 'noToolContinuations')
+        ? { noToolContinuations: definition.runtime.noToolContinuations } : {}),
       sessionTopology: definition.runtime.sessionTopology,
       scorecardBinding: definition.runtime.scorecardBinding,
       providerStreamTimeoutMs: definition.runtime.providerStreamTimeoutMs,

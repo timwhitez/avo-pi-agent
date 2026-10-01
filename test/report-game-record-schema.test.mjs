@@ -48,6 +48,9 @@ test('preserves only consistent termination reasons', () => {
   assert.equal(normalizeGameRecord(valid({
     termination_reason: 'repeated-tool-outcome',
   })).terminationReason, 'repeated-tool-outcome');
+  assert.equal(normalizeGameRecord(valid({
+    terminationReason: 'assistant-output-limit',
+  })).terminationReason, 'assistant-output-limit');
   assert.throws(
     () => normalizeGameRecord(valid({ terminationReason: 'unknown-stop' })),
     /terminationReason is unknown/,

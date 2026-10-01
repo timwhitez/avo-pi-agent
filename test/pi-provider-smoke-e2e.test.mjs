@@ -234,7 +234,7 @@ for (const scenario of ['text-then-tool', 'budget', 'terminal', 'explicit-finish
     });
     const continued = ['text-then-tool', 'provider-error'].includes(scenario);
     assert.equal(requests.length, continued ? 2 : 1, String(result.error));
-    assert.equal(result.noToolContinuations, continued ? 1 : 0);
+    assert.equal(result.noToolContinuations, scenario === 'provider-error' ? 1 : 0);
     assert.equal(calls, ['text-then-tool', 'explicit-finish'].includes(scenario) ? 1 : 0);
     if (continued) assert.match(JSON.stringify(requests[1].input), /AVO_RUNTIME_STATUS/);
     if (scenario === 'provider-error') { assert.ok(result.error); assert.equal(result.terminationReason, null); }
@@ -878,6 +878,79 @@ test('installed Pi applies the outer-turn budget inside novel read-only loops', 
   )), ['1', '2']);
 });
 
+for (const scenario of [
+  { name: 'provider errors do not consume prose nudges', steps: ['error', 'error', 'error', 'error', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 4 },
+  { name: 'a tool turn inside continue re-arms prose nudges', steps: ['text', 'read', 'text', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 0 },
+  { name: 'recovery preserves a prose streak until a tool turn', steps: ['text', 'error', 'text'], nudges: 1, recoveries: 5, expectedRecoveries: 1, reason: 'assistant-no-tool' },
+  { name: 'exhausted recovery preserves the provider error', steps: ['error', 'error', 'error'], nudges: 1, recoveries: 2, expectedRecoveries: 2, error: true },
+  { name: 'output truncation has its own terminal reason', steps: ['length', 'length'], nudges: 1, recoveries: 5, expectedRecoveries: 0, reason: 'assistant-output-limit' },
+  { name: 'truncation can recover with one bounded nudge', steps: ['length', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 0 },
+  { name: 'truncated tool calls are rejected before execution', steps: ['length-call', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 0 },
+  { name: 'the outer-turn ceiling wins over a pending nudge', steps: ['text'], nudges: 3, recoveries: 5, expectedRecoveries: 0, maxOuterTurns: 1, reason: 'outer-turn-budget' },
+]) {
+  test(`installed Pi continuation cause: ${scenario.name}`, async (t) => {
+    const requests = [];
+    const events = [];
+    const server = http.createServer(async (request, response) => {
+      for await (const _chunk of request) { /* consume request */ }
+      requests.push(1);
+      const index = requests.length;
+      const step = scenario.steps[Math.min(index - 1, scenario.steps.length - 1)];
+      if (step === 'error') return sendFailedResponse(response, `resp_error_${index}`);
+      if (step === 'text' || step === 'length') {
+        return sendTextResponse(response, { responseId: `resp_${index}`, itemId: `msg_${index}`,
+          text: 'Planning.', status: step === 'length' ? 'incomplete' : 'completed' });
+      }
+      sendToolCall(response, { responseId: `resp_${index}`, itemId: `fc_${index}`,
+        callId: `call_${index}`, name: step === 'read' ? 'observe' : 'act', argumentsJson: '{}',
+        status: step === 'length-call' ? 'incomplete' : 'completed' });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const overrides = { OPENAI_API_KEY: 'x'.repeat(32),
+      AVO_NO_TOOL_CONTINUATIONS: String(scenario.nudges),
+      AVO_TRANSIENT_TURN_RECOVERIES: String(scenario.recoveries) };
+    for (const [key, value] of Object.entries(overrides)) {
+      const previous = process.env[key];
+      process.env[key] = value;
+      t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    }
+    let actions = 0;
+    const loop = await createPiSdkLoop({ provider: {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+      model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+    }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: scenario.maxOuterTurns ?? 10 },
+    { onEvent: (event) => events.push(event) });
+    const result = await loop.run({ systemPrompt: 'Local continuation fixture.', initialPrompt: 'Begin.',
+      tools: ['observe', 'act'].map((name) => ({ name, label: name, description: name,
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
+          if (name === 'act') actions += 1;
+          return { text: name, details: {}, terminate: name === 'act' };
+        } })),
+      shouldStop: () => actions > 0,
+      runtimeStatus: () => ({ state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions,
+        maxActions: 2, terminalReason: actions ? 'win' : 'none', allowedNext: 'act' }) });
+    assert.equal(requests.length, scenario.steps.length, String(result.error));
+    assert.equal(result.outerTurns, requests.length);
+    assert.deepEqual(events.filter((event) => event.type === 'message_end' && event.message?.role === 'assistant')
+      .map((event) => event.requestSequence), requests.map((_, index) => index + 1));
+    assert.equal(result.transientRecoveries, scenario.expectedRecoveries);
+    assert.equal(result.terminationReason, scenario.reason ?? null);
+    if (scenario.error) assert.match(result.error, /stream disconnected/);
+    else assert.equal(result.error, null);
+    assert.equal(actions, scenario.reason || scenario.error ? 0 : 1);
+    if (scenario.steps.includes('length-call')) assert.equal(result.mechanismMetrics.toolFailures, 1);
+    if (scenario.reason) {
+      const terminal = events.find((event) => event.receipt?.schema === 'avo.loop-termination.v1')?.receipt;
+      assert.ok(terminal, 'termination receipt exists');
+      assert.ok(terminal.window.firstRequestSequence >= 1);
+      assert.ok(terminal.window.firstRequestSequence <= terminal.window.lastRequestSequence);
+    }
+  });
+}
+
 test('installed Pi counts a recovered error turn toward the sealed outer-turn budget', async (t) => {
   // Ceiling 2 with the first turn lost to a transient stream error: the
   // recovered turn starts the second logical assistant turn, so the budget
@@ -1062,6 +1135,7 @@ function sendToolCall(response, {
   callId,
   name,
   argumentsJson,
+  status = 'completed',
 }) {
   const item = {
     type: 'function_call',
@@ -1077,10 +1151,11 @@ function sendToolCall(response, {
     { type: 'response.function_call_arguments.done', output_index: 0, item_id: itemId, arguments: argumentsJson },
     { type: 'response.output_item.done', output_index: 0, item },
     {
-      type: 'response.completed',
+      type: status === 'incomplete' ? 'response.incomplete' : 'response.completed',
       response: {
         id: responseId,
-        status: 'completed',
+        status,
+        ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
         output: [item],
         usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
       },
@@ -1090,7 +1165,7 @@ function sendToolCall(response, {
   response.end(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`);
 }
 
-function sendTextResponse(response, { responseId, itemId, text }) {
+function sendTextResponse(response, { responseId, itemId, text, status = 'completed' }) {
   const item = {
     type: 'message',
     id: itemId,
@@ -1104,10 +1179,11 @@ function sendTextResponse(response, { responseId, itemId, text }) {
     { type: 'response.output_text.delta', output_index: 0, delta: text },
     { type: 'response.output_item.done', output_index: 0, item },
     {
-      type: 'response.completed',
+      type: status === 'incomplete' ? 'response.incomplete' : 'response.completed',
       response: {
         id: responseId,
-        status: 'completed',
+        status,
+        ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
         output: [item],
         usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
       },

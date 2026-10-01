@@ -162,6 +162,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         const startedAt = activeTelemetry.requestStarts.shift();
         if (startedAt !== undefined) activeTelemetry.modelLatencyMs += Math.max(0, Date.now() - startedAt);
         const request = activeTelemetry.pendingModelRequests.shift();
+        event = { ...event, requestSequence: request?.requestSequence ?? null };
         if (request
             && (event.message.stopReason === 'error' || event.message.errorMessage)
             && request.lastHttpFailed !== true) {
@@ -669,6 +670,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       let lastNovelToolOutcomes = 0;
       let noActionInnerTurns = 0;
       let innerTurnNoActionLimitReached = false;
+      let noToolContinuations = 0;
+      let noToolWindowStart = null;
       const agent = new Agent({
         ...(externalOnPayload ? { onPayload: externalOnPayload } : {}),
         initialState: {
@@ -719,6 +722,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       lastNovelToolOutcomes = novelToolOutcomes;
       agent.subscribe((event) => {
         if (event?.type === 'turn_start') outerTurns += 1;
+        if (event?.type === 'turn_end' && event.message?.role === 'assistant'
+            && !event.message.errorMessage
+            && event.message.stopReason !== 'error' && event.message.stopReason !== 'aborted') {
+          // Pi can complete multiple tool turns inside one continue(). Re-arm
+          // at the real turn boundary, not only when control returns here.
+          if (assistantTurnHasToolCall(event.message) && event.message.stopReason !== 'length') {
+            noToolContinuations = 0;
+            noToolWindowStart = null;
+          } else {
+            noToolWindowStart ??= providerRequestSequence;
+          }
+        }
         emitEvent(event);
       });
       await agent.prompt(initialPrompt);
@@ -737,7 +752,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       // remaining action budget (observed: a game ended at 0/924 actions
       // after two prose turns in three turns, one of which called 4 tools).
       const maxNoToolContinuations = positiveEnvInt('AVO_NO_TOOL_CONTINUATIONS', 3);
-      let noToolContinuations = 0;
       const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|server_is_overloaded|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
       for (;;) {
@@ -757,19 +771,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
           transientRecoveries += 1;
           agent.state.errorMessage = undefined;
-          // The recovered turn stands as whatever the last assistant message
-          // actually contains; the streak must not reset just because the
-          // error was cleared.
+          // Provider recovery has its own budget. An errored assistant turn
+          // neither spends a prose nudge nor re-arms a preceding prose streak.
           noToolTurn = !shouldStop() && latestAssistantTurnHasNoToolCall(agent.state.messages);
         }
         if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
         if (noToolTurn) {
           if (noToolContinuations >= maxNoToolContinuations || runtimeStatus()?.state !== 'ACTIVE') break;
           noToolContinuations += 1;
-        } else if (noToolContinuations > 0) {
-          // The last turn called tools: the deviation count is consecutive,
-          // not cumulative over the whole game.
-          noToolContinuations = 0;
         }
         agent.state.messages = injectRuntimeStatus(agent.state.messages, {
           runtimeStatus,
@@ -789,12 +798,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       const error = agent.state.errorMessage || null;
       const terminationReason = error
         ? null
-        : noToolTurn
-          ? 'assistant-no-tool'
-          : innerTurnNoActionLimitReached
-            ? 'repeated-tool-outcome'
-            : exhaustedOuterTurns
-              ? 'outer-turn-budget'
+        : innerTurnNoActionLimitReached
+          ? 'repeated-tool-outcome'
+          : exhaustedOuterTurns
+            ? 'outer-turn-budget'
+            : noToolTurn
+              ? messages.findLast((message) => message?.role === 'assistant')?.stopReason === 'length'
+                ? 'assistant-output-limit'
+                : 'assistant-no-tool'
               : null;
       // The original stop decision is recorded with its read window; the
       // record never feeds back into the decision.
@@ -806,7 +817,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           noActionInnerTurns,
           // The triggering window: reads issued by the last no-action turns.
           window: (() => {
-            const firstRequest = providerRequestSequence - noActionInnerTurns + 1;
+            const firstRequest = noToolTurn && noToolWindowStart !== null
+              ? noToolWindowStart
+              : Math.max(1, providerRequestSequence - Math.max(1, noActionInnerTurns) + 1);
             const reads = runTelemetry.receipts.readWindow.filter((read) => (read.originRequestSequence ?? 0) >= firstRequest);
             const earliestRetained = runTelemetry.receipts.readWindow[0]?.originRequestSequence ?? null;
             return {
@@ -859,6 +872,7 @@ function latestAssistantTurnHasNoToolCall(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role !== 'assistant') continue;
+    if (message.errorMessage || message.stopReason === 'error' || message.stopReason === 'aborted') return false;
     return !assistantTurnHasToolCall(message);
   }
   return false;

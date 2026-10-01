@@ -1532,6 +1532,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     gameConcurrency: sealed.runtime.gameConcurrency,
     gameAttempts: sealed.runtime.gameAttempts,
     transientTurnRecoveries: sealed.runtime.transientTurnRecoveries,
+    noToolContinuations: sealed.runtime.noToolContinuations,
     providerStreamTimeoutMs: sealed.runtime.providerStreamTimeoutMs,
     providerStreamMaxRetries: sealed.runtime.providerStreamMaxRetries,
     actionBudgetPolicy: sealed.runtime.actionBudgetPolicy,
