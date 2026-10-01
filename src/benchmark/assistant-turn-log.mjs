@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openLogFile } from './process-runner.mjs';
+import { redact } from './redaction.mjs';
+import { redactRuntimeSecrets } from '../redaction.mjs';
 
 /**
  * Optional private diagnostics for model-side protocol deviations.
@@ -32,6 +34,7 @@ export function assistantTurnRecord(message, {
   attempt,
   capsuleHash,
   requestSequence,
+  env = process.env,
   maxTextChars = DEFAULT_ASSISTANT_LOG_MAX_TEXT_CHARS,
   now = Date.now(),
 } = {}) {
@@ -57,6 +60,7 @@ export function assistantTurnRecord(message, {
     requestSequence: Number.isSafeInteger(requestSequence) && requestSequence > 0 ? requestSequence : null,
     at: new Date(now).toISOString(),
     stopReason: message.stopReason === undefined ? null : String(message.stopReason),
+    error: message.errorMessage ? privateText(message.errorMessage, env, 4_000) : null,
     textLength: text.length,
     text: text.length > cap ? `${text.slice(0, cap)}…[truncated ${text.length - cap} chars]` : text,
     toolCalls,
@@ -71,7 +75,38 @@ export function appendAssistantTurn(file, message, context = {}) {
   } catch {
     return false;
   }
-  if (!record) return false;
+  return appendPrivateRecord(file, record, context);
+}
+
+/** Opt-in companion to the assistant log; never routed to ordinary stdout. */
+export function appendToolFailure(file, event, context = {}) {
+  if (event?.type !== 'tool_execution_end'
+      || (event.isError !== true && event.result?.details?.ok !== false)) return false;
+  try {
+    const env = context.env ?? process.env;
+    const resultText = (event.result?.content ?? [])
+      .filter((block) => block?.type === 'text').map((block) => block.text).join('\n');
+    const record = {
+      schema: 'avo.tool-failure-log.v1',
+      gameId: context.gameId ?? null,
+      versionedGameId: context.versionedGameId ?? null,
+      attempt: context.attempt ?? null,
+      capsuleHash: context.capsuleHash ?? null,
+      toolCallId: event.toolCallId ?? null,
+      toolName: context.toolName ?? event.toolName ?? null,
+      at: new Date().toISOString(),
+      outcome: event.isError === true ? 'exception-or-validation' : 'tool-reported-unsuccessful',
+      argumentsJson: privateText(context.args ?? null, env, 8_000),
+      error: privateText(resultText || event.result?.details?.error || 'tool failed without error text', env, 8_000),
+    };
+    return appendPrivateRecord(file, record, context);
+  } catch {
+    return false;
+  }
+}
+
+function appendPrivateRecord(file, record, context) {
+  if (!file || typeof file !== 'string' || !record) return false;
   try {
     const fd = openLogFile(file, { root: context.root ?? path.dirname(file), append: true });
     try { fs.writeFileSync(fd, `${JSON.stringify(record)}\n`); }
@@ -80,6 +115,15 @@ export function appendAssistantTurn(file, message, context = {}) {
   } catch {
     return false;
   }
+}
+
+function privateText(value, env, cap) {
+  const redacted = redact(value, {
+    explicitSecrets: ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'ARC_API_KEY'].map((key) => env[key]),
+    maxDepth: 8, maxArrayItems: 64, maxObjectEntries: 64,
+  });
+  const text = redactRuntimeSecrets(typeof redacted === 'string' ? redacted : JSON.stringify(redacted), env);
+  return text.length > cap ? `${text.slice(0, cap)}…[truncated ${text.length - cap} chars]` : text;
 }
 
 function normalizeTextCap(value) {

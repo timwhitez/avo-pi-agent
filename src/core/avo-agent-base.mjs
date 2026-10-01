@@ -562,7 +562,7 @@ export class AvoArcAgent {
         name: 'journal_read',
         strategic: true,
         label: 'Read hypothesis and evidence history',
-        description: 'Inspect retained hypothesis history. view="recent" summarizes the most recent proposals, evaluations and pending records; view="list" pages one collection (proposals/evaluations/pending) in append order with a snapshot cursor; view="record" returns one complete stored record as canonical-JSON chunks. Follow nextRequest/recordRequest to read older records. Confirmation records prediction agreement only; it does not install behavior.',
+        description: 'Inspect retained hypothesis history. view="recent" summarizes the most recent proposals, evaluations and pending records, using only proposalLimit and evaluationLimit; collection and limit are for view="list", which pages one collection (proposals/evaluations/pending) in append order with a snapshot cursor. view="record" returns one complete stored record as canonical-JSON chunks using collection, recordId, offset, and expectedSha256. Follow nextRequest/recordRequest to read older records. Confirmation records prediction agreement only; it does not install behavior.',
         parameters: {
           type: 'object',
           properties: {
@@ -584,7 +584,7 @@ export class AvoArcAgent {
         name: 'memory_update',
         strategic: true,
         label: 'Curate one typed persistent-memory claim',
-        description: 'Propose a hypothesis, confirm it with retrievable evidence, or create an evidence-backed contradiction/supersession while retaining the old claim.',
+        description: 'Propose a hypothesis, confirm it with retrievable evidence, or create an evidence-backed contradiction/supersession while retaining the old claim. Keep subject at most 64 characters and content at most 2000 characters. propose must omit claimId, contradicts, and derivedFrom. confirm requires an existing proposed claimId and nonempty evidenceRefs, and may update only confidence, importance, tags, and evidenceRefs. To correct a claim, use contradict or supersede with its existing claimId and nonempty evidenceRefs.',
         parameters: {
           type: 'object',
           required: ['operation'],
@@ -646,7 +646,7 @@ export class AvoArcAgent {
         name: 'hypothesis_evaluate',
         strategic: true,
         label: 'Check one hypothesis against later evidence',
-        description: 'Compare a durable proposal with exact later ledger evidence from its baseline attempt and episode. New actions after restart or full reset require a new proposal. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
+        description: 'Compare a durable proposal with exact later ledger evidence from its baseline attempt and episode. Copy the full proposal- prefixed ID from hypothesis_propose or journal_read. Each proposal accepts exactly one evaluation, including inconclusive outcomes; use a new proposal before another experiment. New actions after restart or full reset require a new proposal. The model cannot provide the outcome. Confirmation means only that declared predictions matched.',
         parameters: {
           type: 'object',
           required: ['proposalId', 'evidenceRefs'],

@@ -68,6 +68,8 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/benchmark/run-observation.mjs',
   'src/benchmark/progress-status.mjs',
   'src/benchmark/assistant-turn-log.mjs',
+  'src/benchmark/redaction.mjs',
+  'src/redaction.mjs',
   'src/local/run-lock.mjs',
   'src/local/process-group.mjs',
   'src/local/process-guardian.mjs',

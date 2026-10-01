@@ -111,6 +111,35 @@ test('production tools confirm repeated predictions without claiming behavior ev
   }
 });
 
+test('an inconclusive evaluation is retained and another experiment needs a new proposal', async () => {
+  const memoryDir = temporaryDirectory('avo-evaluator-once-');
+  try {
+    const environment = new OfflineDemoEnvironment({ id: 'evaluator-once', size: 5 });
+    const agent = new AvoArcAgent({ gameId: environment.gameId, environment, loop: inertLoop,
+      config: { maxActions: 100, stallWindow: 8, memoryDir } });
+    await agent.initialize();
+    const tools = Object.fromEntries(agent.tools().map((tool) => [tool.name, tool]));
+    const hypothesis = { hypothesis: 'ACTION4 moves right', plan: 'Probe once',
+      predictions: [{ action: 'ACTION4', expected: { changed: true } }] };
+    const proposal = (await tools.hypothesis_propose.execute(hypothesis)).details.proposal;
+    const first = await tools.hypothesis_evaluate.execute({ proposalId: proposal.id,
+      evidenceRefs: [proposal.baseline.evidenceRef] });
+    assert.equal(first.details.record.outcome, 'inconclusive');
+    const action = await tools.act.execute({ action: 'ACTION4' });
+    await assert.rejects(tools.hypothesis_evaluate.execute({ proposalId: proposal.id,
+      evidenceRefs: [action.details.evidenceRef] }), /already evaluated/);
+    assert.deepEqual(agent.memory.journal.evaluations, [first.details.record]);
+    const next = (await tools.hypothesis_propose.execute(hypothesis)).details.proposal;
+    const nextAction = await tools.act.execute({ action: 'ACTION4' });
+    const second = await tools.hypothesis_evaluate.execute({ proposalId: next.id,
+      evidenceRefs: [nextAction.details.evidenceRef] });
+    assert.equal(second.details.record.outcome, 'confirmed');
+    assert.equal(agent.memory.journal.evaluations.length, 2);
+  } finally {
+    fs.rmSync(memoryDir, { recursive: true, force: true });
+  }
+});
+
 test('a predicted no-op is confirmation only and survives a durable restart', async () => {
   const memoryDir = temporaryDirectory('avo-evaluator-hash-');
   const raw = {

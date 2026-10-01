@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   appendAssistantTurn,
+  appendToolFailure,
   assistantLogFileForResumeDir,
   assistantTurnRecord,
 } from '../src/benchmark/assistant-turn-log.mjs';
@@ -117,6 +118,52 @@ test('private assistant logging rejects links and restores private file permissi
     fs.writeFileSync(file, '', { mode: 0o644 });
     assert.equal(appendAssistantTurn(file, message), true);
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opt-in failure records preserve bounded diagnostics with secrets redacted', () => {
+  const root = tempRoot();
+  try {
+    const env = { OPENAI_API_KEY: 'fixture-credential-value', OPENAI_BASE_URL: 'https://private.invalid/v1',
+      OPENAI_MODEL: 'private-fixture-model', ARC_API_KEY: 'arc-fixture-credential' };
+    const context = { root, env, gameId: 'g1', versionedGameId: 'g1-v1', attempt: 2,
+      capsuleHash: 'a'.repeat(64), args: { claimId: 'claim-000001', apiKey: env.OPENAI_API_KEY,
+        code: `print('${env.OPENAI_BASE_URL}')` } };
+    const file = path.join(root, 'tool-failures.jsonl');
+    const event = { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'memory_update',
+      isError: true, result: { content: [{ type: 'text', text: `claim not found; ${Object.values(env).join(' ')}` }] } };
+    assert.equal(appendToolFailure(null, event, context), false, 'disabled sink stays inert');
+    assert.equal(appendToolFailure(file, { ...event, isError: false }, context), false);
+    assert.equal(fs.existsSync(file), false, 'successful tools do not create the failure log');
+    assert.equal(appendToolFailure(file, event, context), true);
+    assert.equal(appendToolFailure(file, { ...event, isError: false, toolName: 'workspace_python',
+      result: { details: { ok: false }, content: [{ type: 'text', text: `PYTHON_ERROR: assertion failed ${'x'.repeat(20_000)}` }] },
+    }, context), true);
+    const text = fs.readFileSync(file, 'utf8');
+    for (const secret of Object.values(env)) assert.equal(text.includes(secret), false);
+    const [exception, python] = text.trim().split('\n').map(JSON.parse);
+    assert.equal(exception.schema, 'avo.tool-failure-log.v1');
+    assert.equal(exception.toolCallId, 'call-1');
+    assert.equal(exception.attempt, 2);
+    assert.equal(exception.capsuleHash, 'a'.repeat(64));
+    assert.equal(JSON.parse(exception.argumentsJson).claimId, 'claim-000001');
+    assert.match(exception.error, /claim not found/);
+    assert.equal(python.outcome, 'tool-reported-unsuccessful');
+    assert.match(python.error, /^PYTHON_ERROR: assertion failed/);
+    assert.match(python.error, /truncated/);
+    assert.ok(python.error.length < 8_100);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const assistant = assistantTurnRecord({ role: 'assistant', stopReason: 'error', content: [],
+      errorMessage: `transcript bounds failed ${env.OPENAI_API_KEY} ${'y'.repeat(10_000)}` }, context);
+    assert.match(assistant.error, /^transcript bounds failed/);
+    assert.equal(assistant.error.includes(env.OPENAI_API_KEY), false);
+    assert.ok(assistant.error.length < 4_100);
+    assert.equal(appendToolFailure(file, { ...event, result: { content: 'malformed' } }, context), false);
+    const linked = path.join(root, 'linked.jsonl');
+    fs.symlinkSync(file, linked);
+    assert.equal(appendToolFailure(linked, event, context), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
