@@ -66,10 +66,11 @@ export default function Page() {
     return payload;
   }, [csrf]);
 
-  const refreshRuns = useCallback(async () => {
+  const refreshRuns = useCallback(async (replace = false) => {
     const session = sessionRef.current;
     if (!csrf || session?.csrf !== csrf) return;
-    const token = owners.runs.begin();
+    const token = owners.runs.begin({ replace });
+    if (!token) return;
     try {
       const payload = await request('/api/runs', { signal: token.signal });
       if (!token.isCurrent()) return;
@@ -78,14 +79,17 @@ export default function Page() {
       setError('');
     } catch (cause) {
       if (token.isCurrent()) setError(cause.message);
+    } finally {
+      token.finish();
     }
   }, [csrf, request, owners, selectRun]);
 
-  const refreshSelected = useCallback(async () => {
+  const refreshSelected = useCallback(async (replace = false) => {
     const session = sessionRef.current;
     const selection = selectionRef.current;
     if (!csrf || session?.csrf !== csrf || !selection.id) return;
-    const token = owners.selected.begin();
+    const token = owners.selected.begin({ replace });
+    if (!token) return;
     try {
       const payload = await request(`/api/runs/${encodeURIComponent(selection.id)}`, { signal: token.signal });
       if (!token.isCurrent()) return;
@@ -99,6 +103,8 @@ export default function Page() {
         return;
       }
       setError(cause.message);
+    } finally {
+      token.finish();
     }
   }, [csrf, request, owners, selectRun]);
 
@@ -122,7 +128,7 @@ export default function Page() {
   }, [csrf, owners]);
 
   useEffect(() => {
-    refreshRuns();
+    refreshRuns(true);
     const timer = setInterval(refreshRuns, 3000);
     return () => { clearInterval(timer); owners.runs.invalidate(); };
   }, [refreshRuns, owners]);
@@ -134,7 +140,7 @@ export default function Page() {
     cursorRef.current = 0;
     const selection = selectionRef.current;
     const session = sessionRef.current;
-    refreshSelected();
+    refreshSelected(true);
     let source = null;
     let retryTimer = null;
     let disposed = false;
@@ -195,7 +201,7 @@ export default function Page() {
       });
       if (sessionRef.current !== session) return payload.run;
       selectRun(payload.run.id);
-      await refreshRuns();
+      await refreshRuns(true);
       return payload.run;
     } catch (cause) {
       if (sessionRef.current === session) setError(cause.message);
@@ -216,7 +222,7 @@ export default function Page() {
         method: 'POST',
         body: JSON.stringify({ action, confirmation }),
       });
-      if (sessionRef.current === session) await Promise.all([refreshRuns(), refreshSelected()]);
+      if (sessionRef.current === session) await Promise.all([refreshRuns(true), refreshSelected(true)]);
       return payload.run;
     } catch (cause) {
       if (sessionRef.current === session && selectionRef.current === selection) setError(cause.message);
@@ -240,6 +246,8 @@ export default function Page() {
       if (!token.isCurrent()) return null;
       setError(cause.message);
       throw cause;
+    } finally {
+      token.finish();
     }
   }, [baselineId, candidateId, request, owners]);
 

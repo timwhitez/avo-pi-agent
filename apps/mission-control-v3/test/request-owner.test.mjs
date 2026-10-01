@@ -59,3 +59,27 @@ test('list, selection and comparison have independent request ownership', () => 
   owners[1].invalidate();
   assert.deepEqual(tokens.map((token) => token.isCurrent()), [true, false, true]);
 });
+
+test('slow periodic requests stay current across polling ticks and release on completion', async () => {
+  const owner = createRequestOwner();
+  const response = deferred();
+  const token = owner.begin({ replace: false });
+  const request = response.promise.then(() => token.isCurrent()).finally(token.finish);
+  for (let tick = 0; tick < 5; tick++) assert.equal(owner.begin({ replace: false }), null);
+  assert.equal(token.signal.aborted, false);
+  response.resolve();
+  assert.equal(await request, true);
+  assert.ok(owner.begin({ replace: false }));
+});
+
+test('forced refresh preempts a slow poll and its old finally cannot release the new request', () => {
+  const owner = createRequestOwner();
+  const poll = owner.begin({ replace: false });
+  const forced = owner.begin();
+  assert.equal(poll.signal.aborted, true);
+  poll.finish();
+  assert.equal(owner.begin({ replace: false }), null);
+  assert.equal(forced.isCurrent(), true);
+  forced.finish();
+  assert.ok(owner.begin({ replace: false }));
+});
