@@ -1162,6 +1162,60 @@ test('installed Pi termination windows retain repeated reads across a recovered 
   assert.deepEqual(terminal.window.reads.map((read) => read.toolCallId.split('|')[0]), ['call_stall_2', 'call_stall_4']);
 });
 
+for (const scenario of [
+  { name: 'eviction within one request', counts: [1, 70, 1], omitted: 7 },
+  { name: 'eviction across requests', counts: [75, 75, 75], omitted: 86 },
+  { name: 'eviction before the window', counts: [70, 1, 1], omitted: 0 },
+  { name: 'outer-turn budget', counts: [75], omitted: 11, maxOuterTurns: 1, reason: 'outer-turn-budget' },
+  { name: 'truncated calls', counts: [70, 70], omitted: 76, status: 'incomplete', reason: 'assistant-output-limit' },
+]) {
+  test(`installed Pi reports exact read-window omissions: ${scenario.name}`, async (t) => {
+    const events = [];
+    let requests = 0;
+    const server = http.createServer(async (request, response) => {
+      for await (const _chunk of request) { /* consume request */ }
+      const index = ++requests;
+      sendToolCall(response, { responseId: `resp_window_${index}`, itemId: `fc_window_${index}`,
+        callId: `call_window_${index}`, name: 'observe', argumentsJson: '{}',
+        count: scenario.counts[index - 1] ?? 1, status: scenario.status });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    for (const [key, value] of Object.entries({ OPENAI_API_KEY: 'x'.repeat(32), AVO_NO_TOOL_CONTINUATIONS: '1' })) {
+      const previous = process.env[key];
+      process.env[key] = value;
+      t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    }
+    const loop = await createPiSdkLoop({ provider: {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+      model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+    }, workspaceMode: 'files-only', policyProfile: 'current-v1', stallWindow: 2,
+    maxOuterTurns: scenario.maxOuterTurns ?? 10 }, { onEvent: (event) => events.push(event) });
+    const result = await loop.run({ systemPrompt: 'Local read-window fixture.', initialPrompt: 'Begin.',
+      tools: [{ name: 'observe', label: 'Observe', description: 'Read state.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'same state', details: {} }) }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({ state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'act' }) });
+    assert.equal(result.error, null);
+    assert.equal(requests, scenario.counts.length, 'stopping threshold stays fixed');
+    assert.equal(result.terminationReason, scenario.reason ?? 'repeated-tool-outcome');
+    const terminal = events.find((event) => event.receipt?.schema === 'avo.loop-termination.v1')?.receipt;
+    assert.equal(terminal.window.firstRequestSequence, scenario.reason ? 1 : 2);
+    assert.equal(terminal.window.lastRequestSequence, requests);
+    const windowReads = events.filter((event) => event.receipt?.schema === 'avo.read-visibility.v1'
+      && event.receipt.originRequestSequence >= terminal.window.firstRequestSequence);
+    assert.equal(terminal.window.reads.length, Math.min(64, windowReads.length));
+    assert.equal(terminal.window.omittedCount, scenario.omitted);
+    assert.equal(terminal.window.reads.length + terminal.window.omittedCount, windowReads.length);
+    assert.equal(terminal.coverage.complete, scenario.omitted === 0);
+    assert.equal(terminal.coverage.omittedCount, scenario.omitted);
+    assert.equal(terminal.coverage.reason, scenario.omitted ? 'read-window-evicted' : null);
+  });
+}
+
 async function runReadOnlyScenario({ textFor, maxOuterTurns, maxToolResultChars = null }) {
   const requests = [];
   const server = http.createServer(async (request, response) => {
@@ -1237,28 +1291,31 @@ function sendToolCall(response, {
   name,
   argumentsJson,
   status = 'completed',
+  count = 1,
   usage = { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
 }) {
-  const item = {
+  const items = Array.from({ length: count }, (_, index) => ({
     type: 'function_call',
-    id: itemId,
-    call_id: callId,
+    id: count === 1 ? itemId : `${itemId}_${index}`,
+    call_id: count === 1 ? callId : `${callId}_${index}`,
     name,
     arguments: argumentsJson,
     status: 'completed',
-  };
+  }));
   const events = [
     { type: 'response.created', response: { id: responseId } },
-    { type: 'response.output_item.added', output_index: 0, item },
-    { type: 'response.function_call_arguments.done', output_index: 0, item_id: itemId, arguments: argumentsJson },
-    { type: 'response.output_item.done', output_index: 0, item },
+    ...items.flatMap((item, index) => [
+      { type: 'response.output_item.added', output_index: index, item },
+      { type: 'response.function_call_arguments.done', output_index: index, item_id: item.id, arguments: argumentsJson },
+      { type: 'response.output_item.done', output_index: index, item },
+    ]),
     {
       type: status === 'incomplete' ? 'response.incomplete' : 'response.completed',
       response: {
         id: responseId,
         status,
         ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
-        output: [item],
+        output: items,
         usage,
       },
     },

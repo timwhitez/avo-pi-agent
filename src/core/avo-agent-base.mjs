@@ -411,7 +411,7 @@ export class AvoArcAgent {
       {
         name: 'act',
         label: 'Take one ARC environment action',
-        description: 'Execute one currently exposed gameplay action (ACTION1 through ACTION7). ACTION6 may take x/y coordinates. Use the separate reset controller when abandoning an episode.',
+        description: 'Execute one currently exposed gameplay action (ACTION1 through ACTION7). ACTION6 requires integer x and y coordinates from 0 through 63. Use the separate reset controller when abandoning an episode.',
         parameters: {
           type: 'object',
           properties: {
@@ -427,7 +427,7 @@ export class AvoArcAgent {
       {
         name: 'act_sequence',
         label: 'Execute a bounded gameplay action sequence',
-        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or execution failure.',
+        description: 'Execute 1–20 gameplay actions through the same guarded single-step path. Each ACTION6 step requires integer x and y coordinates from 0 through 63. Optional reasoning belongs on the step; expected accepts only changed, levelDeltaAtLeast, state, and afterHash. Every transition is retained. The remaining tail is skipped on progress, terminal state, budget exhaustion, rejection, expectation mismatch, or execution failure.',
         parameters: {
           type: 'object',
           required: ['steps'],
