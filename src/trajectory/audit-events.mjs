@@ -700,13 +700,18 @@ export function buildReadVisibility({ receipt, classification, recordSequence, m
 }
 
 export function buildLoopTermination({ scope, terminationReason, noActionInnerTurns, window, remainingActions, remainingOuterTurns, historyComplete, recordSequence, monotonicTime, clockDomain }) {
+  const omittedCount = window?.omittedCount ?? 0;
   return bound({
     schema: LOOP_TERMINATION_SCHEMA,
     scope: auditScope(scope ?? {}),
     terminationReason,
     noActionInnerTurns,
     window,
-    coverage: { complete: historyComplete === true, omittedCount: 0, reason: historyComplete ? null : 'read-history-evicted' },
+    coverage: {
+      complete: historyComplete === true && omittedCount === 0,
+      omittedCount,
+      reason: omittedCount > 0 ? 'read-window-evicted' : historyComplete ? null : 'read-history-evicted',
+    },
     remainingActions: Number.isSafeInteger(remainingActions) ? remainingActions : null,
     remainingOuterTurns: Number.isSafeInteger(remainingOuterTurns) ? remainingOuterTurns : null,
     recordSequence,

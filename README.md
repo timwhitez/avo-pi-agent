@@ -98,6 +98,13 @@ observation contract identifies the executing state, recorded trajectory and
 numeric activity. Missing evidence is reported as unavailable, not replaced by
 another run's state.
 
+Set `AVO_PRIVATE_ASSISTANT_LOG=1` to retain `assistant-log.jsonl` and
+`tool-failures.jsonl` beside the run's resume directory. Assistant records include
+bounded error details; tool failures include bounded, redacted arguments and
+errors. These optional diagnostics stay private and do not feed scoring or resume.
+Assistant records can include host failures before dispatch, so their count is
+not interchangeable with `modelCalls`; `requestSequence` is null without a request.
+
 Reports distinguish level progress, whole-game WIN, action/reset counts and
 official scorecard evidence. A completed process or a passing test suite does not
 establish model capability. Public-subset research and Competition leaderboard

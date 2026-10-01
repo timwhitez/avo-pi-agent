@@ -291,6 +291,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       }
     }
     emitReceipt(state, (timing) => buildReadVisibility({ receipt, classification, ...timing }));
+    state.readCount += 1;
     state.readWindow.push({
       toolCallId: receipt.toolCallId,
       toolName: receipt.toolName,
@@ -299,7 +300,6 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     });
     if (state.readWindow.length > MAX_READ_WINDOW) {
       state.readWindow.shift();
-      state.readWindowOmitted += 1;
     }
   };
   const resilientStreamFn = (model, context, options) => {
@@ -307,6 +307,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
     const priorOnPayload = options?.onPayload;
     const telemetry = activeTelemetry;
     const receipts = telemetry?.receipts ?? null;
+    if (receipts) receipts.requestReadStart = receipts.readCount;
     // The request prepared by transformContext for this model call; later
     // tool results never count as visible to the call that produced them.
     const prepared = receipts?.pendingPrepared ?? null;
@@ -517,7 +518,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         toolKinds: new Map(),
         readHistoryEvicted: false,
         readWindow: [],
-        readWindowOmitted: 0,
+        // Prefix counts distinguish in-window evictions, including within one request.
+        readCount: 0,
+        requestReadStart: 0,
         lifecycle: new Map(),
         lifecycleReported: new Set(),
         scope: () => receiptScope(),
@@ -712,7 +715,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             noActionWindowStart = null;
             return false;
           }
-          noActionWindowStart ??= providerRequestSequence;
+          noActionWindowStart ??= { requestSequence: providerRequestSequence, readCount: runTelemetry.receipts.requestReadStart };
           noActionInnerTurns += 1;
           if (noActionInnerTurns < maxNoActionInnerTurns) return false;
           innerTurnNoActionLimitReached = true;
@@ -742,7 +745,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             noToolContinuations = 0;
             noToolWindowStart = null;
           } else {
-            noToolWindowStart ??= providerRequestSequence;
+            noToolWindowStart ??= { requestSequence: providerRequestSequence, readCount: runTelemetry.receipts.requestReadStart };
           }
         }
         emitEvent(event);
@@ -828,19 +831,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           noActionInnerTurns,
           // The triggering window: reads issued by the last no-action turns.
           window: (() => {
-            const firstRequest = terminationReason === 'repeated-tool-outcome'
+            const windowStart = terminationReason === 'repeated-tool-outcome'
               ? noActionWindowStart
               : noToolTurn && noToolWindowStart !== null
                 ? noToolWindowStart
-                : providerRequestSequence;
+                : { requestSequence: providerRequestSequence, readCount: runTelemetry.receipts.requestReadStart };
+            const firstRequest = windowStart.requestSequence;
             const reads = runTelemetry.receipts.readWindow.filter((read) => (read.originRequestSequence ?? 0) >= firstRequest);
-            const earliestRetained = runTelemetry.receipts.readWindow[0]?.originRequestSequence ?? null;
             return {
               firstRequestSequence: firstRequest,
               lastRequestSequence: providerRequestSequence,
               reads,
-              omittedCount: runTelemetry.receipts.readWindowOmitted > 0 && earliestRetained !== null && earliestRetained > firstRequest
-                ? runTelemetry.receipts.readWindowOmitted : 0,
+              omittedCount: runTelemetry.receipts.readCount - windowStart.readCount - reads.length,
             };
           })(),
           remainingActions: Number.isSafeInteger(finalStatus?.maxActions) && Number.isSafeInteger(finalStatus?.environmentActions)
