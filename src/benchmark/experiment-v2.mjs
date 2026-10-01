@@ -119,7 +119,7 @@ export async function deriveArmToolContract({ repoDir, commit, workspaceMode, po
     fs.writeFileSync(tarFile, archive);
     const untar = spawnSync('tar', ['-xf', tarFile, '-C', snapshot]);
     if (untar.status !== 0) throw new Error('arm snapshot extraction failed');
-    fs.symlinkSync(fileURLToPath(new URL('../../node_modules', import.meta.url)), path.join(snapshot, 'node_modules'));
+    fs.symlinkSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../node_modules'), path.join(snapshot, 'node_modules'));
     fs.writeFileSync(path.join(snapshot, 'package.json'), JSON.stringify({ type: 'module' }));
     const agent = await import(pathToFileURL(path.join(snapshot, 'src/core/avo-agent-base.mjs')).href);
     const capsule = await import(pathToFileURL(path.join(snapshot, 'src/benchmark/run-capsule.mjs')).href);
