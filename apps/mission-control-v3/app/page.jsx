@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as CopilotCore from '@copilotkit/react-core';
 import * as CopilotUI from '@copilotkit/react-ui';
 import { extractHypothesisJournal } from '../lib/hypothesis-journal-view.mjs';
+import { createRequestOwner } from '../lib/request-owner.mjs';
 
 const CopilotProvider = CopilotCore.CopilotKit || (({ children }) => children);
 const CopilotSidebar = CopilotUI.CopilotSidebar || (({ children }) => children);
@@ -18,8 +19,9 @@ const ARC_COLORS = [
 export default function Page() {
   const [csrf, setCsrf] = useState('');
   const [runs, setRuns] = useState([]);
-  const [selectedId, setSelectedId] = useState('');
-  const [selected, setSelected] = useState(null);
+  const [selection, setSelection] = useState({ id: '' });
+  const selectedId = selection.id;
+  const [selectedData, setSelectedData] = useState(null);
   const [events, setEvents] = useState([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -30,6 +32,28 @@ export default function Page() {
   const [candidateId, setCandidateId] = useState('');
   const [form, setForm] = useState({ mode: 'diagnostic', games: '', actionBudget: 1000, reasoningLevel: 'max' });
   const cursorRef = useRef(0);
+  const selectionRef = useRef(selection);
+  const sessionRef = useRef(null);
+  const [owners] = useState(() => ({
+    runs: createRequestOwner(), selected: createRequestOwner(), comparison: createRequestOwner(),
+  }));
+  const selected = selectedData?.selection === selectionRef.current
+    && selectedData?.session === sessionRef.current && selectedData?.session.csrf === csrf
+    && selectedData?.run?.id === selectedId ? selectedData.run : null;
+
+  const selectRun = useCallback((id) => {
+    if (selectionRef.current.id === id) return;
+    // Invalidate at the selection event, before effect cleanup or another render.
+    const nextSelection = { id };
+    selectionRef.current = nextSelection;
+    owners.selected.invalidate();
+    setSelection(nextSelection);
+    setSelectedData(null);
+    setEvents([]);
+    setReplayIndex(0);
+    cursorRef.current = 0;
+    setError('');
+  }, [owners]);
 
   const request = useCallback(async (url, options = {}) => {
     const method = options.method || 'GET';
@@ -43,69 +67,86 @@ export default function Page() {
   }, [csrf]);
 
   const refreshRuns = useCallback(async () => {
-    if (!csrf) return;
+    const session = sessionRef.current;
+    if (!csrf || session?.csrf !== csrf) return;
+    const token = owners.runs.begin();
     try {
-      const payload = await request('/api/runs');
+      const payload = await request('/api/runs', { signal: token.signal });
+      if (!token.isCurrent()) return;
       setRuns(payload.runs || []);
-      if (!selectedId && payload.runs?.[0]) setSelectedId(payload.runs[0].id);
+      if (!selectionRef.current.id && payload.runs?.[0]) selectRun(payload.runs[0].id);
       setError('');
     } catch (cause) {
-      setError(cause.message);
+      if (token.isCurrent()) setError(cause.message);
     }
-  }, [csrf, request, selectedId]);
+  }, [csrf, request, owners, selectRun]);
 
   const refreshSelected = useCallback(async () => {
-    if (!csrf || !selectedId) return;
+    const session = sessionRef.current;
+    const selection = selectionRef.current;
+    if (!csrf || session?.csrf !== csrf || !selection.id) return;
+    const token = owners.selected.begin();
     try {
-      const payload = await request(`/api/runs/${encodeURIComponent(selectedId)}`);
-      setSelected(payload.run);
+      const payload = await request(`/api/runs/${encodeURIComponent(selection.id)}`, { signal: token.signal });
+      if (!token.isCurrent()) return;
+      setSelectedData({ run: payload.run, selection, session });
       setError('');
     } catch (cause) {
+      if (!token.isCurrent()) return;
       if (/not found/i.test(cause.message)) {
-        // The run was pruned or revoked: return to the neutral empty state
-        // instead of flashing a persistent error every two seconds.
-        setSelectedId('');
-        setSelected(null);
-        setEvents([]);
-        cursorRef.current = 0;
-        setError('');
+        // Only the current request can self-heal a pruned or revoked run.
+        selectRun('');
         return;
       }
       setError(cause.message);
     }
-  }, [csrf, request, selectedId]);
+  }, [csrf, request, owners, selectRun]);
 
   useEffect(() => {
     let alive = true;
-    fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' })
+    const controller = new AbortController();
+    fetch('/api/session', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
       .then((response) => response.json())
       .then((payload) => { if (alive) setCsrf(payload.csrf || ''); })
       .catch(() => { if (alive) setError('Unable to establish mission-control session'); });
-    return () => { alive = false; };
+    return () => { alive = false; controller.abort(); };
   }, []);
+
+  useEffect(() => {
+    const session = { csrf };
+    sessionRef.current = session;
+    return () => {
+      sessionRef.current = null;
+      Object.values(owners).forEach((owner) => owner.invalidate());
+    };
+  }, [csrf, owners]);
 
   useEffect(() => {
     refreshRuns();
     const timer = setInterval(refreshRuns, 3000);
-    return () => clearInterval(timer);
-  }, [refreshRuns]);
+    return () => { clearInterval(timer); owners.runs.invalidate(); };
+  }, [refreshRuns, owners]);
 
   useEffect(() => {
     setEvents([]);
-    setSelected(null);
+    setSelectedData(null);
     setReplayIndex(0);
     cursorRef.current = 0;
+    const selection = selectionRef.current;
+    const session = sessionRef.current;
     refreshSelected();
-    const timer = setInterval(refreshSelected, 2000);
     let source = null;
     let retryTimer = null;
     let disposed = false;
+    const isCurrent = () => !disposed && selectionRef.current === selection && sessionRef.current === session;
+    const timer = setInterval(() => { if (isCurrent()) refreshSelected(); }, 2000);
     // A dropped SSE connection must reconnect from the last seen cursor;
     // closing without a reconnect silently froze the live event feed.
     const connect = () => {
-      if (disposed || !selectedId || !csrf) return;
+      if (!isCurrent() || !selectedId || !csrf) return;
       source = new EventSource(`/api/runs/${encodeURIComponent(selectedId)}/events?cursor=${cursorRef.current}`, { withCredentials: true });
       source.addEventListener('avo', (message) => {
+        if (!isCurrent()) return;
         try {
           const event = JSON.parse(message.data);
           cursorRef.current = Math.max(cursorRef.current, Number(event.cursor) || 0);
@@ -117,21 +158,24 @@ export default function Page() {
         } catch {}
       });
       source.onerror = () => {
+        if (!isCurrent()) return;
         source?.close();
         source = null;
-        if (!disposed) retryTimer = setTimeout(connect, 2000);
+        if (isCurrent()) retryTimer = setTimeout(connect, 2000);
       };
     };
     connect();
     return () => {
       disposed = true;
+      owners.selected.invalidate();
       clearInterval(timer);
       clearTimeout(retryTimer);
       source?.close();
     };
-  }, [selectedId, csrf, refreshSelected]);
+  }, [selection, csrf, refreshSelected, owners]);
 
   const start = useCallback(async (override = {}) => {
+    const session = sessionRef.current;
     setBusy(true);
     setError('');
     try {
@@ -149,19 +193,22 @@ export default function Page() {
           reasoningLevel: override.reasoningLevel || form.reasoningLevel,
         }),
       });
-      setSelectedId(payload.run.id);
+      if (sessionRef.current !== session) return payload.run;
+      selectRun(payload.run.id);
       await refreshRuns();
       return payload.run;
     } catch (cause) {
-      setError(cause.message);
+      if (sessionRef.current === session) setError(cause.message);
       throw cause;
     } finally {
-      setBusy(false);
+      if (sessionRef.current === session) setBusy(false);
     }
-  }, [form, request, refreshRuns]);
+  }, [form, request, refreshRuns, selectRun]);
 
   const control = useCallback(async (action, runId = selectedId, confirmation = '') => {
     if (!runId) throw new Error('Select a run first');
+    const session = sessionRef.current;
+    const selection = selectionRef.current;
     setBusy(true);
     setError('');
     try {
@@ -169,22 +216,32 @@ export default function Page() {
         method: 'POST',
         body: JSON.stringify({ action, confirmation }),
       });
-      await Promise.all([refreshRuns(), refreshSelected()]);
+      if (sessionRef.current === session) await Promise.all([refreshRuns(), refreshSelected()]);
       return payload.run;
     } catch (cause) {
-      setError(cause.message);
+      if (sessionRef.current === session && selectionRef.current === selection) setError(cause.message);
       throw cause;
     } finally {
-      setBusy(false);
+      if (sessionRef.current === session) setBusy(false);
     }
   }, [request, refreshRuns, refreshSelected, selectedId]);
 
   const compare = useCallback(async (a = baselineId, b = candidateId) => {
     if (!a || !b) throw new Error('Choose both baseline and candidate runs');
-    const payload = await request(`/api/compare?baseline=${encodeURIComponent(a)}&candidate=${encodeURIComponent(b)}`);
-    setComparison(payload.comparison);
-    return payload.comparison;
-  }, [baselineId, candidateId, request]);
+    const token = owners.comparison.begin();
+    setComparison(null);
+    try {
+      const payload = await request(`/api/compare?baseline=${encodeURIComponent(a)}&candidate=${encodeURIComponent(b)}`, { signal: token.signal });
+      if (!token.isCurrent()) return null;
+      setComparison({ ...payload.comparison, baselineRunId: a, candidateRunId: b });
+      setError('');
+      return payload.comparison;
+    } catch (cause) {
+      if (!token.isCurrent()) return null;
+      setError(cause.message);
+      throw cause;
+    }
+  }, [baselineId, candidateId, request, owners]);
 
   const trajectoryEvents = selected?.trajectory?.events || [];
   const replayEvent = trajectoryEvents[replayIndex] || events[Math.max(0, events.length - 1)] || null;
@@ -206,7 +263,7 @@ export default function Page() {
           start={start}
           control={control}
           compare={compare}
-          selectRun={setSelectedId}
+          selectRun={selectRun}
           seek={(index) => setReplayIndex(clamp(Number(index) || 0, 0, Math.max(0, trajectoryEvents.length - 1)))}
         />
         <div className="app-shell">
@@ -248,15 +305,15 @@ export default function Page() {
                       {['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((level) => <option key={level}>{level}</option>)}
                     </select>
                   </label>
-                  <button className="button primary" disabled={!csrf || busy} onClick={() => start()}>Start run</button>
+                  <button className="button primary" disabled={!csrf || busy} onClick={() => start().catch(() => {})}>Start run</button>
                 </div>
               </section>
 
               <section className="sidebar-section">
                 <h3>Selected lifecycle</h3>
                 <div className="button-row" style={{ marginTop: 10 }}>
-                  <button className="button" disabled={busy || selected?.state !== 'running'} onClick={() => control('pause')}>Pause</button>
-                  <button className="button" disabled={busy || selected?.state !== 'paused'} onClick={() => control('resume')}>Resume</button>
+                  <button className="button" disabled={busy || selected?.state !== 'running'} onClick={() => control('pause').catch(() => {})}>Pause</button>
+                  <button className="button" disabled={busy || selected?.state !== 'paused'} onClick={() => control('resume').catch(() => {})}>Resume</button>
                   <button className="button danger" disabled={busy || !['running', 'paused'].includes(selected?.state)} onClick={async () => {
                     const confirmation = window.prompt(`Type the full run ID to abort:\n${selectedId}`) || '';
                     if (confirmation) await control('abort', selectedId, confirmation).catch(() => {});
@@ -271,7 +328,7 @@ export default function Page() {
                 <div className="run-list">
                   {runs.length === 0 && <div className="empty">No runs in this server process.</div>}
                   {runs.map((run) => (
-                    <button className="run-item" key={run.id} aria-current={run.id === selectedId} onClick={() => setSelectedId(run.id)}>
+                    <button className="run-item" key={run.id} aria-current={run.id === selectedId} onClick={() => selectRun(run.id)}>
                       <strong>{run.id}</strong>
                       <span><em>{run.mode}</em><em>{run.state}</em></span>
                     </button>
@@ -290,7 +347,7 @@ export default function Page() {
                     <option value="">Post-fix…</option>
                     {runs.map((run) => <option value={run.id} key={`b-${run.id}`}>{run.id}</option>)}
                   </select>
-                  <button className="button" disabled={!baselineId || !candidateId} onClick={() => compare().catch((cause) => setError(cause.message))}>Compare</button>
+                  <button className="button" disabled={!baselineId || !candidateId} onClick={() => compare().catch(() => {})}>Compare</button>
                 </div>
               </section>
             </aside>
@@ -346,7 +403,7 @@ export default function Page() {
 
                   {comparison && (
                     <section className="panel">
-                      <div className="panel-header"><h2>Baseline → post-fix</h2></div>
+                      <div className="panel-header"><h2>Baseline → post-fix</h2><p>{comparison.baselineRunId} → {comparison.candidateRunId}</p></div>
                       <div className="comparison">
                         {Object.entries(comparison.delta || {}).map(([key, value]) => <div key={key}><small>{key}</small><strong>{formatDelta(value)}</strong></div>)}
                       </div>
