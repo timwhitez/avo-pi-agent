@@ -10,6 +10,7 @@ import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { writeJsonAtomic } from './benchmark/report-safe-files.mjs';
 import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
+import { appendAssistantTurn, assistantLogFileForResumeDir } from './benchmark/assistant-turn-log.mjs';
 import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
   inspectRunState,
@@ -132,6 +133,9 @@ async function runPublic(args) {
   if (process.env.AVO_REQUIRE_REAL_PROVIDER === '1' && !resumeDir) {
     throw new Error('real-provider public execution requires a capsule-bound resume directory');
   }
+  // Opt-in private diagnostics: one JSON line per completed assistant turn,
+  // beside the run's resume directory. Never read by scoring or resume.
+  const assistantLogFile = assistantLogFileForResumeDir(resumeDir);
   workspaceAttestation = await attestWorkspaceCapability(config);
   if (resumeDir) {
     runCapsuleHash = requiredCapsuleHash(process.env.AVO_RUN_CAPSULE_HASH);
@@ -237,6 +241,12 @@ async function runPublic(args) {
             && !observedUsageMessages.has(event.message)) {
           observedUsageMessages.add(event.message);
           progress.usage({ index: ordinal, total: selected.length, gameId, attempt: activeAttempt, usage: event.message.usage });
+          if (assistantLogFile) {
+            appendAssistantTurn(assistantLogFile, event.message, {
+              gameId,
+              attempt: activeAttempt,
+            });
+          }
         }
         const toolCallId = String(event.toolCallId || '');
         const duplicateToolEnd = event.type === 'tool_execution_end'
