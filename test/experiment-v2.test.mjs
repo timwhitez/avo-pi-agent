@@ -208,7 +208,7 @@ function runtimeConditions() {
   const nodeTree = { name: 'avo-pi-arc-agi3', version: '0.1.0', dependencies: {} };
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
   return {
-    nodeVersion: 'v22.23.1',
+    nodeVersion: process.version,
     npmVersion: '12.0.1',
     pythonVersion: 'Python 3.12.13',
     nodeDependencySha256: digest(nodeTree),

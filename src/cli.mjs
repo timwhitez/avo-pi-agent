@@ -244,7 +244,11 @@ async function runPublic(args) {
           if (assistantLogFile) {
             appendAssistantTurn(assistantLogFile, event.message, {
               gameId,
+              versionedGameId,
               attempt: activeAttempt,
+              capsuleHash: runCapsuleHash,
+              requestSequence: event.requestSequence,
+              root: path.resolve('runs/private'),
             });
           }
         }

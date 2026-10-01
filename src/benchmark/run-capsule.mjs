@@ -67,6 +67,7 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'src/benchmark/process-runner.mjs',
   'src/benchmark/run-observation.mjs',
   'src/benchmark/progress-status.mjs',
+  'src/benchmark/assistant-turn-log.mjs',
   'src/local/run-lock.mjs',
   'src/local/process-group.mjs',
   'src/local/process-guardian.mjs',
@@ -390,6 +391,7 @@ export function buildRunCapsule({
       gameConcurrency: boundedInteger(env.AVO_GAME_CONCURRENCY, 1, 1, 8, 'AVO_GAME_CONCURRENCY'),
       gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
       transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
+      noToolContinuations: positiveInteger(env.AVO_NO_TOOL_CONTINUATIONS, 3, 'AVO_NO_TOOL_CONTINUATIONS'),
       sessionTopology: 'one-arcade-session-per-process-pass',
       scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
@@ -693,6 +695,7 @@ export function verifyRunCapsuleExecution({
     gameConcurrency: boundedInteger(env.AVO_GAME_CONCURRENCY, 1, 1, 8, 'AVO_GAME_CONCURRENCY'),
     gameAttempts: boundedInteger(env.AVO_GAME_ATTEMPTS, 3, 1, 20, 'AVO_GAME_ATTEMPTS'),
     transientTurnRecoveries: positiveInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5, 'AVO_TRANSIENT_TURN_RECOVERIES'),
+    noToolContinuations: positiveInteger(env.AVO_NO_TOOL_CONTINUATIONS, 3, 'AVO_NO_TOOL_CONTINUATIONS'),
     providerStreamTimeoutMs: positiveInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000, 'AVO_PROVIDER_STREAM_TIMEOUT_MS'),
     providerStreamMaxRetries: positiveInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4, 'AVO_PROVIDER_STREAM_MAX_RETRIES'),
     actionBudgetPolicy: actionBudgetPolicy(env),
@@ -701,6 +704,7 @@ export function verifyRunCapsuleExecution({
   if (observedRuntime.gameConcurrency !== definition.runtime.gameConcurrency
       || observedRuntime.gameAttempts !== definition.runtime.gameAttempts
       || observedRuntime.transientTurnRecoveries !== definition.runtime.transientTurnRecoveries
+      || observedRuntime.noToolContinuations !== definition.runtime.noToolContinuations
       || observedRuntime.providerStreamTimeoutMs !== definition.runtime.providerStreamTimeoutMs
       || observedRuntime.providerStreamMaxRetries !== definition.runtime.providerStreamMaxRetries
       || canonicalJson(observedRuntime.actionBudgetPolicy) !== canonicalJson(definition.runtime.actionBudgetPolicy)

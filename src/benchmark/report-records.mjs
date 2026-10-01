@@ -16,6 +16,7 @@ const SAFE_EVIDENCE_REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 const MAX_SEQUENCE_ACTIONS = 20;
 const TERMINATION_REASONS = new Set([
   'assistant-no-tool',
+  'assistant-output-limit',
   'outer-turn-budget',
   'level-action-budget',
   'repeated-tool-outcome',

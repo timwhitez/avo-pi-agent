@@ -11,6 +11,8 @@ import {
   EXPERIMENT_REVIEW_SCHEMA,
   EXPERIMENT_RUN_SCHEMA,
   aggregateMechanismMetrics,
+  assertExperimentEnvironment,
+  assertExperimentCapsule,
   classifyExperimentResult,
   experimentAssessmentSha256,
   experimentIdentitySha256,
@@ -58,7 +60,7 @@ function planDefinition() {
   const nodeTree = { name: 'avo-pi-arc-agi3', version: '0.1.0', dependencies: {} };
   const pythonPackages = [{ name: 'arc-agi', version: '0.9.9' }];
   const runtime = {
-    nodeVersion: 'v22.23.1',
+    nodeVersion: process.version,
     npmVersion: '12.0.1',
     pythonVersion: 'Python 3.12.13',
     nodeDependencySha256: digest(nodeTree),
@@ -561,6 +563,7 @@ test('plans freeze disjoint 3-4 game manifests and reject mutation, overlap, and
   const plan = sealExperimentPlan(planDefinition());
   assert.deepEqual(validateExperimentPlan(plan), plan);
   assert.ok(Object.isFrozen(plan.manifests.tuning.versionedGameIds));
+  assert.equal(plan.conditions.runtime.noToolContinuations, 3);
 
   const mutated = structuredClone(plan);
   mutated.manifests.tuning.versionedGameIds[0] = 'changed-v1';
@@ -600,6 +603,43 @@ test('plans freeze disjoint 3-4 game manifests and reject mutation, overlap, and
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('plans seal the no-tool allowance and reject execution drift without rewriting historical hashes', () => {
+  const definition = planDefinition();
+  definition.conditions.runtime.nodeVersion = process.version;
+  const plan = sealExperimentPlan(definition);
+  const configured = structuredClone(definition);
+  configured.conditions.runtime.noToolContinuations = 1;
+  assert.notEqual(sealExperimentPlan(configured).planSha256, plan.planSha256);
+  configured.conditions.runtime.noToolContinuations = 0;
+  assert.throws(() => sealExperimentPlan(configured), /noToolContinuations/);
+
+  const options = {
+    provider: {
+      baseUrl: 'https://provider.invalid/v1', model: 'model-a', reasoningEffort: 'high',
+      capabilities: providerCapabilities('high'),
+    },
+    config: { ...plan.conditions.runtime, policyProfile: 'minimal-v1' },
+    env: {},
+  };
+  const run = { plan, binding: binding(plan, 'tuning', 'baseline') };
+  assert.equal(assertExperimentEnvironment(run, options), true);
+  assert.throws(
+    () => assertExperimentEnvironment(run, { ...options, env: { AVO_NO_TOOL_CONTINUATIONS: '1' } }),
+    /noToolContinuations differs from the frozen plan/,
+  );
+  const historical = structuredClone(plan);
+  delete historical.conditions.runtime.noToolContinuations;
+  const { planSha256: ignoredHash, ...historicalDefinition } = historical;
+  historical.planSha256 = digest(historicalDefinition);
+  assert.deepEqual(validateExperimentPlan(historical), historical);
+  assert.throws(
+    () => assertExperimentEnvironment({
+      plan: historical, binding: binding(historical, 'tuning', 'baseline'),
+    }, options),
+    /noToolContinuations differs from the frozen plan/,
+  );
 });
 
 test('invalid experiment manifests stop the real runner before provider or ARC execution', () => {
@@ -721,6 +761,16 @@ test('paired result validation rejects mixed commits, sessions, and initial stat
   assert.equal(result.runs.length, 4);
   assert.match(result.resultSha256, /^[a-f0-9]{64}$/);
   assert.ok(result.runs.every((run) => run.mechanism.modelCalls === 9));
+  const privateCapsule = valid[0].privateCapsuleEvidence.value;
+  assert.equal(assertExperimentCapsule({ plan, binding: privateCapsule.definition.experiment }, privateCapsule), true);
+  const changedAllowance = planDefinition();
+  changedAllowance.conditions.runtime.noToolContinuations = 1;
+  const changedPlan = sealExperimentPlan(changedAllowance);
+  const mismatched = completeEvidence(changedPlan);
+  assert.throws(() => assertExperimentCapsule({
+    plan: changedPlan, binding: mismatched[0].privateCapsuleEvidence.value.definition.experiment,
+  }, mismatched[0].privateCapsuleEvidence.value), /conditions differ/);
+  assert.throws(() => validateExperimentResults(changedPlan, mismatched), /capsule differs/);
 
   const mixedCommit = completeEvidence(plan);
   mixedCommit[1] = runEvidence(plan, 'tuning', 'intervention', { gitCommit: 'a'.repeat(40) });

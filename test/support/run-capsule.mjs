@@ -400,7 +400,7 @@ function privateRunCapsuleFixture({
       },
     },
     runtime: {
-      node: 'v22.23.1',
+      node: process.version,
       dependencies: {
         npmVersion: '12.0.1',
         pythonVersion: 'Python 3.12.13',
@@ -416,6 +416,7 @@ function privateRunCapsuleFixture({
       gameConcurrency: 1,
       gameAttempts: 3,
       transientTurnRecoveries: 5,
+      noToolContinuations: 3,
       sessionTopology: 'one-arcade-session-per-process-pass',
       scorecardBinding: 'exact-session-execution-v5',
       providerStreamTimeoutMs: 1_200_000,

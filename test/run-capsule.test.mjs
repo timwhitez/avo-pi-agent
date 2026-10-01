@@ -174,6 +174,7 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   const baseline = capsule();
   const transcript = capsule({ env: { AVO_TRANSCRIPT_MAX_MESSAGES: '80' } });
   const tokenBound = capsule({ env: { AVO_TRANSCRIPT_MAX_TOKENS: '90000' } });
+  const noToolBound = capsule({ env: { AVO_NO_TOOL_CONTINUATIONS: '1' } });
   const memoryOff = capsule({ config: runtimeConfig({ memorySurfaceLimit: 0 }) });
   const minimal = capsule({ config: runtimeConfig({ policyProfile: 'minimal-v1' }) });
   const warm = capsule({
@@ -181,6 +182,10 @@ test('canonical JSON and the capsule hash change with sealed runtime conditions'
   });
   assert.notEqual(transcript.capsuleHash, baseline.capsuleHash);
   assert.notEqual(tokenBound.capsuleHash, baseline.capsuleHash);
+  assert.notEqual(noToolBound.capsuleHash, baseline.capsuleHash);
+  assert.equal(baseline.definition.runtime.noToolContinuations, 3);
+  assert.ok(Object.hasOwn(baseline.definition.components.files, 'src/benchmark/assistant-turn-log.mjs'));
+  assert.equal(publicRunCapsule(noToolBound).runtime.noToolContinuations, 1);
   assert.notEqual(memoryOff.capsuleHash, baseline.capsuleHash);
   assert.notEqual(minimal.capsuleHash, baseline.capsuleHash);
   assert.notEqual(warm.capsuleHash, baseline.capsuleHash);
@@ -393,6 +398,19 @@ test('execution verification rejects code and effective runtime drift after seal
   };
   assert.equal(verifyRunCapsuleExecution(options).capsuleHash, value.capsuleHash);
   assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, env: { AVO_NO_TOOL_CONTINUATIONS: '1' } }),
+    /topology or retry policy differs/,
+  );
+  const historicalDefinition = structuredClone(value.definition);
+  delete historicalDefinition.runtime.noToolContinuations;
+  const historical = sealRunCapsule(historicalDefinition);
+  // The original artifact remains readable and projects without invented policy.
+  assert.equal(Object.hasOwn(publicRunCapsule(historical).runtime, 'noToolContinuations'), false);
+  assert.throws(
+    () => verifyRunCapsuleExecution({ ...options, capsule: historical }),
+    /topology or retry policy differs/,
+  );
+  assert.throws(
     () => verifyRunCapsuleExecution({
       ...options,
       config: runtimeConfig({
@@ -506,6 +524,20 @@ test('capsules round-trip, reject tampering, and publish only non-secret authori
   assert.equal(published.providerToolSchemaSha256, published.modelInterface.attestation.productionToolSchemaSha256);
   assert.equal(JSON.stringify(published).includes('providerFingerprint'), false);
   assert.equal(evaluatePublicRunCapsule(published, { privateCapsuleEvidence }).accepted, true);
+  const historicalDefinition = structuredClone(value.definition);
+  delete historicalDefinition.runtime.noToolContinuations;
+  const historical = sealRunCapsule(historicalDefinition);
+  const historicalPublished = publicRunCapsule(historical, { runClass: 'cold-start', comparable: true });
+  assert.equal(evaluatePublicRunCapsule(historicalPublished, {
+    privateCapsuleEvidence: { value: historical, sha256: historicalPublished.capsuleEvidenceSha256 },
+  }).accepted, true);
+  const malformedDefinition = structuredClone(value.definition);
+  malformedDefinition.runtime.noToolContinuations = 0;
+  const malformed = sealRunCapsule(malformedDefinition);
+  const malformedPublished = publicRunCapsule(malformed, { runClass: 'cold-start', comparable: true });
+  assert.equal(evaluatePublicRunCapsule(malformedPublished, {
+    privateCapsuleEvidence: { value: malformed, sha256: malformedPublished.capsuleEvidenceSha256 },
+  }).accepted, false);
   const missingProfile = structuredClone(published);
   delete missingProfile.policyProfile;
   assert.equal(evaluatePublicRunCapsule(missingProfile, { privateCapsuleEvidence }).accepted, false);

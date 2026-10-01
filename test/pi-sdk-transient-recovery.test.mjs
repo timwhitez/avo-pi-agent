@@ -36,7 +36,10 @@ async function loadLoopWith(script) {
         this.listener?.({ type: 'agent_start' });
         this.listener?.({ type: 'turn_start' });
         const plan = globalThis.__avoPlan;
-        if (plan.promptError) this.state.errorMessage = plan.promptError;
+        if (plan.promptError) {
+          this.state.errorMessage = plan.promptError;
+          this.state.messages.push({ role: 'assistant', content: [], stopReason: 'error', errorMessage: plan.promptError });
+        }
       }
       async continue() {
         this.listener?.({ type: 'agent_start' });
@@ -50,8 +53,13 @@ async function loadLoopWith(script) {
         } else if (step === '__TOOL__') {
           this.state.messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'observe', arguments: {} }] });
           this.state.errorMessage = undefined;
-        } else if (step) this.state.errorMessage = step;
+        } else if (step) {
+          this.state.errorMessage = step;
+          this.state.messages.push({ role: 'assistant', content: [], stopReason: 'error', errorMessage: step });
+        }
         else this.state.errorMessage = undefined;
+        const message = this.state.messages.at(-1);
+        if (message) this.listener?.({ type: 'turn_end', message, toolResults: [] });
       }
     }
     export class Type {}

@@ -94,8 +94,12 @@ const INCIDENT_METRICS = Object.freeze({
 });
 
 export function sealExperimentPlan(definition) {
-  if (definition?.schema === EXPERIMENT_PLAN_V2_SCHEMA) return sealExperimentPlanV2(definition);
   const input = cloneRecord(definition, 'experiment plan definition');
+  const conditions = input.schema === EXPERIMENT_PLAN_V2_SCHEMA ? input.commonConditions : input.conditions;
+  if (conditions?.runtime && !Object.hasOwn(conditions.runtime, 'noToolContinuations')) {
+    conditions.runtime.noToolContinuations = 3;
+  }
+  if (input.schema === EXPERIMENT_PLAN_V2_SCHEMA) return sealExperimentPlanV2(input);
   requireExactKeys(input, [
     'arms', 'changedVariable', 'conditions', 'createdAt', 'execution',
     'experimentId', 'hypothesis', 'manifests', 'schema',
@@ -293,6 +297,7 @@ function assertEnvironmentConditions(expected, policyProfile, { provider, config
     gameConcurrency: envInteger(env.AVO_GAME_CONCURRENCY, 1),
     gameAttempts: envInteger(env.AVO_GAME_ATTEMPTS, 3),
     transientTurnRecoveries: envInteger(env.AVO_TRANSIENT_TURN_RECOVERIES, 5),
+    noToolContinuations: envInteger(env.AVO_NO_TOOL_CONTINUATIONS, 3),
     providerStreamTimeoutMs: envInteger(env.AVO_PROVIDER_STREAM_TIMEOUT_MS, 20 * 60 * 1000),
     providerStreamMaxRetries: envInteger(env.AVO_PROVIDER_STREAM_MAX_RETRIES, 4),
     transcriptRecentToolResults: envInteger(env.AVO_TRANSCRIPT_RECENT_TOOL_RESULTS, 6),
@@ -303,7 +308,7 @@ function assertEnvironmentConditions(expected, policyProfile, { provider, config
     arcAuthMode: String(env.AVO_ARC_AUTH_MODE || 'anonymous-auto').trim().toLowerCase(),
   };
   for (const [name, observed] of Object.entries(actual)) {
-    if (canonicalJson(runtime[name]) !== canonicalJson(observed)) {
+    if (!Object.hasOwn(runtime, name) || canonicalJson(runtime[name]) !== canonicalJson(observed)) {
       throw new Error(`effective experiment runtime ${name} differs from the frozen plan`);
     }
   }
@@ -404,6 +409,7 @@ function assertCapsuleConditions(conditions, manifest, binding, capsule) {
       || capsuleRuntime.gameConcurrency !== runtime.gameConcurrency
       || capsuleRuntime.gameAttempts !== runtime.gameAttempts
       || capsuleRuntime.transientTurnRecoveries !== runtime.transientTurnRecoveries
+      || capsuleRuntime.noToolContinuations !== runtime.noToolContinuations
       || capsuleRuntime.providerStreamTimeoutMs !== runtime.providerStreamTimeoutMs
       || capsuleRuntime.providerStreamMaxRetries !== runtime.providerStreamMaxRetries
       || canonicalJson(capsuleRuntime.actionBudgetPolicy) !== canonicalJson(runtime.actionBudgetPolicy)
@@ -743,7 +749,11 @@ function validateConditionParts(conditions) {
     'transcriptRecentToolResults', 'transientTurnRecoveries',
     'workspaceContainerImage', 'workspaceContainerRuntime', 'workspaceMode',
     'workspacePythonTimeoutMs',
+    ...(Object.hasOwn(runtime, 'noToolContinuations') ? ['noToolContinuations'] : []),
   ], 'experiment runtime conditions');
+  if (Object.hasOwn(runtime, 'noToolContinuations')) {
+    positiveInteger(runtime.noToolContinuations, 'experiment runtime noToolContinuations');
+  }
   const budgetPolicy = cloneRecord(runtime.actionBudgetPolicy, 'experiment action budget policy');
   requireExactKeys(budgetPolicy, ['fallback', 'multiplier'], 'experiment action budget policy');
   positiveInteger(budgetPolicy.fallback, 'experiment action budget fallback');
@@ -940,6 +950,7 @@ function assertPublicCapsuleConditions(plan, capsule, binding) {
       || capsule.runtime?.gameConcurrency !== runtime.gameConcurrency
       || capsule.runtime?.gameAttempts !== runtime.gameAttempts
       || capsule.runtime?.transientTurnRecoveries !== runtime.transientTurnRecoveries
+      || capsule.runtime?.noToolContinuations !== runtime.noToolContinuations
       || capsule.runtime?.providerStreamTimeoutMs !== runtime.providerStreamTimeoutMs
       || capsule.runtime?.providerStreamMaxRetries !== runtime.providerStreamMaxRetries
       || canonicalJson(capsule.runtime?.actionBudgetPolicy) !== canonicalJson(runtime.actionBudgetPolicy)

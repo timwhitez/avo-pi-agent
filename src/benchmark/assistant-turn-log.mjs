@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { openLogFile } from './process-runner.mjs';
 
 /**
  * Optional private diagnostics for model-side protocol deviations.
@@ -27,7 +28,10 @@ export function assistantLogFileForResumeDir(resumeDir, { env = process.env } = 
 
 export function assistantTurnRecord(message, {
   gameId,
+  versionedGameId,
   attempt,
+  capsuleHash,
+  requestSequence,
   maxTextChars = DEFAULT_ASSISTANT_LOG_MAX_TEXT_CHARS,
   now = Date.now(),
 } = {}) {
@@ -47,7 +51,10 @@ export function assistantTurnRecord(message, {
   return {
     schema: ASSISTANT_TURN_LOG_SCHEMA,
     gameId: String(gameId || ''),
+    versionedGameId: String(versionedGameId || '') || null,
     attempt: Number.isInteger(attempt) ? attempt : null,
+    capsuleHash: /^[a-f0-9]{64}$/.test(String(capsuleHash || '')) ? capsuleHash : null,
+    requestSequence: Number.isSafeInteger(requestSequence) && requestSequence > 0 ? requestSequence : null,
     at: new Date(now).toISOString(),
     stopReason: message.stopReason === undefined ? null : String(message.stopReason),
     textLength: text.length,
@@ -66,8 +73,9 @@ export function appendAssistantTurn(file, message, context = {}) {
   }
   if (!record) return false;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    const fd = openLogFile(file, { root: context.root ?? path.dirname(file), append: true });
+    try { fs.writeFileSync(fd, `${JSON.stringify(record)}\n`); }
+    finally { fs.closeSync(fd); }
     return true;
   } catch {
     return false;
