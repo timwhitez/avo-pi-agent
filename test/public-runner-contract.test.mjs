@@ -1080,9 +1080,17 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_REPAIR_ROUND: 'recover-open',
       AVO_TEST_MULTI_ATTEMPT: '1',
       AVO_TEST_TOOL_FAILURE_DIAGNOSTIC: '1',
+      AVO_PRIVATE_ASSISTANT_LOG: '1',
     },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  const privateFailures = fs.readFileSync(path.join(privateDir, 'tool-failures.jsonl'), 'utf8')
+    .trim().split('\n').map(JSON.parse);
+  assert.ok(privateFailures.some((record) => record.toolName === 'workspace_write'
+    && record.outcome === 'tool-reported-unsuccessful' && record.error.includes('PRIVATE_MODEL_REASONING')));
+  assert.ok(privateFailures.some((record) => record.toolName === 'workspace_write'
+    && record.outcome === 'exception-or-validation'));
+  assert.ok(privateFailures.every((record) => record.capsuleHash === capsule.capsuleHash));
   assert.match(result.stdout, /g02: attempt 2\/3 failed \(RuntimeError: synthetic transient environment reopen failure\); retrying/);
   assert.match(result.stdout, /g03: attempt 1\/3 failed \(RuntimeError: synthetic transient tracked-open failure\); retrying/);
   assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);

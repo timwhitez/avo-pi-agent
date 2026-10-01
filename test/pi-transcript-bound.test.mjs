@@ -425,8 +425,46 @@ test('production Pi context usage compacts short text whose provider usage is al
     }).tokens,
     onCompaction: (event) => compactions.push(event),
   });
-  assert.deepEqual(bounded.filter((message) => message.role === 'assistant'), []);
+  assert.equal(bounded.find((message) => message.role === 'assistant')?.usage, messages[1].usage,
+    'an inserted compaction notice changes the prefix, so stale usage cannot force the short reply out');
   assert.ok(compactions.some((event) => event.mode === 'hard'));
+});
+
+test('compacted fresh tool turns discard stale prefix estimates without changing recorded usage', async () => {
+  const piAiEntry = import.meta.resolve('@earendil-works/pi-ai');
+  const { estimateContextTokens } = await import(new URL('./utils/estimate.js', piAiEntry));
+  const anchor = {
+    schema: 'avo.current-observation-anchor.v1', gameId: 'fixture',
+    attemptId: 'attempt-000001', episodeId: 'episode-000001',
+    observationRef: 'evidence-000001-aaaaaaaaaaaa', payloadSha256: 'a'.repeat(64),
+    recovery: { tool: 'trajectory_read', arguments: { ref: 'evidence-000001-aaaaaaaaaaaa' }, mode: 'complete' },
+  };
+  const status = runtimeStatusMessage({ state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+    terminalReason: 'none', allowedNext: 'act', currentObservation: anchor }, { outerTurns: 1, maxOuterTurns: 2 });
+  const turn = { role: 'assistant', timestamp: 10, stopReason: 'toolUse',
+    content: [{ type: 'toolCall', id: 'fresh', name: 'observe', arguments: {} }],
+    usage: { input: 120_000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 120_001 } };
+  const result = { role: 'toolResult', toolCallId: 'fresh', toolName: 'observe', timestamp: 11,
+    content: [{ type: 'text', text: 'fresh current state' }] };
+  const messages = replaceRuntimeStatus([user(0), user(1), turn, result], status.text, 12);
+  const original = JSON.stringify(messages);
+  const measured = [];
+  const bounded = boundTranscript(messages, { currentAnchor: anchor, maxTokens: 120_000,
+    estimateContextTokens: (value) => {
+      const estimate = estimateContextTokens({ systemPrompt: 'system', messages: value, tools: [] });
+      measured.push(estimate.usageTokens);
+      return estimate.tokens;
+    } });
+  assert.ok(measured.includes(120_001), 'unchanged request keeps its provider-calibrated estimate');
+  assert.ok(bounded.some((message) => message.content?.[0]?.text === 'fresh current state'));
+  assert.ok(bounded.some((message) => message.content?.some((block) => block.id === 'fresh')));
+  assert.equal(JSON.stringify(messages), original, 'accounting history and its usage stay intact');
+  assert.equal(turn.usage.totalTokens, 120_001);
+  assert.throws(() => boundTranscript(messages.map((message) => message === result
+    ? { ...result, content: [{ type: 'text', text: 'x'.repeat(500_000) }] } : message), {
+    currentAnchor: anchor, maxTokens: 120_000,
+    estimateContextTokens: (value) => estimateContextTokens({ systemPrompt: 'system', messages: value, tools: [] }).tokens,
+  }), /cannot preserve the latest completed tool turn/, 'a genuinely oversized fresh result still fails closed');
 });
 
 test('production Pi context estimator includes system prompt and complete tools before first usage', async () => {

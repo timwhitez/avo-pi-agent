@@ -10,7 +10,7 @@ import { offlineDemoSet } from './arc/offline-demo.mjs';
 import { createProgressStatusReporter } from './benchmark/progress-status.mjs';
 import { writeJsonAtomic } from './benchmark/report-safe-files.mjs';
 import { preflightResponsesProvider } from './benchmark/provider-attestation.mjs';
-import { appendAssistantTurn, assistantLogFileForResumeDir } from './benchmark/assistant-turn-log.mjs';
+import { appendAssistantTurn, appendToolFailure, assistantLogFileForResumeDir } from './benchmark/assistant-turn-log.mjs';
 import { attestWorkspaceCapability } from './benchmark/workspace-attestation.mjs';
 import {
   inspectRunState,
@@ -264,6 +264,14 @@ async function runPublic(args) {
           attempt: activeAttempt,
           contextSequence: contextSequence + 1,
         };
+        if (assistantLogFile && !duplicateToolEnd && event.type === 'tool_execution_end') {
+          appendToolFailure(path.join(path.dirname(assistantLogFile), 'tool-failures.jsonl'), event, {
+            gameId, versionedGameId, attempt: activeAttempt, capsuleHash: runCapsuleHash,
+            args: pendingToolCalls.get(toolCallId),
+            toolName: allowedToolNames.has(event.toolName) ? event.toolName : 'unknown-tool',
+            root: path.resolve('runs/private'),
+          });
+        }
         const failure = duplicateToolEnd ? null : privateToolFailureEvidence(pendingToolCalls, event, {
           gameId,
           versionedGameId,

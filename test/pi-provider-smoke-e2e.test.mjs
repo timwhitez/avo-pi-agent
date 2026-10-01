@@ -886,6 +886,7 @@ for (const scenario of [
   { name: 'output truncation has its own terminal reason', steps: ['length', 'length'], nudges: 1, recoveries: 5, expectedRecoveries: 0, reason: 'assistant-output-limit' },
   { name: 'truncation can recover with one bounded nudge', steps: ['length', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 0 },
   { name: 'truncated tool calls are rejected before execution', steps: ['length-call', 'act'], nudges: 1, recoveries: 5, expectedRecoveries: 0 },
+  { name: 'truncated calls use the same bounded output recovery', steps: ['length-call', 'length-call'], nudges: 1, recoveries: 5, expectedRecoveries: 0, reason: 'assistant-output-limit' },
   { name: 'the outer-turn ceiling wins over a pending nudge', steps: ['text'], nudges: 3, recoveries: 5, expectedRecoveries: 0, maxOuterTurns: 1, reason: 'outer-turn-budget' },
 ]) {
   test(`installed Pi continuation cause: ${scenario.name}`, async (t) => {
@@ -941,7 +942,9 @@ for (const scenario of [
     if (scenario.error) assert.match(result.error, /stream disconnected/);
     else assert.equal(result.error, null);
     assert.equal(actions, scenario.reason || scenario.error ? 0 : 1);
-    if (scenario.steps.includes('length-call')) assert.equal(result.mechanismMetrics.toolFailures, 1);
+    if (scenario.steps.includes('length-call')) {
+      assert.equal(result.mechanismMetrics.toolFailures, scenario.steps.filter((step) => step === 'length-call').length);
+    }
     if (scenario.reason) {
       const terminal = events.find((event) => event.receipt?.schema === 'avo.loop-termination.v1')?.receipt;
       assert.ok(terminal, 'termination receipt exists');
@@ -1061,6 +1064,104 @@ test('installed Pi counts a mid-run error turn in the returned outer turns', asy
   assert.equal(result.error, null);
 });
 
+test('installed Pi dispatches fresh tool results after compacting an oversized usage prefix', async (t) => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const index = requests.length;
+    if (index === 1) return sendTextResponse(response, {
+      responseId: 'resp_prior_prefix', itemId: 'msg_prior_prefix', text: 'Inspect the state.',
+    });
+    sendToolCall(response, { responseId: `resp_compacted_${index}`, itemId: `fc_compacted_${index}`,
+      callId: `call_compacted_${index}`, name: index === 2 ? 'observe' : 'act', argumentsJson: '{}',
+      usage: index === 2 ? { input_tokens: 120_000, output_tokens: 1, total_tokens: 120_001 }
+        : { input_tokens: 100, output_tokens: 10, total_tokens: 110 } });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  t.after(() => {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+  });
+  let actions = 0;
+  const ref = 'evidence-000001-aaaaaaaaaaaa';
+  const loop = await createPiSdkLoop({ provider: {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+    model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+  }, workspaceMode: 'files-only', policyProfile: 'current-v1', maxOuterTurns: 10 });
+  const result = await loop.run({ systemPrompt: 'Local fresh-prefix fixture.', initialPrompt: 'Begin.',
+    tools: ['observe', 'act'].map((name) => ({ name, label: name, description: name,
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => {
+        if (name === 'act') actions += 1;
+        return { text: name === 'observe' ? 'fresh-observation-tail' : 'action complete', details: {}, terminate: name === 'act' };
+      } })),
+    shouldStop: () => actions > 0,
+    currentObservationRequired: true,
+    runtimeStatus: () => ({ state: actions ? 'WIN' : 'ACTIVE', environmentActions: actions,
+      maxActions: 1, terminalReason: actions ? 'win' : 'none', allowedNext: 'act',
+      currentObservation: { schema: 'avo.current-observation-anchor.v1', gameId: 'fixture',
+        attemptId: 'attempt-000001', episodeId: 'episode-000001', observationRef: ref,
+        payloadSha256: 'a'.repeat(64),
+        recovery: { tool: 'trajectory_read', arguments: { ref }, mode: 'complete' } } }) });
+  assert.equal(result.error, null);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => request.max_output_tokens === 16_000));
+  assert.ok(requests[2].input.some((item) => item.type === 'function_call_output'
+    && item.output === 'fresh-observation-tail'));
+  assert.equal(actions, 1);
+  assert.equal(result.mechanismMetrics.modelCalls, 3);
+  assert.equal(result.mechanismMetrics.totalTokens, 120_221, 'compaction keeps real accounting usage');
+  assert.ok(requests.every((request) => request.max_output_tokens === 16_000),
+    'compaction does not silently reduce the sealed output allowance');
+});
+
+test('installed Pi termination windows retain repeated reads across a recovered provider error', async (t) => {
+  const events = [];
+  let requests = 0;
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    const index = ++requests;
+    if (index === 3) return sendFailedResponse(response, 'resp_stall_error');
+    sendToolCall(response, { responseId: `resp_stall_${index}`, itemId: `fc_stall_${index}`,
+      callId: `call_stall_${index}`, name: 'observe', argumentsJson: '{}' });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  t.after(() => {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+  });
+  const loop = await createPiSdkLoop({ provider: {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: process.env.OPENAI_API_KEY,
+    model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities('max'),
+  }, workspaceMode: 'files-only', policyProfile: 'current-v1', stallWindow: 2, maxOuterTurns: 10 },
+  { onEvent: (event) => events.push(event) });
+  const result = await loop.run({ systemPrompt: 'Local stall-window fixture.', initialPrompt: 'Begin.',
+    tools: [{ name: 'observe', label: 'Observe', description: 'Read state.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => ({ text: 'same state', details: {} }) }],
+    shouldStop: () => false,
+    runtimeStatus: () => ({ state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+      terminalReason: 'none', allowedNext: 'act' }) });
+  assert.equal(requests, 4);
+  assert.equal(result.transientRecoveries, 1);
+  assert.equal(result.terminationReason, 'repeated-tool-outcome');
+  const terminal = events.find((event) => event.receipt?.schema === 'avo.loop-termination.v1')?.receipt;
+  assert.equal(terminal.window.firstRequestSequence, 2);
+  assert.equal(terminal.window.lastRequestSequence, 4);
+  assert.deepEqual(terminal.window.reads.map((read) => read.originRequestSequence), [2, 4]);
+  assert.deepEqual(terminal.window.reads.map((read) => read.toolCallId.split('|')[0]), ['call_stall_2', 'call_stall_4']);
+});
+
 async function runReadOnlyScenario({ textFor, maxOuterTurns, maxToolResultChars = null }) {
   const requests = [];
   const server = http.createServer(async (request, response) => {
@@ -1136,6 +1237,7 @@ function sendToolCall(response, {
   name,
   argumentsJson,
   status = 'completed',
+  usage = { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
 }) {
   const item = {
     type: 'function_call',
@@ -1157,7 +1259,7 @@ function sendToolCall(response, {
         status,
         ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
         output: [item],
-        usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
+        usage,
       },
     },
   ];

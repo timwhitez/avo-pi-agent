@@ -644,7 +644,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           maxOuterTurns: config.maxOuterTurns,
           policyProfile,
         });
-        const bounded = boundTranscript(replaceRuntimeStatus(messages, status.text), {
+        const withStatus = replaceRuntimeStatus(messages, status.text);
+        const bounded = boundTranscript(withStatus, {
           ...transcriptOptions,
           currentAnchor: status.anchor ?? undefined,
         });
@@ -653,7 +654,10 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           scope: status.anchor ? { gameId: status.anchor.gameId, attemptId: status.anchor.attemptId, episodeId: status.anchor.episodeId } : {},
           selectors: runTelemetry.receipts.selectors,
         });
-        return bounded;
+        // streamSimple estimates this view again when choosing the output cap.
+        // Keep stale prefix usage out of that estimate as well; Agent.state
+        // retains the original assistant messages for token accounting.
+        return withoutStalePrefixUsage(bounded, withStatus);
       };
 
       // One logical assistant turn is one SDK `turn_start` event, including a
@@ -669,6 +673,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       let lastEnvironmentActions = 0;
       let lastNovelToolOutcomes = 0;
       let noActionInnerTurns = 0;
+      let noActionWindowStart = null;
       let innerTurnNoActionLimitReached = false;
       let noToolContinuations = 0;
       let noToolWindowStart = null;
@@ -689,19 +694,25 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         shouldStopAfterTurn: async ({ message }) => {
           if (shouldStop()) return true;
           if (outerTurns >= config.maxOuterTurns) return true;
+          // Pi rejects every call in a truncated response. Return control so
+          // truncated calls share the same bounded recovery as empty truncation.
+          if (message.stopReason === 'length') return true;
           if (!assistantTurnHasToolCall(message)) return false;
           const environmentActions = runtimeEnvironmentActions(runtimeStatus());
           if (environmentActions > lastEnvironmentActions) {
             lastEnvironmentActions = environmentActions;
             lastNovelToolOutcomes = novelToolOutcomes;
             noActionInnerTurns = 0;
+            noActionWindowStart = null;
             return false;
           }
           if (novelToolOutcomes > lastNovelToolOutcomes) {
             lastNovelToolOutcomes = novelToolOutcomes;
             noActionInnerTurns = 0;
+            noActionWindowStart = null;
             return false;
           }
+          noActionWindowStart ??= providerRequestSequence;
           noActionInnerTurns += 1;
           if (noActionInnerTurns < maxNoActionInnerTurns) return false;
           innerTurnNoActionLimitReached = true;
@@ -817,9 +828,11 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           noActionInnerTurns,
           // The triggering window: reads issued by the last no-action turns.
           window: (() => {
-            const firstRequest = noToolTurn && noToolWindowStart !== null
-              ? noToolWindowStart
-              : Math.max(1, providerRequestSequence - Math.max(1, noActionInnerTurns) + 1);
+            const firstRequest = terminationReason === 'repeated-tool-outcome'
+              ? noActionWindowStart
+              : noToolTurn && noToolWindowStart !== null
+                ? noToolWindowStart
+                : providerRequestSequence;
             const reads = runTelemetry.receipts.readWindow.filter((read) => (read.originRequestSequence ?? 0) >= firstRequest);
             const earliestRetained = runTelemetry.receipts.readWindow[0]?.originRequestSequence ?? null;
             return {
@@ -873,6 +886,7 @@ function latestAssistantTurnHasNoToolCall(messages) {
     const message = messages[index];
     if (message?.role !== 'assistant') continue;
     if (message.errorMessage || message.stopReason === 'error' || message.stopReason === 'aborted') return false;
+    if (message.stopReason === 'length') return true;
     return !assistantTurnHasToolCall(message);
   }
   return false;
@@ -1482,7 +1496,7 @@ export function boundTranscript(messages, {
   // production passes the verified host anchor for this request.
   const anchor = currentAnchor === undefined ? null : validateCurrentAnchor(currentAnchor);
   const estimate = estimateContextTokens
-    ? (value) => contextTokens(value, estimateContextTokens)
+    ? (value) => contextTokens(value, estimateContextTokens, messages)
     : (value) => transcriptTokens(value, estimateMessageTokens);
   const toolIndices = [];
   const thinkingIndices = [];
@@ -1712,14 +1726,28 @@ export function transcriptPolicySource() {
   return [
     boundTranscript, hardBoundTranscript, toolTurnGroups, evidenceSelection, currentRepresentation,
     selectionTelemetry, compactionNotice, repairToolPairs, isDeliveryReduced,
-    isReducedToolResult, validateCurrentAnchor,
+    isReducedToolResult, validateCurrentAnchor, contextTokens, withoutStalePrefixUsage,
   ].map((fn) => fn.toString()).join('\n');
 }
 
-function contextTokens(messages, estimateContextTokens) {
-  const value = Number(estimateContextTokens(messages));
+function contextTokens(messages, estimateContextTokens, originalMessages) {
+  const value = Number(estimateContextTokens(withoutStalePrefixUsage(messages, originalMessages)));
   if (!Number.isFinite(value) || value < 0) throw new Error('context token estimator returned an invalid value');
   return Math.ceil(value);
+}
+
+function withoutStalePrefixUsage(messages, originalMessages) {
+  // Pi's successful assistant usage describes its original request prefix.
+  // After that prefix is compacted, reusing usage overestimates the candidate
+  // and can reject a tiny fresh tool turn before the next request dispatches.
+  let unchangedPrefix = true;
+  return messages.map((message, index) => {
+    unchangedPrefix &&= message === originalMessages[index];
+    return unchangedPrefix || message?.role !== 'assistant' ? message : {
+      ...message,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    };
+  });
 }
 
 function compactionNotice(dropped, timestamp = Date.now(), ref = null, anchored = false) {
