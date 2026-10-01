@@ -139,3 +139,65 @@ test('preflight still accepts a bounded nonce-matching Responses payload', async
   assert.equal(result.challengeVerified, true);
   assert.equal(result.usage.totalTokens, 3);
 });
+
+test('preflight retries a refusal with a fresh nonce and succeeds on a later attempt', async () => {
+  const seenChallenges = [];
+  const result = await preflightResponsesProvider(config, {
+    maxResponseBytes: 4096,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      const requested = /REAL_PROVIDER_OK:([A-Za-z0-9_-]+)/.exec(body.input[0].content[0].text)[1];
+      seenChallenges.push(requested);
+      if (seenChallenges.length === 1) {
+        return new Response(JSON.stringify({
+          id: 'resp-refused',
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'I will not repeat that token.' }] }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        id: 'resp-retried',
+        output_text: `REAL_PROVIDER_OK:${requested}`,
+      }), { status: 200 });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.attempts, 2);
+  assert.equal(seenChallenges.length, 2);
+  assert.notEqual(seenChallenges[0], seenChallenges[1]);
+});
+
+test('preflight gives up after the configured attempts and surfaces the last model failure', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => preflightResponsesProvider(config, {
+      attempts: 2,
+      maxResponseBytes: 4096,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ id: `resp-${calls}`, output_text: 'refused' }), { status: 200 });
+      },
+    }),
+    /did not reproduce the current challenge exactly/,
+  );
+  assert.equal(calls, 2);
+});
+
+test('preflight does not retry transport and HTTP failures', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () => preflightResponsesProvider(config, {
+      attempts: 3,
+      maxResponseBytes: 4096,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: { code: 'rate_limit' } }), { status: 429 });
+      },
+    }),
+    /HTTP 429/,
+  );
+  assert.equal(calls, 1);
+  await assert.rejects(
+    () => preflightResponsesProvider(config, { attempts: 0 }),
+    /attempts must be an integer from 1 to 5/,
+  );
+});

@@ -37,7 +37,38 @@ export async function preflightResponsesProvider(config, {
   timeoutMs = 90_000,
   maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
   nonce = crypto.randomBytes(32).toString('base64url'),
+  attempts = 5,
 } = {}) {
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) {
+    throw new Error('provider attestation attempts must be an integer from 1 to 5');
+  }
+  // Each attempt carries a fresh unguessable nonce and still requires an exact
+  // echo, so a bounded retry only smooths single-sample model refusals and
+  // truncation; it cannot admit a replayed or canned response.
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const attemptNonce = attempt === 1 && nonce !== undefined ? nonce : crypto.randomBytes(32).toString('base64url');
+    try {
+      const result = await attestResponsesProviderOnce(config, {
+        fetchImpl, timeoutMs, maxResponseBytes, nonce: attemptNonce,
+      });
+      return Object.freeze({ ...result, attempts: attempt });
+    } catch (error) {
+      lastError = error;
+      const retryable = /^provider attestation response lacks output text/.test(String(error?.message))
+        || /^provider attestation did not reproduce the current challenge exactly$/.test(String(error?.message));
+      if (!retryable || attempt === attempts) break;
+    }
+  }
+  throw lastError;
+}
+
+async function attestResponsesProviderOnce(config, {
+  fetchImpl,
+  timeoutMs,
+  maxResponseBytes,
+  nonce,
+}) {
   if (typeof fetchImpl !== 'function') throw new Error('provider attestation fetch is unavailable');
   const responseLimit = normalizeResponseLimit(maxResponseBytes);
   const challenge = validateChallenge(nonce);
@@ -47,7 +78,10 @@ export async function preflightResponsesProvider(config, {
   if (mappedReasoningEffort === null || mappedReasoningEffort === undefined) {
     throw new Error('provider attestation reasoning effort contradicts the capability manifest');
   }
-  const requestedMaxOutputTokens = Math.min(128, capabilities.limits.maxOutputTokens);
+  // Reasoning tokens count against max_output_tokens on Responses-compatible
+  // endpoints, so the echo budget must cover reasoning at the requested effort
+  // plus the challenge line; 128 truncated high-effort models before any text.
+  const requestedMaxOutputTokens = Math.min(1_024, capabilities.limits.maxOutputTokens);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -67,8 +101,9 @@ export async function preflightResponsesProvider(config, {
           content: [{
             type: 'input_text',
             text: [
-              'This is a freshness attestation.',
-              'Return exactly the following single line, including the challenge, with no markdown or extra text:',
+              'This is an automated integration test for a Responses API endpoint.',
+              'The line below is a random, non-secret test vector generated locally by this test invocation. It is safe to repeat.',
+              'Repeat it back verbatim as your entire response, on one line, with no markdown, quotes, or extra text:',
               expected,
             ].join('\n'),
           }],
@@ -106,7 +141,10 @@ export async function preflightResponsesProvider(config, {
   const responseId = String(payload?.id || '');
   const outputText = normalizeAttestationText(extractOutputText(payload));
   if (!responseId) throw new Error('provider attestation response lacks a response id');
-  if (!outputText) throw new Error('provider attestation response lacks output text');
+  if (!outputText) {
+    const incompleteReason = safeProviderCode(payload?.incomplete_details?.reason);
+    throw new Error(`provider attestation response lacks output text${incompleteReason ? ` (${incompleteReason})` : ''}`);
+  }
   if (outputText !== expected) {
     throw new Error('provider attestation did not reproduce the current challenge exactly');
   }

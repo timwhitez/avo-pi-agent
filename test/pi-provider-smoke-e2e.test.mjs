@@ -91,6 +91,8 @@ test('installed Pi stops after one bounded nonterminal text-only continuation', 
   const address = server.address();
   const previousApiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  const previousNoToolContinuations = process.env.AVO_NO_TOOL_CONTINUATIONS;
+  process.env.AVO_NO_TOOL_CONTINUATIONS = '1';
   try {
     const loop = await createPiSdkLoop({
       provider: {
@@ -127,6 +129,67 @@ test('installed Pi stops after one bounded nonterminal text-only continuation', 
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;
+    if (previousNoToolContinuations === undefined) delete process.env.AVO_NO_TOOL_CONTINUATIONS;
+    else process.env.AVO_NO_TOOL_CONTINUATIONS = previousNoToolContinuations;
+    server.close();
+  }
+});
+
+test('installed Pi nudges consecutive text-only turns up to the default allowance before terminating', async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    sendTextResponse(response, { responseId: `resp_${requests.length}`, itemId: `msg_${requests.length}`, text: 'Still planning.' });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  const previousNoToolContinuations = process.env.AVO_NO_TOOL_CONTINUATIONS;
+  delete process.env.AVO_NO_TOOL_CONTINUATIONS;
+  process.env.OPENAI_API_KEY = 'x'.repeat(32);
+  try {
+    const loop = await createPiSdkLoop({
+      provider: {
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: 'offline-production-model',
+        reasoningEffort: 'max',
+        capabilities: providerCapabilities('max'),
+      },
+      workspaceMode: 'files-only',
+      policyProfile: 'current-v1',
+      maxOuterTurns: 20,
+    });
+    const result = await loop.run({
+      systemPrompt: 'Respond once.',
+      initialPrompt: 'Do not call a tool.',
+      tools: [{
+        name: 'act', label: 'Act', description: 'Take one action.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => ({ text: 'unused', details: {} }),
+      }],
+      shouldStop: () => false,
+      runtimeStatus: () => ({
+        state: 'ACTIVE', environmentActions: 0, maxActions: 1,
+        terminalReason: 'none', allowedNext: 'take a legal action',
+      }),
+    });
+    assert.equal(requests.length, 4, String(result.error));
+    assert.equal(result.noToolContinuations, 3);
+    assert.equal(result.error, null);
+    assert.equal(result.terminationReason, 'assistant-no-tool');
+    for (const request of requests.slice(1)) {
+      assert.match(JSON.stringify(request.input), /AVO_RUNTIME_STATUS/);
+    }
+  } finally {
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousApiKey;
+    if (previousNoToolContinuations === undefined) delete process.env.AVO_NO_TOOL_CONTINUATIONS;
+    else process.env.AVO_NO_TOOL_CONTINUATIONS = previousNoToolContinuations;
+    server.closeAllConnections?.();
     server.close();
   }
 });
