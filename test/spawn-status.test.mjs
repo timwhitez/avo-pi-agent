@@ -39,16 +39,23 @@ test('spawn output overflow diagnostics distinguish ENOBUFS from timeout', () =>
 });
 
 test('spawn nonzero and signal exits preserve phase and child output', () => {
-  assert.throws(() => run('nonzero', 'process.stdout.write("out"); process.stderr.write("err"); process.exit(7);'), (error) => {
+  assert.throws(() => run('nonzero', 'process.stdout.write("out-payload-42"); process.stderr.write("err-payload-57"); process.exit(7);'), (error) => {
     assert.match(error.message, /nonzero/);
     assert.match(error.message, /"status":7/);
-    assert.match(error.message, /"stdoutBytes":3/);
-    assert.match(error.message, /"stderrBytes":3/);
-    assert.match(error.message, /out/);
-    assert.match(error.message, /err/);
+    assert.match(error.message, /"stdoutBytes":14/);
+    assert.match(error.message, /"stderrBytes":14/);
+    assert.ok(error.message.endsWith('\nstdout:\nout-payload-42\nstderr:\nerr-payload-57'));
     return true;
   });
-  assert.throws(() => run('signal', 'process.kill(process.pid, "SIGTERM");'), /"signal":"SIGTERM"/);
+  assert.throws(() => run('signal', 'import fs from "node:fs"; fs.writeSync(1, "child-before-self-signal"); process.kill(process.pid, "SIGTERM");'), (error) => {
+    const metadata = JSON.parse(error.message.split('\n')[0]);
+    assert.equal(metadata.phase, 'signal');
+    assert.equal(metadata.signal, 'SIGTERM');
+    assert.equal(metadata.error, null);
+    assert.doesNotMatch(error.message, /ETIMEDOUT/);
+    assert.ok(error.message.endsWith('\nstdout:\nchild-before-self-signal\nstderr:\n'));
+    return true;
+  });
 });
 
 test('spawn missing executable is reported as a process error', () => {
