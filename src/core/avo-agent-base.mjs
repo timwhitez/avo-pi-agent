@@ -33,6 +33,9 @@ export const CURRENT_OBSERVATION_ANCHOR_SCHEMA = 'avo.current-observation-anchor
 export const OBSERVATION_VIEW_SCHEMA = 'avo.observation-view.v1';
 const GAMEPLAY_ACTIONS = ['ACTION1', 'ACTION2', 'ACTION3', 'ACTION4', 'ACTION5', 'ACTION6', 'ACTION7'];
 const MAX_TRAJECTORY_DIFF_CELLS = 128;
+const WORKSPACE_READ_ERROR_CODES = new Set([
+  'ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'EISDIR', 'ELOOP', 'EIO', 'EMFILE', 'ENFILE', 'EBADF',
+]);
 const CLAIM_REF_SCHEMA = { type: 'string', maxLength: 32, pattern: '^claim-[0-9]{6,16}$' };
 const EVIDENCE_REF_SCHEMA = { type: 'string', maxLength: 64, pattern: '^evidence-[0-9]{6,}-[a-f0-9]{12}$' };
 const ACTION_EXPECTATION_SCHEMA = {
@@ -1114,10 +1117,20 @@ export class AvoArcAgent {
         || !Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
       throw new Error('workspace_read requires a non-negative offset and limit from 1 through 24000');
     }
-    const content = this.workspace.read(path);
     const maxChars = this.toolResultMaxChars;
     if (!Number.isSafeInteger(maxChars) || maxChars <= 256) {
       throw new Error('workspace_read requires a tool result bound greater than 256 characters');
+    }
+    let content;
+    try {
+      content = this.workspace.read(path);
+    } catch (error) {
+      // Native errors contain host paths; only closed, useful codes cross the tool boundary.
+      const code = WORKSPACE_READ_ERROR_CODES.has(error?.code) ? error.code : 'WORKSPACE_READ_FAILED';
+      const envelope = { ok: false, code, message: 'Workspace file could not be read.' };
+      const text = JSON.stringify(envelope);
+      if (text.length > maxChars) throw new Error(code);
+      return this.toolResult(text, { ...envelope });
     }
     if (offset > content.length || (offset > 0 && isSurrogateBoundary(content, offset))) {
       throw new Error('workspace_read offset must be within the file and on a Unicode character boundary');

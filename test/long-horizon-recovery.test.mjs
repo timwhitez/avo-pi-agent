@@ -130,5 +130,5 @@ test('workspace reads recover the entire file through bounded model-visible page
   await tools.workspace_write.execute({ path: 'short.txt', content: 'short' });
   assert.equal((await tools.workspace_read.execute({ path: 'short.txt' })).text, 'short');
   await assert.rejects(tools.workspace_read.execute({ path: 'short.txt', offset: -1 }));
-  await assert.rejects(tools.workspace_read.execute({ path: '../escape.txt' }));
+  assert.equal((await tools.workspace_read.execute({ path: '../escape.txt' })).details.ok, false);
 });
