@@ -31,6 +31,7 @@ import { verifyLiveObservation } from './support/live-observation.mjs';
 import { readRunObservation } from '../src/benchmark/run-observation.mjs';
 import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
+import { spawnWithExpectedStatus } from './support/spawn-status.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', async () => {
   const root = temporaryDirectory('avo-public-contract-');
@@ -1071,7 +1072,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   fs.rmSync(exhaustedReportFile);
 
   const scorecardObservationNotBefore = Date.now();
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+  const result = spawnWithExpectedStatus('recover-open', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
     timeout: 60_000,
@@ -1083,7 +1084,6 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_PRIVATE_ASSISTANT_LOG: '1',
     },
   });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
   const privateFailures = fs.readFileSync(path.join(privateDir, 'tool-failures.jsonl'), 'utf8')
     .trim().split('\n').map(JSON.parse);
   assert.ok(privateFailures.some((record) => record.toolName === 'workspace_write'
