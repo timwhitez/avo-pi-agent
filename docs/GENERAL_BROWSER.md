@@ -60,10 +60,15 @@ readable/traversable by that account; the inventory probe reports access failure
 On the tested host `/root` is 0711 and `nobody` is uid/gid 65534.
 
 Each run owns `runs/private/general/g-<id>/browser/` with clean Chrome profile,
-home/config/cache, harness, runtime, helper workspace, cwd and downloads. Private
-run/browser directories are 0700 and chowned to the selected account; manifests,
-results and streamed output are 0600. Host-authored files can be root-owned when
-the host is root. Traversable parent containers hold no task content. Chrome's
+home/config/cache, harness, runtime, helper workspace, cwd and downloads. The
+run parent stays host-owned and traversable (0711). Browser directories and
+`artifacts/` are private (0700), created under host authority and handed over with
+descriptor-bound mode/ownership changes, leaves before parents. `host/` and
+`host/artifacts/` stay host-owned 0700; manifests, results, receipts and streamed
+output there are 0600. The artifact registry and runner terminal evidence remain
+in host memory. Browser children cannot replace host evidence under a root host;
+non-root runs share the current account. Traversable parents hold no task content.
+Chrome's
 singleton socket exceeded Unix path limits in the original deep temp path, so
 `<checkout>/.bt/g-<unique>/` is a separate 0700 account-owned temporary directory;
 it never shares another run's temporary files. A checkout too deep even for this
@@ -101,7 +106,9 @@ print(cdp("Network.getCookies"))
 ```
 
 Raw stdout is arbitrary text. No Python-dict eval, JSON assumption or helper
-tracing. Exit 0 reports process/capture completion only. Unprinted wait False or
+tracing. Uncancelled completed runner evidence plus exit 0 reports process/capture
+completion only. Cancellation remains cancelled/unknown even when a SIGTERM
+handler exits zero; tool text includes the bounded runner cancellation reason. Unprinted wait False or
 navigation errorText may exit 0; condition/business success stays unspecified.
 Printing False preserves `condition_not_met` evidence; it is not an exception
 or proof that no action was sent. Assert failures retain stderr/nonzero and
@@ -112,7 +119,8 @@ Code is limited to 64 KiB. Default capture bounds are stdout 16 MiB, stderr
 4 MiB, PNG 8 MiB, registered artifacts 128 MiB/run. These bound managed capture,
 not all host writes/download disk usage. Quota/sink/cancel/drain failures preserve
 saved prefixes where reopenable and label capture partial; hashes cover saved
-bytes, never discarded bytes. Tool text has bounded previews and actual ref/
+bytes, never discarded bytes. Tool text sizes previews by serialized JSON length (including escapes) and
+rejects insufficient bounds before dispatch. It includes process/capture facts and actual ref/
 `artifact_read` nextRequest, never details-only recovery. UTF-8 output uses
 replacement decoding; byte SHA and canonical JSON-page SHA are separate.
 
@@ -124,9 +132,12 @@ stay in the private browser downloads directory; inspect/print them with task
 Python to receive registered stdout rather than passing arbitrary host paths.
 
 Screenshot brings the selected background page to front, captures to a unique
-private PNG, verifies/decode-checks it with pinned Pillow in an unprivileged child,
-and checks descriptor-bound bytes, MIME, dimensions (2000/side, 4M pixels) and
-SHA. Image-capable Pi requests contain the actual PNG data URL. Text-only models
+private PNG created exclusively by the unprivileged child with mode 0600. The
+host takes one descriptor-bound snapshot (at most 8 MiB) and sends those bytes to
+pinned Pillow in an unprivileged verifier. Dimensions (2000/side, 4M pixels) are
+checked before full decode. Digest, dimensions and byte count bind verification,
+registration and delivery to that snapshot; file changes reject publication or
+readback. Image-capable Pi requests contain the actual PNG data URL. Text-only models
 receive `ref-only; image bytes not sent`. Historical images are pruned; context
 pressure drops pixels with ref recovery. Screenshots never become ARC frames.
 
@@ -137,7 +148,7 @@ launcher leaf hashes and controlled loader roots. It does not start Chrome or
 claim runtime health (`runtime: not_checked`).
 
 `doctor --run-id=g-<id> --json --browser-user=name` selects that contained general
-manifest and invokes only harness `doctor --json --require-existing-daemon`.
+`host/manifest.json` and invokes only harness `doctor --json --require-existing-daemon`.
 It requires schema 1, harness 0.1.13, exact selected name, strict=true,
 `chrome_running=null`, healthy = daemon alive AND browser ready, with matching
 exit status. Wrong version/schema or non-strict reports fail. A closed/dead
@@ -189,6 +200,14 @@ repair or sandbox-disabling flags are supported.
 Tests auto-run the real stack when the private venv and selected Chrome are
 present; only absence permits skip. Root tests use nobody. Offline fresh-install
 controls consume the preprepared `.browser-wheels` cache and never download.
+A test-owned installed `.pth` hook instruments HTTP/socket, detached subprocess
+and telemetry submissions before official imports. It permits only the owned
+HTTP fixture, Chrome loopback endpoint and private IPC; negative probes prove
+that blocked submissions exit before sending. Ambient provider/ARC/Cloud/proxy
+markers are exercised through real children. This covers the exercised Python
+paths, not native Chrome networking or arbitrary hostile Python. The ARC
+baseline/candidate Pi differential also initializes under contaminated browser
+settings; effective requests remain identical.
 
 ```bash
 node --test --test-concurrency=1 test/general-browser-entry.test.mjs \
@@ -210,11 +229,11 @@ the recorded absolute installation/run paths, then remove only that private
 `.venv`, system Chrome, cached Playwright and unrelated runs. Uninstall is an
 explicit operator action; run/doctor never deletes an installation.
 
-Final implementation validation at `ad7375c`: the requested single full run had
+Previous implementation validation at `ad7375c`: the requested single full run had
 860 tests, 845 pass, 15 fail, zero skips in 617.486 s. All 29 new tests passed.
 Existing failures remain unclassified: isolated owned-run 11/13 (30.395 s),
 owned-workspace 3/5 (41.697 s), public-runner 0/1 (99.495 s); isolated native
 container-owner passed 8/8 (26.637 s). Existing deadlines/concurrency were not
 changed, and the full suite was not rerun. Secret scan passed; offline demo won
-25/25 synthetic games (those two commands were not separately timed). The PR
-is draft because the full gate remains red; this is not a #383 resolution.
+25/25 synthetic games (those two commands were not separately timed). That implementation gate was red and the PR was draft. Review-fix validation is
+reported separately; this is not a #383 resolution.

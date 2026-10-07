@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { once } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import { realRuntime, stackAbsent } from './support/general-browser.mjs';
 import { withLoopback, sendToolCall } from './support/responses-loopback.mjs';
 import { providerEnvironment } from './support/provider.mjs';
@@ -87,11 +88,11 @@ test('alive-disconnected strict doctor; unrelated owned browser survives; invali
   const a = realRuntime(); const b = realRuntime();
   try {
     await a.start(); await b.start();
-    const invalid = path.join(a.root, 'artifacts/invalid.png'); fs.writeFileSync(invalid, 'not PNG');
-    const bad = await a.process('png', { code: JSON.stringify({ path: invalid }) }); assert.equal(bad.status, 1);
+    const invalid = path.join(a.hostRoot, 'artifacts/invalid.png'); fs.writeFileSync(invalid, 'not PNG');
+    const bad = await a.process('png', { code: JSON.stringify({ data: fs.readFileSync(invalid).toString('base64') }) }); assert.equal(bad.status, 1);
     const malformed = await a.process('png', { code: 'invalid json' }); assert.equal(malformed.status, 1);
     const oversized = await a.exec(`from PIL import Image\nImage.new("RGB", (2001, 1)).save(${JSON.stringify(path.join(a.root,'artifacts/wide.png'))})`); assert.equal(oversized.details.ok, true);
-    const dimensions = await a.process('png', { code: JSON.stringify({ path: path.join(a.root,'artifacts/wide.png') }) }); assert.equal(dimensions.status, 1); assert.match(dimensions.stderr, /dimensions/);
+    const dimensions = await a.process('png', { code: JSON.stringify({ data: fs.readFileSync(path.join(a.root,'artifacts/wide.png')).toString('base64') }) }); assert.equal(dimensions.status, 1); assert.match(dimensions.stderr, /dimensions/);
     a.chromeChild.controller.abort(); await a.chromeChild.promise;
     const report = await a.doctor(); assert.equal(report.daemon.alive, true); assert.equal(report.daemon.browser_ready, false); assert.equal(report.healthy, false);
     const count = a.artifacts.size; await assert.rejects(a.exec('print("do not replay")'), /no fallback/); assert.equal(a.artifacts.size, count);
@@ -137,5 +138,57 @@ test('production CLI owned run uses official stack and loopback Pi provider', { 
     assert.equal(result.status,0,result.stderr); const report=JSON.parse(result.stdout); assert.equal(report.finished,true); assert.equal(report.toolCalls,1); assert.equal(bodies.length,2);
     assert.doesNotMatch(result.stdout,/Local fixture|fixture observed|DevTools|ws:\/\//);
     assert.match(result.stderr,/Privilege separation is not a sandbox/);
+    const root = path.resolve('runs/private/general', report.runId);
+    assert.equal(fs.statSync(root).uid, process.geteuid());
+    assert.equal(fs.statSync(path.join(root, 'host/manifest.json')).uid, process.geteuid());
+    const doctor = await generalEntry(['doctor', `--run-id=${report.runId}`, '--json', '--browser-user=nobody']);
+    assert.equal(doctor.report.healthy, false); // Closed run; authoritative manifest remains readable.
+    const stat = fs.lstatSync;
+    fs.lstatSync = (file, ...args) => file === root ? { ...stat(file, ...args), uid: process.geteuid() + 1, isDirectory: () => true } : stat(file, ...args);
+    try { await assert.rejects(generalEntry(['doctor', `--run-id=${report.runId}`, '--browser-user=nobody']), /host-owned evidence/); }
+    finally { fs.lstatSync = stat; }
   }));
+});
+
+test('PNG verification, registration and delivery share a snapshot; byte swaps reject publication', { skip: stackAbsent }, async () => {
+  const r = realRuntime({ imageCapable: true, B: 4096 });
+  const originalChown = fs.chownSync;
+  const originalOpen = fs.openSync;
+  const originalRegister = r.register.bind(r);
+  try {
+    await r.start();
+    fs.chownSync = () => { throw new Error('no root pathname chown after handover'); };
+    fs.openSync = (file, flags, ...args) => {
+      if (String(file).startsWith(`${r.root}/artifacts/`)) {
+        assert.equal(typeof flags === 'number' && Boolean(flags & (fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_RDWR)), false, 'host only reads browser-writable files');
+      }
+      return originalOpen(file, flags, ...args);
+    };
+    const image = await r.screenshot();
+    const meta = JSON.parse(image.text);
+    const entry = r.artifacts.get(meta.ref);
+    assert.equal(fs.statSync(entry.file).mode & 0o777, 0o600);
+    assert.equal(meta.ok, true); assert.equal(meta.captureComplete, true); assert.equal(meta.refs.length, 3);
+    assert.ok(image.text.length <= 4096);
+    assert.equal(meta.width, entry.width); assert.equal(meta.height, entry.height);
+    assert.deepEqual(Buffer.from(image.content[0].data, 'base64'), entry.snapshot);
+    assert.deepEqual(entry.snapshot, fs.readFileSync(entry.file));
+    assert.equal(r.read({ ref: meta.ref, view: 'image' }).content[0].data, image.content[0].data);
+    fs.openSync = originalOpen;
+    r.register = (file, mimeType, ...args) => {
+      if (mimeType === 'image/png') {
+        // Change only a test-owned PNG under the browser uid, retaining signature/dimensions.
+        execFileSync('/usr/bin/python3.12', ['-I', '-c', 'import sys; from pathlib import Path; p=Path(sys.argv[1]); b=bytearray(p.read_bytes()); b[29]^=1; p.write_bytes(b)', file], { ...r.identity, env: r.env });
+      }
+      return originalRegister(file, mimeType, ...args);
+    };
+    const rejected = await r.screenshot();
+    assert.equal(rejected.details.ok, false); assert.match(rejected.details.error, /changed between verification and registration/);
+    const failure = JSON.parse(rejected.text);
+    assert.ok(rejected.text.length <= 4096); assert.equal(failure.exitCode, 0); assert.equal(failure.captureComplete, true);
+    assert.equal(failure.refs.length, 2); assert.equal(failure.nextRequest.length, 2); assert.equal(rejected.content, undefined);
+    assert.equal([...r.artifacts.values()].filter((e) => e.mimeType === 'image/png').length, 1);
+    execFileSync('/usr/bin/python3.12', ['-I', '-c', 'import sys; open(sys.argv[1], "ab").write(b"synthetic change")', entry.file], { ...r.identity, env: r.env });
+    assert.throws(() => r.read({ ref: meta.ref, view: 'image' }), /stale/);
+  } finally { fs.chownSync = originalChown; fs.openSync = originalOpen; await r.close(); }
 });

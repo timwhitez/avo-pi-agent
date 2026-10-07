@@ -33,6 +33,12 @@ unexpected dotenv/helpers without reading values. These controls prevent automat
 ambient routing; authorized Python can deliberately read files/change its own
 environment. Web data never expands task authority.
 
+Root hosts retain the run parent and a private `host/` sibling for metadata and
+output captures. Browser directories transfer through held descriptors, leaves
+before parents; later screenshot creation runs only under the browser account.
+PNG verification, registration and delivery bind to one bounded byte snapshot
+and reject file changes.
+
 General task code, stdout/stderr, PNGs, cookies, endpoints and artifacts stay in
 private local run/temp directories and must not be published. The entry prints
 structural counts only, not whole Pi events, task summaries or raw payloads.

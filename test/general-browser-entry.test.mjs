@@ -66,7 +66,7 @@ for (const bound of ['96000','1800']) test(`general image pruning and ref readba
     process.env.OPENAI_BASE_URL=url;process.env.OPENAI_MODEL='synthetic-png-model';
     const result=await generalEntry(['run','--profile=general-browser-v1',`--task-file=${task}`,'--browser-user=nobody'],{runtimeFactory:(options)=>{
       runtime=fixtureRuntime(options);
-      runtime.screenshot=async()=>{const file=path.join(runtime.root,'artifacts',`synthetic-${runtime.artifacts.size}.png`);fs.writeFileSync(file,png,{mode:0o600});const ref=runtime.register(file,'image/png');firstRef??=ref;return runtime.read({ref,view:'image'});};return runtime;
+      runtime.screenshot=async()=>{const file=path.join(runtime.hostRoot,'artifacts',`synthetic-${runtime.artifacts.size}.png`);fs.writeFileSync(file,png,{mode:0o600});const ref=runtime.register(file,'image/png');firstRef??=ref;return runtime.read({ref,view:'image'});};return runtime;
     }});
     assert.equal(result.finished,true,result.error);assert.equal(bodies.length,4);
     for(const body of bodies.slice(1))assert.ok(imageBlocks(body).length<=1);

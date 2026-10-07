@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Pinned installed entry; all checks precede any browser package import."""
+import base64
 import hashlib
+from io import BytesIO
 import importlib.metadata as metadata
 import json
 import os
 from pathlib import Path
 import platform
 import runpy
-import stat
 import sys
 import sysconfig
 
@@ -57,18 +58,21 @@ def main():
         print(json.dumps(inventory)); return
     if mode == 'png':
         # JSON stdin is host-generated; never exposed as a model launcher mode.
-        p = Path(json.load(sys.stdin)['path'])
-        st = p.lstat()
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 8 * 1024 * 1024:
-            raise RuntimeError('PNG must be a bounded unlinked regular file')
+        encoded = json.load(sys.stdin)['data']
+        if len(encoded) > 4 * ((8 * 1024 * 1024 + 2) // 3):
+            raise RuntimeError('PNG snapshot exceeds byte limit')
+        data = base64.b64decode(encoded, validate=True)
+        if not data or len(data) > 8 * 1024 * 1024:
+            raise RuntimeError('PNG snapshot must be bounded and nonempty')
         from PIL import Image
-        with Image.open(p) as im:
+        with Image.open(BytesIO(data)) as im:
             if im.format != 'PNG': raise RuntimeError('PNG format mismatch')
-            im.verify()
-        with Image.open(p) as im:
-            im.load(); w, h = im.size
+            w, h = im.size
             if not (0 < w <= 2000 and 0 < h <= 2000 and w*h <= 4000000): raise RuntimeError('PNG dimensions exceed limit')
-        print(json.dumps({'path': str(p), 'width': w, 'height': h, 'mimeType': 'image/png'})); return
+            im.verify()
+        with Image.open(BytesIO(data)) as im:
+            im.load()
+        print(json.dumps({'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data), 'width': w, 'height': h, 'mimeType': 'image/png'})); return
     if mode == 'daemon':
         sys.argv = ['browser-harness-daemon']
         runpy.run_module('browser_harness.daemon', run_name='__main__'); return

@@ -46,8 +46,13 @@ test('arc_mock_pi_frame_finish_action_contract baseline versus candidate actual 
   for (const candidate of [false, true]) await withLoopback(scripted(turns), async ({ url, bodies }) => {
     const root = fs.mkdtempSync(path.resolve('.bt/arc-diff-'));
     const env = environment({ gameId: 'visibility-v1', step: () => ({ game_id: 'visibility-v1', frame: [[1,0],[0,0]], state: 'WIN', levels_completed: 3, win_levels: 3, guid: 'guid-1', available_actions: ['ACTION1'] }) });
-    if (candidate) await runAgent({ url, root, env });
-    else {
+    if (candidate) {
+      const markers = { AVO_GENERAL_BROWSER_USER: 'does-not-exist', AVO_GENERAL_BROWSER_VENV: '/missing-browser-stack', BU_CDP_WS: 'unusable', BROWSER_USE_API_KEY: 'synthetic', BH_HOME: '/unusable' };
+      const saved = Object.fromEntries(Object.keys(markers).map((key) => [key, process.env[key]]));
+      Object.assign(process.env, markers);
+      try { await runAgent({ url, root, env }); }
+      finally { for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
+    } else {
       const loop = await baselinePi.createPiSdkLoop({ provider: { baseUrl: url, apiKey: process.env.OPENAI_API_KEY, model: 'offline-production-model', reasoningEffort: 'max', capabilities: providerCapabilities() }, workspaceMode: 'disabled', policyProfile: 'minimal-v1', maxOuterTurns: 40, toolResultMaxChars: 24000 });
       const agent = new baselineAgent.AvoArcAgent({ gameId: 'visibility-v1', environment: env, loop, config: { maxActions:100, stallWindow:8, memoryDir:path.join(root,'memory'), workspaceMode:'disabled', policyProfile:'minimal-v1', toolResultMaxChars:24000 }, captureScorecard:false });
       await agent.initialize(); await agent.run();

@@ -8,7 +8,7 @@ import { runProcess } from '../benchmark/process-runner.mjs';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { readRegularFileEvidence, matchesRegularFileIdentity } from '../local/regular-file-evidence.mjs';
 import { buildBrowserChildEnvironment } from '../local/child-environment.mjs';
-import { readDetailEnvelope } from '../core/bounded-read.mjs';
+import { fitsBound, readDetailEnvelope } from '../core/bounded-read.mjs';
 
 export const CHECKOUT = fileURLToPath(new URL('../../', import.meta.url));
 export const LAUNCHER = path.join(CHECKOUT, 'scripts/browser-launch.py');
@@ -30,15 +30,23 @@ export function resolveBrowserIdentity(name = process.env.AVO_GENERAL_BROWSER_US
 }
 
 export function createPrivateRun(runId, identity, base = path.join(CHECKOUT, 'runs/private/general')) {
-  // Traversable parent containers, private uid-owned run itself. No existing permissions change.
+  // Keep the run parent and host evidence under host authority. Browser-owned
+  // siblings cannot replace them, even when another process uses the browser uid.
   ensureAuthorityDirectory(base, { root: CHECKOUT, mode: 0o711 });
   const root = path.join(base, runId);
   fs.mkdirSync(root, { mode: 0o700 });
-  for (const dir of dirs) ensureAuthorityDirectory(path.join(root, dir), { root });
-  for (const dir of ['', ...dirs]) {
-    fs.chmodSync(path.join(root, dir), 0o700);
-    if (process.geteuid() === 0) fs.chownSync(path.join(root, dir), identity.uid, identity.gid);
-  }
+  for (const dir of [...dirs, 'host', 'host/artifacts']) ensureAuthorityDirectory(path.join(root, dir), { root });
+  const descriptors = [];
+  try {
+    for (const dir of ['', ...dirs]) descriptors.push(fs.openSync(path.join(root, dir), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW));
+    // All descriptors are acquired while the entire tree is still host-only.
+    // Hand over leaves first; the host-owned parent becomes traversable last.
+    for (const fd of descriptors.slice(1).reverse()) {
+      fs.fchmodSync(fd, 0o700);
+      if (process.geteuid() === 0) fs.fchownSync(fd, identity.uid, identity.gid);
+    }
+    fs.fchmodSync(descriptors[0], 0o711);
+  } finally { for (const fd of descriptors) fs.closeSync(fd); }
   return root;
 }
 
@@ -60,16 +68,21 @@ export function parseStrictDoctor(result, name) {
 
 export class BrowserRuntime {
   constructor({ root, identity, venv = DEFAULT_VENV, chrome = '/usr/bin/google-chrome', runId, timeoutMs = 600000, toolTimeoutMs = 60000, B = 24000, signal, imageCapable = false, transport = null }) {
+    if (!Number.isSafeInteger(B) || B < 4096) throw new Error('general tools require toolResultMaxChars >= 4096');
     Object.assign(this, { root, identity, venv: path.resolve(venv), chrome, runId, toolTimeoutMs, B, signal, imageCapable, transport });
     this.lifecycle = new AbortController();
     this.signal = signal ? AbortSignal.any([signal, this.lifecycle.signal]) : this.lifecycle.signal;
+    this.hostRoot = path.join(root, 'host');
     this.browserRoot = path.join(root, 'browser'); this.artifacts = new Map(); this.queue = Promise.resolve(); this.children = []; this.stored = 0; this.closed = false;
     this.deadline = Date.now() + timeoutMs;
     this.name = `g-${crypto.randomBytes(5).toString('hex')}`;
     const shortBase = ensureAuthorityDirectory(path.join(CHECKOUT, '.bt'), { root: CHECKOUT, mode: 0o711 });
     this.tmpRoot = fs.mkdtempSync(path.join(shortBase, 'g-'));
-    fs.chmodSync(this.tmpRoot, 0o700);
-    if (process.geteuid() === 0) fs.chownSync(this.tmpRoot, identity.uid, identity.gid);
+    const tmpFd = fs.openSync(this.tmpRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      fs.fchmodSync(tmpFd, 0o700);
+      if (process.geteuid() === 0) fs.fchownSync(tmpFd, identity.uid, identity.gid);
+    } finally { fs.closeSync(tmpFd); }
     if (Buffer.byteLength(this.tmpRoot) + 50 >= 104) throw new Error('Chrome temporary socket path requires a shorter checkout path');
     if (Buffer.byteLength(path.join(this.browserRoot, 'runtime', 'bu.sock')) >= 104) throw new Error('private browser Unix socket path exceeds Linux limit; use a shorter checkout path');
     this.env = buildBrowserChildEnvironment({ venv: this.venv, browserRoot: this.browserRoot, name: this.name, tmpRoot: this.tmpRoot });
@@ -97,9 +110,9 @@ export class BrowserRuntime {
   background(command, args, label) {
     const controller = new AbortController();
     const record = { controller, child: null, done: false };
-    const log = path.join(this.root, 'artifacts', `${label}.log`);
+    const log = path.join(this.hostRoot, 'artifacts', `${label}.log`);
     record.promise = runProcess(command, args, { cwd: path.join(this.browserRoot, 'cwd'), env: this.env, ...this.identity,
-      stdoutFile: log, stderrFile: `${log}.err`, logRoot: this.root, outputEncoding: null, returnFailures: true,
+      stdoutFile: log, stderrFile: `${log}.err`, logRoot: this.hostRoot, outputEncoding: null, returnFailures: true,
       maxStdoutBytes: 1024 * 1024, maxStderrBytes: 1024 * 1024, timeoutMs: Math.max(1, this.deadline - Date.now()),
       cancellation: { executionId: crypto.randomUUID(), signal: this.signal ? AbortSignal.any([controller.signal, this.signal]) : controller.signal, policies: [{ kind: 'operator-cancel' }], drainTimeoutMs: 2000 },
       onSpawn: (child) => { record.child = child; },
@@ -155,21 +168,37 @@ export class BrowserRuntime {
   async execNow(code, signal) {
     if (this.stored + 20 * 1024 * 1024 > CAPTURE_LIMIT) throw new Error('general artifact capture budget exhausted before dispatch');
     const call = crypto.randomBytes(6).toString('hex');
-    const files = ['stdout', 'stderr'].map((s) => path.join(this.root, 'artifacts', `${call}-${s}`));
-    const options = { code, signal: signal && this.signal ? AbortSignal.any([signal, this.signal]) : signal || this.signal, stdoutFile: files[0], stderrFile: files[1], logRoot: this.root };
+    const files = ['stdout', 'stderr'].map((s) => path.join(this.hostRoot, 'artifacts', `${call}-${s}`));
+    const refs = files.map(() => `artifact-${this.runId}-${crypto.randomBytes(6).toString('hex')}`);
+    const nextRequest = refs.map((ref) => ({ tool: 'artifact_read', arguments: { ref } }));
+    // Reserve the worst serialized fixed facts before any effectful dispatch.
+    const fixed = { ok: false, started: true, meaning: 'process-and-capture-completion-only', businessSuccess: 'unspecified', decoding: 'UTF-8 replacement in previews; saved byte hashes cover original bytes', effects: 'submitted', exitCode: Number.MAX_SAFE_INTEGER, signal: 'S'.repeat(32), timedOut: false, error: '\0'.repeat(256), processOutcome: 'completed', cancelled: false, cancellationReason: '\0'.repeat(80), captureComplete: false, drainTimedOut: false, observedBytes: { stdout: Number.MAX_SAFE_INTEGER, stderr: Number.MAX_SAFE_INTEGER }, refs, nextRequest, stdoutHead: '', stdout: '', stderr: '' };
+    if (!fitsBound(fixed, this.B)) throw new Error('tool result bound cannot express process facts and refs before dispatch');
+    const options = { code, signal: signal && this.signal ? AbortSignal.any([signal, this.signal]) : signal || this.signal, stdoutFile: files[0], stderrFile: files[1], logRoot: this.hostRoot };
     const r = this.transport ? await this.transport(code, options, this) : await this.process('exec', options);
-    const refs = files.map((file) => this.register(file, 'text/plain', r.captureComplete === true));
-    const details = { ok: r.status === 0 && r.captureComplete === true, started: true, meaning: 'process-and-capture-completion-only', businessSuccess: 'unspecified', decoding: 'UTF-8 replacement in previews; saved byte hashes cover original bytes', effects: r.status === 0 && !r.timedOut ? 'submitted' : 'unknown', exitCode: r.status, signal: r.signal, timedOut: r.timedOut, error: r.error, terminal: r.terminal, captureComplete: r.captureComplete, drainTimedOut: r.drainTimedOut, observedBytes: { stdout: r.stdoutBytes, stderr: r.stderrBytes }, refs, stdout: r.stdout, stderr: r.stderr };
-    const envelope = { ...details, terminal: undefined, stdoutHead: evidence(this.root, files[0]).buffer.subarray(0, 1000).toString('utf8'), stdout: r.stdout.slice(-1000), stderr: r.stderr.slice(-1000), nextRequest: refs.map((ref) => ({ tool: 'artifact_read', arguments: { ref } })) };
-    const text = JSON.stringify(envelope);
-    if (text.length > this.B) throw new Error('tool envelope exceeds configured bound');
-    return { text, details };
+    files.forEach((file, index) => this.register(file, 'text/plain', r.captureComplete === true, null, refs[index]));
+    const receipt = r.terminal?.receipt;
+    const cancelled = Boolean(receipt?.cancellation) || receipt?.processOutcome === 'censored';
+    const completed = receipt?.processOutcome === 'completed' && !cancelled && !r.timedOut && r.status === 0;
+    const details = { ok: completed && r.captureComplete === true, started: true, meaning: fixed.meaning, businessSuccess: fixed.businessSuccess, decoding: fixed.decoding, effects: completed ? 'submitted' : 'unknown', exitCode: r.status, signal: r.signal, timedOut: r.timedOut, error: r.error, terminal: r.terminal, processOutcome: receipt?.processOutcome || 'unknown', cancelled, cancellationReason: String(receipt?.cancellation?.primaryReason || '').slice(0, 80), captureComplete: r.captureComplete, drainTimedOut: r.drainTimedOut, observedBytes: { stdout: r.stdoutBytes, stderr: r.stderrBytes }, refs, stdout: r.stdout, stderr: r.stderr };
+    const head = evidence(this.hostRoot, files[0]).buffer.subarray(0, 1000).toString('utf8');
+    return this.formatResult(details, head);
   }
-  register(file, mimeType, complete = true) {
+  formatResult(details, head = '') {
+    const envelope = { ...details, terminal: undefined, error: details.error?.slice(0, 256) || null, stdoutHead: head, stdout: details.stdout.slice(-1000), stderr: details.stderr.slice(-1000), nextRequest: details.refs.map((ref) => ({ tool: 'artifact_read', arguments: { ref } })) };
+    // JSON escaping, not raw preview length, determines the remaining budget.
+    while (!fitsBound(envelope, this.B)) {
+      envelope.stdoutHead = envelope.stdoutHead.slice(0, Math.floor(envelope.stdoutHead.length / 2));
+      envelope.stdout = envelope.stdout.slice(Math.ceil(envelope.stdout.length / 2));
+      envelope.stderr = envelope.stderr.slice(Math.ceil(envelope.stderr.length / 2));
+    }
+    return { text: JSON.stringify(envelope), details };
+  }
+  register(file, mimeType, complete = true, verified = null, ref = `artifact-${this.runId}-${crypto.randomBytes(6).toString('hex')}`) {
     const e = evidence(this.root, file, mimeType === 'image/png' ? 8 * 1024 * 1024 : CAPTURE_LIMIT);
+    if (verified && (e.sha256 !== verified.sha256 || !matchesRegularFileIdentity(file, verified.identity))) throw new Error('PNG changed between verification and registration');
     if (this.stored + e.bytes > CAPTURE_LIMIT) throw new Error('registered artifact quota exceeded');
-    const ref = `artifact-${this.runId}-${crypto.randomBytes(6).toString('hex')}`;
-    this.artifacts.set(ref, { file, mimeType, complete, bytes: e.bytes, sha256: e.sha256, identity: e.identity });
+    this.artifacts.set(ref, { file, mimeType, complete, bytes: e.bytes, sha256: e.sha256, identity: e.identity, ...(verified ? { snapshot: verified.buffer, width: verified.width, height: verified.height } : {}) });
     this.stored += e.bytes; return ref;
   }
   read({ ref, view = 'text', offset = 0, expectedSha256 }) {
@@ -178,10 +207,10 @@ export class BrowserRuntime {
     if (!matchesRegularFileIdentity(entry.file, entry.identity)) throw new Error('stale artifact identity');
     const e = evidence(this.root, entry.file);
     if (e.sha256 !== entry.sha256) throw new Error('stale artifact hash');
-    const metadata = { ref, mimeType: entry.mimeType, complete: entry.complete, bytes: entry.bytes, rawByteSha256: entry.sha256 };
+    const metadata = { ref, mimeType: entry.mimeType, complete: entry.complete, bytes: entry.bytes, rawByteSha256: entry.sha256, ...(entry.snapshot ? { width: entry.width, height: entry.height } : {}) };
     if (view === 'image') {
       if (entry.mimeType !== 'image/png') throw new Error('artifact is not a validated PNG');
-      return { text: JSON.stringify({ ...metadata, delivery: this.imageCapable ? 'image bytes attached' : 'ref-only; image bytes not sent' }), details: metadata, content: this.imageCapable ? [{ type: 'image', mimeType: 'image/png', data: e.buffer.toString('base64') }] : [] };
+      return { text: JSON.stringify({ ...metadata, delivery: this.imageCapable ? 'image bytes attached' : 'ref-only; image bytes not sent' }), details: metadata, content: this.imageCapable ? [{ type: 'image', mimeType: 'image/png', data: (entry.snapshot || e.buffer).toString('base64') }] : [] };
     }
     const envelope = readDetailEnvelope({ value: view === 'metadata' ? metadata : { ...metadata, decoding: 'UTF-8 replacement for invalid bytes', text: e.buffer.toString('utf8') }, offset, expectedSha256, B: this.B, fields: metadata, nextRequest: (nextOffset, digest) => ({ tool: 'artifact_read', arguments: { ref, view, offset: nextOffset, expectedSha256: digest } }) });
     return { text: JSON.stringify(envelope), details: envelope };
@@ -189,17 +218,20 @@ export class BrowserRuntime {
   async screenshot(full = false, signal) {
     return this.serialize(async () => {
       const file = path.join(this.root, 'artifacts', `${crypto.randomBytes(6).toString('hex')}.png`);
-      const fd = fs.openSync(file, 'wx', 0o600); fs.closeSync(fd);
-      if (process.geteuid() === 0) fs.chownSync(file, this.identity.uid, this.identity.gid);
-      const r = await this.execNow(`import json\nassert cdp("Page.bringToFront") == {}\np = capture_screenshot(${JSON.stringify(file)}, full=${full ? 'True' : 'False'}, max_dim=1800)\nprint(json.dumps({"path": p}))`, signal);
-      if (!r.details.ok || JSON.parse(r.details.stdout).path !== file) throw new Error('screenshot controlled JSON failed');
-      const verification = await this.process('png', { code: JSON.stringify({ path: file }), signal });
-      if (verification.status !== 0 || !verification.captureComplete) throw new Error(`PNG verification failed: ${verification.stderr}`);
-      const facts = JSON.parse(verification.stdout);
-      const bytes = evidence(this.root, file, 8 * 1024 * 1024).buffer;
-      if (facts.path !== file || facts.mimeType !== 'image/png' || !bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) || bytes.readUInt32BE(16) !== facts.width || bytes.readUInt32BE(20) !== facts.height) throw new Error('PNG facts mismatch');
-      const ref = this.register(file, 'image/png');
-      return this.read({ ref, view: 'image' });
+      const r = await this.execNow(`import json,os\nwith open(${JSON.stringify(file)}, "xb") as reserved: os.fchmod(reserved.fileno(), 0o600)\nassert cdp("Page.bringToFront") == {}\np = capture_screenshot(${JSON.stringify(file)}, full=${full ? 'True' : 'False'}, max_dim=1800)\nprint(json.dumps({"path": p}))`, signal);
+      if (!r.details.ok) return r;
+      try {
+        if (JSON.parse(r.details.stdout).path !== file) throw new Error('screenshot controlled JSON failed');
+        const snapshot = evidence(this.root, file, 8 * 1024 * 1024);
+        const verification = await this.process('png', { code: JSON.stringify({ data: snapshot.buffer.toString('base64') }), signal });
+        if (verification.status !== 0 || !verification.captureComplete) throw new Error(`PNG verification failed: ${verification.stderr}`);
+        const facts = JSON.parse(verification.stdout);
+        const bytes = snapshot.buffer;
+        if (facts.sha256 !== snapshot.sha256 || facts.bytes !== snapshot.bytes || bytes.length < 24 || facts.mimeType !== 'image/png' || !bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) || bytes.readUInt32BE(16) !== facts.width || bytes.readUInt32BE(20) !== facts.height) throw new Error('PNG facts mismatch');
+        const ref = this.register(file, 'image/png', true, { ...snapshot, width: facts.width, height: facts.height });
+        const image = this.read({ ref, view: 'image' });
+        return { ...this.formatResult({ ...r.details, ...image.details, refs: [...r.details.refs, ref], delivery: JSON.parse(image.text).delivery }), content: image.content };
+      } catch (error) { return this.formatResult({ ...r.details, ok: false, error: `screenshot validation failed: ${error.message}` }); }
     }, signal);
   }
   async close() {

@@ -45,7 +45,11 @@ export async function generalEntry(args, { runtimeFactory = (options) => new Bro
   const identity = resolveBrowserIdentity(options.browserUser);
   if (options.command === 'doctor' && options.runId) {
     const root = path.join(CHECKOUT, 'runs/private/general', options.runId);
-    const manifest = readJsonFileEvidence(path.join(root, 'manifest.json'), { root }).value;
+    for (const directory of [root, path.join(root, 'host')]) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.uid !== process.geteuid() || (stat.mode & 0o022)) throw new Error('general doctor requires host-owned evidence directories');
+    }
+    const manifest = readJsonFileEvidence(path.join(root, 'host', 'manifest.json'), { root }).value;
     if (manifest.runKind !== 'general-browser' || manifest.runId !== options.runId || manifest.identity.uid !== identity.uid || manifest.identity.gid !== identity.gid) throw new Error('general doctor manifest identity mismatch');
     const runtime = runtimeFactory({ ...options, root, identity, runId: options.runId, venv: manifest.venv, chrome: manifest.chrome });
     runtime.name = manifest.browserName;
@@ -93,7 +97,7 @@ async function executeEntry(options, identity, runtimeFactory, onEvent) {
     const provider = getProviderConfig();
     runtime.imageCapable = provider.capabilities.inputModalities.includes('image');
     const config = { provider, runKind: 'general-browser', policyProfile: GENERAL_PROFILE, workspaceMode: 'disabled', maxOuterTurns: options.maxTurns, maxTools: options.maxTools, toolResultMaxChars: runtime.B };
-    writeJsonAtomic(path.join(root, 'manifest.json'), { schema: 'avo.general-run.v1', runKind: 'general-browser', runId, profile: GENERAL_PROFILE,
+    writeJsonAtomic(path.join(root, 'host', 'manifest.json'), { schema: 'avo.general-run.v1', runKind: 'general-browser', runId, profile: GENERAL_PROFILE,
       sourceRevision: execFileSync('/usr/bin/git', ['rev-parse', 'HEAD'], { cwd: CHECKOUT, env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' }).trim(),
       venv: runtime.venv, chrome: options.chrome, identity, browserName: runtime.name, authority: HOST_AUTHORITY,
       provider: { model: provider.model, reasoningEffort: provider.reasoningEffort, capabilities: provider.capabilities },
@@ -103,7 +107,7 @@ async function executeEntry(options, identity, runtimeFactory, onEvent) {
     process.on('SIGINT', cancel); process.on('SIGTERM', cancel);
     timer = setTimeout(cancel, options.timeoutMs); timer.unref();
     await runtime.start();
-    writeJsonAtomic(path.join(root, 'stack-receipt.json'), runtime.receipt || { kind: 'synthetic fixture' }, { root });
+    writeJsonAtomic(path.join(root, 'host', 'stack-receipt.json'), runtime.receipt || { kind: 'synthetic fixture' }, { root });
     result = await runGeneralAgent({ task: text, runtime, config, signal: controller.signal, onEvent });
     return result;
   } catch (error) {
@@ -114,7 +118,7 @@ async function executeEntry(options, identity, runtimeFactory, onEvent) {
     process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel);
     try { cleanup = await runtime.close(); }
     catch (e) { e.cleanupUnknown = true; throw e; }
-    if (options.command === 'run') writeJsonAtomic(path.join(root, 'result.json'), { ...result, cleanup, authority: HOST_AUTHORITY }, { root });
+    if (options.command === 'run') writeJsonAtomic(path.join(root, 'host', 'result.json'), { ...result, cleanup, authority: HOST_AUTHORITY }, { root });
   }
 }
 
