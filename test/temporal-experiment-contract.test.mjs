@@ -124,6 +124,13 @@ function mechanism() {
     providerHttpRequests: 3, providerRetries: 0, providerErrors: 0, toolCalls: 3, toolFailures: 0, contextCompactions: 0, toolResultTruncations: 0, evidenceRetrievals: 1,
     observeCalls: 0, trajectoryReadCalls: 0, actCalls: 1, actionSequenceCalls: 0, resetCalls: 0, finishCalls: 1, memoryCalls: 0, journalCalls: 0, supervisorInterventions: 0, workspaceCalls: 0, workspaceFailures: 0, actionBudgetExhaustions: 0, outerTurnBudgetExhaustions: 0 };
 }
+function temporalSummary(runId, versionedGameId, mode = 'capture-read') {
+  return { schema: 'avo.sdk-temporal-summary.v1', mode, admission: 'allow-partial', contractSha256: temporalContractSha256(resolveTemporalEvidenceContract(mode)),
+    unit: { runId, versionedGameId, gameId: versionedGameId.split('-')[0] }, captureActions: 0, returnedFrames: 0, returnedUnknownActions: 0,
+    savedFrames: 0, completeActions: 0, coverageOmittedActions: 0, coverage: [],
+    resources: { captureActions: 0, frames: 0, sourceBytes: 0, archiveBytes: 99, events: 1, readCalls: 1, readChars: 100 },
+    archiveAvailability: 'available', deliveryAuthority: 'avo.tool-receipt.v1', requestAuthority: 'avo.context-receipt.v1' };
+}
 function reportEntry(plan, phase, arm) {
   const runId = `synthetic-${phase}-${arm}`;
   const privateCapsuleEvidence = capsule(plan, phase, arm, runId);
@@ -132,22 +139,28 @@ function reportEntry(plan, phase, arm) {
   const scorecard = scorecardCoverageFixture({ versionedGameIds: ids, sessionId: runId });
   const games = scorecard.games.map((g) => normalizeGameRecord({ ...g, state: 'GAME_OVER', levelsCompleted: 0, totalLevels: 1, actions: 1, outerTurns: 3, gameplayActions: 1, resets: 0,
     rejectedCommands: 0, terminalRejectedCommands: 0, postTerminalGameplayActions: 0, fullResets: 0, actionSequences: 0, sequenceActionsRequested: 0, sequenceActionsExecuted: 0, sequenceActionsSkipped: 0, sequenceCancellations: 0,
-    memoryClaimsProposed: 0, memoryClaimsConfirmed: 0, memoryClaimsCorrected: 0, memoryClaimsSurfaced: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk', trajectoryEvidence: trajectoryEvidenceFixture(), mechanismMetrics: mechanism(), ...plan.manifests[phase].gameBudgets.find((b) => b.versionedGameId === g.versionedGameId) }));
+    memoryClaimsProposed: 0, memoryClaimsConfirmed: 0, memoryClaimsCorrected: 0, memoryClaimsSurfaced: 0, episodeId: 'episode-000001', won: false, loop: 'pi-sdk', trajectoryEvidence: trajectoryEvidenceFixture(), mechanismMetrics: mechanism(),
+    ...(plan.change.arms[arm].mode === 'off' ? {} : { temporalEvidence: temporalSummary(runId, g.versionedGameId, plan.change.arms[arm].mode) }),
+    ...plan.manifests[phase].gameBudgets.find((b) => b.versionedGameId === g.versionedGameId) }));
   const provenance = runCapsuleProvenanceFixture({ runId, versionedGameIds: ids });
   provenance.gitSha = fixture.commit; provenance.piStreamPreflight.productionToolSchemaSha256 = plan.arms[arm].providerToolSchemaSha256; provenance.modelCapabilities.providerToolSchemaSha256 = plan.arms[arm].providerToolSchemaSha256; provenance.runCapsule = publicCapsule;
   return { phase, arm, replicate: 1, privateCapsuleEvidence, report: { schemaVersion: 2, runId, status: 'complete', completedAt: '2026-10-04T05:00:00.000Z', provenance, loopAttestation: { complete: true, loop: 'pi-sdk' },
     completeness: { complete: true, expectedCount: ids.length, actualCount: ids.length, gameIds: ids.map((id) => id.split('-')[0]), versionedGameIds: ids },
     ...scorecard, aggregates: aggregateGameMetrics(games), games, experiment: publicCapsule.experiment } };
 }
-function incompleteEntry(t, plan) {
+function incompleteEntry(t, plan, mutate = () => {}) {
   const runId = 'synthetic-incomplete';
   const evidence = capsule(plan, 'evaluation', 'intervention', runId);
   const published = projectPublicRunCapsule(evidence.value, { runClass: 'cold-start', comparable: true, capsuleEvidenceSha256: evidence.sha256 });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-temporal-audit-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'source/trajectory'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'source/report.json'), JSON.stringify({ schemaVersion: 2, runId, status: 'incomplete', provenance: { runCapsule: published }, experiment: published.experiment,
-    completeness: { complete: false, expectedCount: 3, actualCount: 3, gameIds: ['g02', 'g04', 'g06'], versionedGameIds: ['g02-v1', 'g04-v1', 'g06-v1'] }, games: ['g02-v1', 'g04-v1', 'g06-v1'].map((versionedGameId) => ({ gameId: versionedGameId, versionedGameId, state: 'RUNNING', levelsCompleted: 0, totalLevels: 1, actions: 4 })) }));
+  const report = { schemaVersion: 2, runId, status: 'incomplete', provenance: { runCapsule: published }, experiment: published.experiment,
+    completeness: { complete: false, expectedCount: 3, actualCount: 3, gameIds: ['g02', 'g04', 'g06'], versionedGameIds: ['g02-v1', 'g04-v1', 'g06-v1'] },
+    games: ['g02-v1', 'g04-v1', 'g06-v1'].map((versionedGameId, index) => ({ gameId: versionedGameId, versionedGameId, state: 'RUNNING', levelsCompleted: 0, totalLevels: 1, actions: 4,
+      ...(index === 2 ? {} : { temporalEvidence: { ...temporalSummary(runId, versionedGameId), ...(index === 1 ? { resources: null, archiveAvailability: 'ARCHIVE_UNREADABLE' } : {}) } }) })) };
+  mutate(report);
+  fs.writeFileSync(path.join(root, 'source/report.json'), JSON.stringify(report));
   fs.writeFileSync(path.join(root, 'source/trajectory/events.jsonl'), '\n');
   fs.writeFileSync(path.join(root, 'source/receipts.json'), JSON.stringify({ schema: AUDIT_RECEIPTS_SCHEMA, toolReceipts: [], contextReceipts: [], executionTerminals: [buildExecutionTerminal({
     executionId: 'synthetic-execution', scope: { runId }, policies: [{ kind: 'job-deadline', thresholdMs: 43200000, activitySource: 'none', clockDomain: 'monotonic', configuredSource: 'timeoutMs' }],
@@ -172,12 +185,51 @@ test('T20 completed incomplete and missing units reuse result/audit authorities 
   assert.ok(result.unitStatuses.censored + result.unitStatuses.unknown > 0);
   assert.equal(result.observedCost.baseline.observedSubtotal.totalTokens, 126);
   assert.equal(result.observedCost.intervention.observedSubtotal, null);
+  assert.deepEqual(result.temporalEvidence.intervention.observedSubtotal, temporalSummary('synthetic-incomplete', 'g02-v1').resources);
+  assert.equal(result.temporalEvidence.intervention.coverage.unknownResourceUnits, 5);
+  const evaluation = result.units.filter((unit) => unit.phase === 'evaluation');
+  assert.equal(evaluation[0].arms.intervention.temporalEvidence.unit.runId, 'synthetic-incomplete');
+  assert.equal(evaluation[1].arms.intervention.temporalEvidence.resources, null);
+  assert.equal(evaluation[2].arms.intervention.temporalCoverage.status, 'unknown');
   assert.equal(result.conclusion, 'undetermined');
   assert.throws(() => validateExperimentResults(plan, [completed, completed]), /duplicates/);
   const tampered = structuredClone(completed); tampered.report.runId = 'foreign';
   assert.throws(() => validateExperimentResults(plan, [tampered]), /capsule|run/);
   const changed = structuredClone(completed); changed.report.games[0].mechanismMetrics.totalTokens += 1;
   assert.throws(() => validateExperimentResults(plan, [changed]), /metrics|tokens|aggregates/);
+  const intervention = reportEntry(plan, 'tuning', 'intervention');
+  const paired = validateExperimentResults(plan, [completed, intervention, incomplete]);
+  assert.equal(paired.pairedUnits, 3);
+  assert.deepEqual(paired.units[0].arms.intervention.temporalEvidence, intervention.report.games[0].temporalEvidence);
+  assert.equal(paired.units[0].arms.intervention.costMeteringComplete, true);
+  const resources = structuredClone(intervention);
+  Object.assign(resources.report.games[0].temporalEvidence.resources, { archiveBytes: 12345, readCalls: 7, readChars: 700 });
+  const changedCosts = validateExperimentResults(plan, [completed, resources, incomplete]);
+  assert.notEqual(changedCosts.resultSha256, paired.resultSha256);
+  assert.equal(changedCosts.temporalEvidence.intervention.observedSubtotal.archiveBytes, 12345 + 3 * 99);
+  const missing = structuredClone(intervention); delete missing.report.games[0].temporalEvidence;
+  const unknown = validateExperimentResults(plan, [missing]);
+  assert.equal(unknown.units[0].arms.intervention.temporalCoverage.status, 'unknown');
+  assert.equal(unknown.units[0].arms.intervention.costMeteringComplete, false);
+  const unavailable = structuredClone(intervention); unavailable.report.games[0].temporalEvidence.resources = null;
+  assert.equal(validateExperimentResults(plan, [unavailable]).units[0].arms.intervention.costMeteringComplete, false);
+  for (const mutation of [
+    (s) => { s.unit.runId = 'FOREIGN-RUN'; },
+    (s) => { s.unit.versionedGameId = 'FOREIGN-VERSION'; },
+    (s) => { s.unit.gameId = 'FOREIGN-GAME'; },
+    (s) => { s.mode = 'capture'; s.contractSha256 = temporalContractSha256(resolveTemporalEvidenceContract('capture')); },
+    (s) => { s.resources.archiveBytes = -1; },
+  ]) {
+    const foreign = structuredClone(intervention); mutation(foreign.report.games[0].temporalEvidence);
+    assert.throws(() => validateExperimentResults(plan, [foreign]), /temporal|game|record/);
+    const foreignIncomplete = incompleteEntry(t, plan, (report) => mutation(report.games[0].temporalEvidence));
+    assert.throws(() => validateExperimentResults(plan, [foreignIncomplete]), /temporal|game|record/);
+  }
+  const disabled = structuredClone(completed);
+  disabled.report.games[0].temporalEvidence = temporalSummary(disabled.report.runId, disabled.report.games[0].versionedGameId);
+  assert.throws(() => validateExperimentResults(plan, [disabled]), /temporal/);
+  const changedIncomplete = incompleteEntry(t, plan, (report) => { report.games[0].temporalEvidence.resources.readChars += 1; });
+  assert.notEqual(validateExperimentResults(plan, [completed, changedIncomplete]).resultSha256, result.resultSha256);
   const file = path.join(incomplete.auditRun.exportDir, 'runs/synthetic-incomplete.json');
   const original = fs.readFileSync(file, 'utf8'); fs.writeFileSync(file, original.replace('censored', 'completed'));
   assert.throws(() => validateExperimentResults(plan, [incomplete]), /invalid|differs/);
@@ -192,6 +244,22 @@ test('T20 typed temporal report summary aggregates attempt counters but unit res
   const changed = structuredClone(summary); changed.unit.runId = 'foreign';
   assert.throws(() => aggregateTemporalSummaries([summary, changed]), /scope/);
   assert.throws(() => normalizeTemporalSummary({ ...summary, savedFrames: 1 }), /coverage/);
+  const covered = { ...summary, captureActions: 1, returnedFrames: 2, savedFrames: 2, completeActions: 1,
+    resources: { ...summary.resources, captureActions: 1, frames: 2 },
+    coverage: [{ ref: 'evidence-000001-aaaaaaaaaaaa', schema: 'avo.sdk-temporal-ref.v1', contractSha256: summary.contractSha256,
+      manifestRef: 'evidence-000002-bbbbbbbbbbbb', manifestDigest: 'b'.repeat(64), status: 'complete', sdkFrameCount: 2,
+      savedFrameCount: 2, savedRanges: [[0, 2]], omittedRanges: [], reasons: [] }] };
+  normalizeTemporalSummary(covered);
+  for (const mutate of [
+    (s) => { s.coverage[0].omittedRanges = [[0, 2]]; },
+    (s) => { s.savedFrames = 1; Object.assign(s.coverage[0], { savedFrameCount: 1, savedRanges: [[0, 1]], omittedRanges: [[1, 2]] }); },
+    (s) => { s.returnedFrames = 3; },
+    (s) => { s.completeActions = 0; },
+    (s) => { s.resources.frames = 0; },
+  ]) {
+    const contradictory = structuredClone(covered); mutate(contradictory);
+    assert.throws(() => normalizeTemporalSummary(contradictory), /coverage/);
+  }
 });
 
 test('T20 temporal summary survives the existing resume cache without a new authority', (t) => {

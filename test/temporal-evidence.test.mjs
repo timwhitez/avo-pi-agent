@@ -212,7 +212,7 @@ test('T11 frozen quotas and prefix plus final coverage at storage boundaries', a
   const large = Array.from({ length: 64 }, () => Array(64).fill(1000000000));
   assert.equal(serializeSdk(Array(10).fill(large), true).temporal_evidence.reasons[0], 'ACTION_SOURCE_LIMIT');
   for (const [limit, value, expected] of [['unitFrames', 1, 'partial'], ['unitSourceBytes', 13, 'partial'], ['unitCaptureActions', 0, 'unavailable'],
-    ['unitEvents', 1, 'unavailable'], ['unitArchiveBytes', 1024, 'unavailable'], ['captureEnvelopeBytes', 256, 'unavailable'], ['controlReserveEvents', 19999, 'partial'], ['controlReserveBytes', 50331647, 'partial']]) {
+    ['unitEvents', 1, 'unavailable'], ['unitArchiveBytes', 1024, 'unavailable'], ['captureEnvelopeBytes', 256, 'unavailable'], ['controlReserveEvents', 19998, 'partial'], ['controlReserveBytes', 50331647, 'partial']]) {
     const f = await fixture(t);
     f.agent.temporalArchive.limits[limit] = value;
     const pointer = (await act(f.agent)).details.temporalEvidence;
@@ -244,6 +244,10 @@ test('T12 read reservations survive restart and failed charge never delivers', a
   assert.equal(read(g.agent, {}).ok, false);
   assert.equal(read(g.agent, {}).code, 'ARCHIVE_UNWRITABLE');
   assert.equal(g.calls(), 1);
+  const recover = () => new DurableAvoArcAgent({ gameId: 'synthetic', environment: g.env, config: g.config, loop: {} });
+  assert.equal(read(recover(), {}).code, 'READ_CHARGE_LEDGER_INCOMPLETE');
+  fs.unlinkSync(g.agent.temporalArchive.allowanceFile);
+  assert.equal(read(recover(), {}).code, 'READ_CHARGE_LEDGER_INCOMPLETE');
 });
 
 test('T13 archive damage fails closed while final evidence stays readable', async (t) => {
@@ -262,13 +266,14 @@ test('T13 archive damage fails closed while final evidence stays readable', asyn
       else fs.linkSync(`${file}.saved`, file);
     } else {
       const records = original.toString().trim().split('\n').map(JSON.parse);
-      if (damage === 'pixel') records[1].chunk[0] = '[[99]]';
-      if (damage === 'missing-chunk') records.splice(1, 1);
+      const chunkIndex = records.findIndex((r) => r.schema === 'avo.sdk-temporal-frame-chunk.v1');
+      if (damage === 'pixel') records[chunkIndex].chunk[0] = '[[99]]';
+      if (damage === 'missing-chunk') records.splice(chunkIndex, 1);
       if (damage === 'missing-manifest') records.pop();
       if (damage === 'reordered') records.reverse();
-      if (damage === 'duplicate') records.push(records[1]);
-      if (damage === 'schema') records[1].schema = 'avo.sdk-temporal-frame-chunk.v0';
-      if (damage === 'scope') records[1].scope.runId = 'foreign';
+      if (damage === 'duplicate') records.push(records[chunkIndex]);
+      if (damage === 'schema') records[chunkIndex].schema = 'avo.sdk-temporal-frame-chunk.v0';
+      if (damage === 'scope') records[chunkIndex].scope.runId = 'foreign';
       fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
     }
     assert.equal(read(f.agent, { view: 'frame', ref, frameIndex: 0 }).ok, false, damage);
@@ -329,16 +334,17 @@ test('T15 fixed-clock off events tools prompts and historical compatibility', as
 });
 
 test('T12 missing clean charge suffix or allowance witness cannot replenish reads', async (t) => {
-  for (const damage of ['tail', 'witness', 'corrupt-witness']) {
+  for (const damage of ['tail', 'witness', 'tail-and-witness', 'corrupt-witness']) {
     const f = await fixture(t);
     await act(f.agent);
     assert.equal(read(f.agent, {}).ok, true);
     const archive = f.agent.temporalArchive;
-    if (damage === 'tail') {
+    if (damage === 'tail' || damage === 'tail-and-witness') {
       const lines = fs.readFileSync(archive.store.file, 'utf8').trim().split('\n');
       lines.pop(); fs.writeFileSync(archive.store.file, lines.join('\n') + '\n');
-    } else if (damage === 'witness') fs.unlinkSync(archive.allowanceFile);
-    else fs.writeFileSync(archive.allowanceFile, '{');
+    }
+    if (damage === 'witness' || damage === 'tail-and-witness') fs.unlinkSync(archive.allowanceFile);
+    if (damage === 'corrupt-witness') fs.writeFileSync(archive.allowanceFile, '{');
     const restarted = new DurableAvoArcAgent({ gameId: 'synthetic', environment: f.env, config: f.config, loop: {} });
     assert.equal(read(restarted, {}).code, 'READ_CHARGE_LEDGER_INCOMPLETE');
     assert.equal(f.calls(), 1);

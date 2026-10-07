@@ -203,6 +203,7 @@ def pop_pending(response: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def transition_record(request: dict[str, Any] | None, response: dict[str, Any]) -> dict[str, Any]:
+    response_sha256 = canonical_hash(response)
     body = unwrap_response(response)
     capture = body.get("frame", {}).get("temporal_evidence") if isinstance(body.get("frame"), dict) else None
     summary = None
@@ -212,8 +213,12 @@ def transition_record(request: dict[str, Any] | None, response: dict[str, Any]) 
         summary["frames"] = [{key: entry.get(key) for key in ("index", "sourceSha256", "gridContentHash")} for entry in capture.get("frames", [])[:31]]
         summary["finalFrame"] = capture.get("finalFrame")
         # Diagnostic recording retains hashes/counts, never temporal pixels.
-        response = {**response, "frame": {key: value for key, value in body["frame"].items() if key != "temporal_evidence"}}
-        body = response["frame"]
+        sanitized = {**body, "frame": {key: value for key, value in body["frame"].items() if key != "temporal_evidence"}}
+        if body is response:
+            response = sanitized
+        else:
+            response = {**response, next(key for key in ("result", "data", "frame_data", "frameData") if response.get(key) is body): sanitized}
+        body = sanitized["frame"]
     frame = body.get("frame")
     levels = body.get("levels_completed", body.get("levelsCompleted"))
     prior_levels = int(_context.get("levels_completed", 0))
@@ -230,7 +235,7 @@ def transition_record(request: dict[str, Any] | None, response: dict[str, Any]) 
         "request_id": request.get("request_id") if request else response.get("id"),
         "operation": request.get("operation") if request else "unmatched",
         "request_sha256": request.get("request_sha256") if request else None,
-        "response_sha256": canonical_hash(response),
+        "response_sha256": response_sha256,
         "action": action,
         "action_data": bounded(action_data),
         "reasoning_sha256": hashlib.sha256(reasoning_text.encode()).hexdigest() if reasoning_text else None,

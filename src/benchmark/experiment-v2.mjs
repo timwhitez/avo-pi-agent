@@ -11,6 +11,7 @@ import { runtimeStatusTemplateSha256 } from '../loop/pi-sdk.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { effectiveAvoToolContract } from '../core/avo-agent-base.mjs';
 import { normalizeMechanismMetrics } from './mechanism-metrics.mjs';
+import { normalizeGameRecord } from './report-records.mjs';
 import { evaluatePublicRunCapsule } from './run-capsule-authority.mjs';
 import { productionProviderToolSchemaDigest, validateRunCapsule } from './run-capsule.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
@@ -914,7 +915,9 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
       for (const versionedGameId of plan.manifests[phase].versionedGameIds) {
         const arms = Object.fromEntries(v1.ARMS.map((arm) => {
           const entry = entries.find((item) => item.phase === phase && item.arm === arm && item.replicate === replicate);
-          return [arm, entry?.games.get(versionedGameId) ?? notRunArmFacts()];
+          const facts = entry?.games.get(versionedGameId) ?? notRunArmFacts();
+          return [arm, isTemporal(plan) && !entry?.games.has(versionedGameId)
+            ? { ...facts, ...temporalFacts(plan, undefined, null, arm) } : facts];
         }));
         units.push({
           unit: `${plan.experimentId}:${phase}:${versionedGameId}:${replicate}`,
@@ -946,6 +949,7 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
       baseline: armObservedCost(units, 'baseline'),
       intervention: armObservedCost(units, 'intervention'),
     },
+    ...(isTemporal(plan) ? { temporalEvidence: Object.fromEntries(v1.ARMS.map((arm) => [arm, armTemporalResources(units, arm)])) } : {}),
     scheduleOrder: {
       verified: orderUnverified.length === 0 && timed.length > 0,
       checkedUnits: timed.map((entry) => entry.key),
@@ -1051,19 +1055,23 @@ function resolveCompleteEntry(plan, entry, selector) {
     condition: comparableArmCondition(capsule, plan),
     // A report accepted through the complete-score rules is the only evidence
     // that can form a comparable pair.
-    games: new Map(report.games.map((game) => [game.versionedGameId, {
-      executionStatus: 'completed',
-      runId: report.runId,
-      pairEligible: true,
-      won: game.won,
-      levelsCompleted: game.levelsCompleted,
-      observedProgress: { levelsCompleted: game.levelsCompleted, totalLevels: game.totalLevels },
-      observedCost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector.key} ${game.versionedGameId} mechanism metrics`)),
-      costMeteringLayer: 'run-report-games',
-      costMeteringComplete: true,
-      costCoverage: { source: 'complete-report', complete: true },
-      sourceRef: `report:${report.runId}:${game.versionedGameId}`,
-    }])),
+    games: new Map(report.games.map((game) => {
+      const temporal = isTemporal(plan) ? temporalFacts(plan, game, report.runId, selector.arm) : {};
+      return [game.versionedGameId, {
+        executionStatus: 'completed',
+        runId: report.runId,
+        pairEligible: true,
+        won: game.won,
+        levelsCompleted: game.levelsCompleted,
+        observedProgress: { levelsCompleted: game.levelsCompleted, totalLevels: game.totalLevels },
+        observedCost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector.key} ${game.versionedGameId} mechanism metrics`)),
+        costMeteringLayer: 'run-report-games',
+        costMeteringComplete: temporal.temporalCoverage?.resourcesKnown ?? true,
+        costCoverage: { source: 'complete-report', complete: true },
+        sourceRef: `report:${report.runId}:${game.versionedGameId}`,
+        ...temporal,
+      }];
+    })),
   };
 }
 
@@ -1089,7 +1097,11 @@ function resolveIncompleteEntry(plan, entry, selector) {
     comparable: true,
     capsuleEvidenceSha256: entry.privateCapsuleEvidence.sha256,
   });
-  const audited = readAuditedRun(entry.auditRun, runId, selector, published);
+  const { audited, sourceReport } = readAuditedRun(entry.auditRun, runId, selector, published);
+  const temporal = isTemporal(plan) ? new Map((sourceReport.games ?? []).map((game) => {
+    const facts = temporalFacts(plan, game, runId, selector.arm);
+    return [facts.temporalEvidence?.unit.versionedGameId ?? game.versionedGameId, facts];
+  })) : null;
   if (!['error', 'censored', 'unknown'].includes(audited.executionOutcome.status)) {
     throw new Error(`experiment result ${selector.key} incomplete entry needs its run's audited error/censored/unknown outcome`);
   }
@@ -1098,6 +1110,7 @@ function resolveIncompleteEntry(plan, entry, selector) {
   const games = new Map();
   for (const game of audited.games) {
     const observedCost = game.metrics ?? game.observedSubtotal ?? null;
+    const temporalFact = isTemporal(plan) ? temporal.get(game.versionedGameId) ?? temporalFacts(plan, undefined, runId, selector.arm) : {};
     games.set(game.versionedGameId, {
       executionStatus: game.outcome.status,
       runId,
@@ -1111,9 +1124,10 @@ function resolveIncompleteEntry(plan, entry, selector) {
       },
       observedCost,
       costMeteringLayer: game.meteringLayer,
-      costMeteringComplete: game.metrics !== null,
+      costMeteringComplete: game.metrics !== null && (temporalFact.temporalCoverage?.resourcesKnown ?? true),
       costCoverage: game.coverage ?? null,
       sourceRef: `${game.sourceRef}:${runId}`,
+      ...temporalFact,
     });
   }
   return { ...selector, runId, startedAt, condition: comparableArmCondition(published, plan), games };
@@ -1142,7 +1156,7 @@ function readAuditedRun(auditRun, runId, selector, published) {
   const normalized = normalizeAuditInputs(manifest);
   const derived = normalized.runs.find((run) => run.runId === runId);
   if (!derived) throw new Error(`experiment result ${selector.key} audit export does not include run ${runId}`);
-  assertAuditedSourceReportBinding(manifest, derived, published, selector);
+  const sourceReport = assertAuditedSourceReportBinding(manifest, derived, published, selector);
   const exported = readJsonFileEvidence(path.join(outputDir, 'runs', `${runId}.json`), {
     root: outputDir,
     purpose: 'audit run record',
@@ -1151,7 +1165,7 @@ function readAuditedRun(auditRun, runId, selector, published) {
   if (canonicalJson({ schema: AUDIT_SCHEMA, exportId, ...derived }) !== canonicalJson(exported)) {
     throw new Error(`experiment result ${selector.key} audit run record differs from its re-derived source facts`);
   }
-  return derived;
+  return { audited: derived, sourceReport };
 }
 
 /**
@@ -1181,7 +1195,30 @@ function assertAuditedSourceReportBinding(manifest, derived, published, selector
       || canonicalJson(experimentBinding) !== canonicalJson(published.experiment)) {
     throw new Error(`experiment result ${selector.key} audit source report is not bound to its sealed run capsule`);
   }
-  return true;
+  return evidence.value;
+}
+
+function temporalFacts(plan, game, runId, arm) {
+  const contract = resolveTemporalEvidenceContract(plan.change.arms[arm].mode);
+  const summary = game?.temporalEvidence === undefined ? null : normalizeGameRecord(game).temporalEvidence;
+  if (summary && (!contract || summary.unit.runId !== runId || summary.contractSha256 !== temporalContractSha256(contract))) {
+    throw new Error('temporal summary run/capability differs from enclosing run and arm');
+  }
+  return { temporalEvidence: summary, temporalCoverage: {
+    status: contract ? summary ? 'reported' : 'unknown' : 'disabled',
+    resourcesKnown: !contract || summary?.resources != null,
+  } };
+}
+
+function armTemporalResources(units, arm) {
+  const facts = units.map((unit) => unit.arms[arm]).filter((fact) => fact.temporalCoverage.status !== 'disabled');
+  const known = facts.map((fact) => fact.temporalEvidence?.resources).filter((resources) => resources != null);
+  return {
+    observedSubtotal: known.length ? Object.fromEntries(Object.keys(known[0]).map((key) => [key, known.reduce((n, resources) => n + resources[key], 0)])) : null,
+    coverage: { expectedUnits: facts.length, reportedUnits: facts.filter((fact) => fact.temporalEvidence !== null).length,
+      knownResourceUnits: known.length, unknownResourceUnits: facts.length - known.length,
+      complete: facts.every((fact) => fact.temporalEvidence !== null && fact.temporalCoverage.resourcesKnown) },
+  };
 }
 
 // The sealed effective execution policy must exist and must be the plan's

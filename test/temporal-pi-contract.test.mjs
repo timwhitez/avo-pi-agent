@@ -8,6 +8,7 @@ import { ArcBridgeClient } from '../src/arc/bridge-client.mjs';
 import { DurableAvoArcAgent } from '../src/core/durable-avo-agent.mjs';
 import { resolveTemporalEvidenceContract } from '../src/core/temporal-evidence.mjs';
 import { canonicalJson } from '../src/local/canonical-json.mjs';
+import { sha256Hex } from '../src/core/bounded-read.mjs';
 import { createPiSdkLoop, runtimeStatusMessage } from '../src/loop/pi-sdk.mjs';
 import { normalizeSelector, textDigest, bindCliReceipt } from '../src/trajectory/audit-events.mjs';
 import { providerCapabilities } from './support/provider.mjs';
@@ -167,11 +168,16 @@ test('T16 recorder forwards exact stdout and stores bounded summaries without te
   assert.equal(recorded.stdout, plain.stdout);
   const records = fs.readFileSync(path.join(root, 'trace/arc-boundary.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const response = records.find((r) => r.temporal_capture);
+  const forwarded = plain.stdout.trim().split('\n').map(JSON.parse).find((r) => r.frame?.temporal_evidence);
+  assert.equal(response.response_sha256, sha256Hex(canonicalJson(forwarded)));
   assert.equal(response.schema_version, 5);
   assert.equal(response.temporal_capture.frames[0].grid, undefined);
   assert.ok(!JSON.stringify(response).includes(JSON.stringify(A)));
   assert.deepEqual(response.frame, B);
   assert.ok(Buffer.byteLength(JSON.stringify(response)) < 512 * 1024);
+  const wrappers = `import importlib.util, json\nspec = importlib.util.spec_from_file_location('recorder', 'bridge/recording_python_v5.py')\nm = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(m)\noriginal = json.loads(${JSON.stringify(JSON.stringify(forwarded))})\nfor key in (None, 'result', 'data', 'frame_data', 'frameData'):\n    response = original if key is None else {'id': 7, key: original}\n    before = m.canonical_hash(response)\n    record = m.transition_record(None, response)\n    assert record['response_sha256'] == before\n    assert m.canonical_hash(response) == before\n    expected = {**original, 'frame': {k: v for k, v in original['frame'].items() if k != 'temporal_evidence'}}\n    assert record['response'] == (expected if key is None else {'id': 7, key: expected})\n    assert record['frame'] == original['frame']['frame']\n    assert all('grid' not in entry for entry in record['temporal_capture']['frames'])\nprint('wrappers passed')\n`;
+  const wrapped = spawnSync(path.resolve('.venv/bin/python'), ['-c', wrappers], { env, encoding: 'utf8' });
+  assert.equal(wrapped.status, 0, wrapped.stderr);
 });
 
 test('T17 negative stage witnesses do not infer delivery inclusion or understanding', async (t) => {

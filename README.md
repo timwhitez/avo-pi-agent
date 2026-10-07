@@ -114,8 +114,9 @@ and reasons, and never replay an action. A prefix plus the final alias can be sa
 
 The underlying EvidenceStore limits remain 128 KiB/event, 64 MiB/file and
 100,000 events. Archives live under private memory `evidence/temporal-v1/`,
-separate from the main action ledger. A small read-allowance witness plus durable
-read charges prevents a missing charge suffix from granting fresh quotas.
+separate from the main action ledger. Archive creation commits a required
+read-allowance witness. It retains reservations even if their charge append fails;
+missing witnesses or charge suffixes disable reads instead of restoring quotas.
 Corrupt/missing evidence disables temporal access; verified final evidence stays
 in the main ledger. Recovery discovers earlier attempts in the same run/version;
 it does not restore SDK state or import another run's archive.
@@ -126,7 +127,9 @@ The run bound is the selected versioned-game count × 48 MiB. SDK-returned captu
 archive manifest/parent pointer, tool receipt and prepared/wire receipt are
 separate witnesses; they establish neither model understanding nor ARC benefit.
 The same-commit experiment-v3 declaration supports `off → capture-read` and
-`capture → capture-read` using the existing two-arm validators. Paid experiments,
+`capture → capture-read` using the existing two-arm validators. Its results retain
+run/game/arm-bound capture coverage and known archive/read resource subtotals;
+missing summaries or resource meters remain explicitly unknown. Paid experiments,
 real ARC and real provider validation remain separate and are **NOT_RUN** for
 this engineering change. Default stays off.
 

@@ -18,7 +18,7 @@ export const TEMPORAL_CONTRACT_V1 = freeze({
 });
 const REF = /^evidence-[0-9]{6,}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const SCHEMAS = new Set(['intent', 'frame-chunk', 'action', 'read-charge'].map((name) => `avo.sdk-temporal-${name}.v1`));
+const SCHEMAS = new Set(['unit', 'intent', 'frame-chunk', 'action', 'read-charge'].map((name) => `avo.sdk-temporal-${name}.v1`));
 export const temporalContractSha256 = (contract) => sha256Hex(canonicalJson(contract));
 
 export function resolveTemporalEvidenceContract(value = 'off') {
@@ -107,12 +107,17 @@ export class TemporalEvidenceArchive {
     try {
       this.store.load();
       if (!this.store.historyComplete) fail('ARCHIVE_INTEGRITY_FAILED');
+      if (this.store.fileIdentity === null && !parents.some((event) => event.temporalEvidence)) {
+        this.writeAllowance({ readCalls: 0, readChars: 0, lastResultTextSha256: null }, true);
+        this.append({ schema: 'avo.sdk-temporal-unit.v1', scope: this.unit, readAllowanceRequired: true });
+      }
       for (const record of this.store.events) {
         if (!SCHEMAS.has(record.schema)) fail('UNSUPPORTED_VERSION');
         if (!sameUnit(record.scope, this.unit)) fail('SCOPE_MISMATCH');
         if (record.contractSha256 !== this.contractSha256) fail('UNSUPPORTED_VERSION');
       }
       if (parents.some((event) => event.temporalEvidence?.manifestRef && !this.store.get(event.temporalEvidence.manifestRef))) fail('ARCHIVE_MISSING');
+      if (this.store.events[0]?.schema !== 'avo.sdk-temporal-unit.v1' || this.store.events[0].readAllowanceRequired !== true) fail('READ_CHARGE_LEDGER_INCOMPLETE');
       this.verifyAllowance(this.usage());
     } catch (error) { this.failure = error.code || 'ARCHIVE_INTEGRITY_FAILED'; }
     return this;
@@ -147,16 +152,21 @@ export class TemporalEvidenceArchive {
   verifyAllowance(usage) {
     let evidence;
     try { evidence = readJsonFileEvidence(this.allowanceFile, { root: this.store.authorityRoot, maxBytes: 2048, purpose: 'temporal read allowance' }); }
-    catch (error) {
-      if (error.code === 'ENOENT' && usage.readCalls === 0) return;
-      fail('READ_CHARGE_LEDGER_INCOMPLETE');
-    }
+    catch { fail('READ_CHARGE_LEDGER_INCOMPLETE'); }
     this.allowanceBytes = evidence.bytes;
     const value = evidence.value;
     const last = this.store.events.findLast((r) => r.schema === 'avo.sdk-temporal-read-charge.v1');
     if (value.schema !== 'avo.sdk-temporal-read-allowance.v1' || canonicalJson(value.unit) !== canonicalJson(this.unit)
         || value.contractSha256 !== this.contractSha256 || value.readCalls !== usage.readCalls || value.readChars !== usage.readChars
-        || value.lastResultTextSha256 !== last?.resultTextSha256) fail('READ_CHARGE_LEDGER_INCOMPLETE');
+        || value.lastResultTextSha256 !== (last?.resultTextSha256 ?? null)) fail('READ_CHARGE_LEDGER_INCOMPLETE');
+  }
+
+  writeAllowance(counters, exclusive = false) {
+    const allowance = { schema: 'avo.sdk-temporal-read-allowance.v1', unit: this.unit, contractSha256: this.contractSha256, ...counters };
+    const bytes = Buffer.byteLength(`${JSON.stringify(allowance, null, 2)}\n`);
+    if (this.usage().archiveBytes - this.allowanceBytes + bytes > this.limits.unitArchiveBytes) fail('ARCHIVE_QUOTA_EXHAUSTED');
+    writeJsonAtomic(this.allowanceFile, allowance, { root: this.store.authorityRoot, maxBytes: 2048, exclusive });
+    this.allowanceBytes = bytes;
   }
 
   append(record, payload = false) {
@@ -383,13 +393,8 @@ export class TemporalEvidenceArchive {
     }
     const text = JSON.stringify(result);
     // Write the reservation witness first: a lost charge suffix cannot replenish quotas.
-    const allowance = { schema: 'avo.sdk-temporal-read-allowance.v1', unit: this.unit, contractSha256: this.contractSha256,
-      readCalls: usage.readCalls + 1, readChars: usage.readChars + text.length, lastResultTextSha256: sha256Hex(text) };
     try {
-      const bytes = Buffer.byteLength(`${JSON.stringify(allowance, null, 2)}\n`);
-      if (usage.archiveBytes - this.allowanceBytes + bytes > this.limits.unitArchiveBytes) fail('ARCHIVE_QUOTA_EXHAUSTED');
-      writeJsonAtomic(this.allowanceFile, allowance, { root: this.store.authorityRoot, maxBytes: 2048 });
-      this.allowanceBytes = bytes;
+      this.writeAllowance({ readCalls: usage.readCalls + 1, readChars: usage.readChars + text.length, lastResultTextSha256: sha256Hex(text) });
     } catch (error) { this.failure = 'ARCHIVE_UNWRITABLE'; throw error; }
     this.append({ schema: 'avo.sdk-temporal-read-charge.v1', scope: { ...this.unit, attemptId }, readOrdinal: usage.readCalls + 1,
       sourceActionRef: request.ref ?? null, resultSourceScope: result.scope ?? null,
@@ -456,7 +461,7 @@ export function normalizeTemporalSummary(value) {
     for (const key of ['captureActions', 'frames', 'sourceBytes', 'archiveBytes', 'events', 'readCalls', 'readChars']) {
       if (!Number.isSafeInteger(value.resources[key]) || value.resources[key] < 0) throw new Error('temporal resources must be non-negative integers');
     }
-    for (const [key, limit] of [['frames', 'unitFrames'], ['sourceBytes', 'unitSourceBytes'], ['archiveBytes', 'unitArchiveBytes'], ['events', 'unitEvents'], ['readCalls', 'readCalls'], ['readChars', 'readChars']]) {
+    for (const [key, limit] of [['captureActions', 'unitCaptureActions'], ['frames', 'unitFrames'], ['sourceBytes', 'unitSourceBytes'], ['archiveBytes', 'unitArchiveBytes'], ['events', 'unitEvents'], ['readCalls', 'readCalls'], ['readChars', 'readChars']]) {
       if (value.resources[key] > contract.limits[limit]) throw new Error('temporal resources exceed frozen contract');
     }
   }
@@ -475,8 +480,27 @@ export function normalizeTemporalSummary(value) {
         || !Array.isArray(entry.reasons) || entry.reasons.some((reason) => typeof reason !== 'string' || reason.length > 64)
         || (entry.sdkFrameCount !== null && (!Number.isSafeInteger(entry.sdkFrameCount) || entry.sdkFrameCount < entry.savedFrameCount))
         || entry.savedRanges.reduce((n, r) => n + r[1] - r[0], 0) !== entry.savedFrameCount) throw new Error('temporal coverage entry is invalid');
+    const omitted = entry.sdkFrameCount === null ? [] : complement(entry.savedRanges, entry.sdkFrameCount);
+    const status = entry.sdkFrameCount > 0 && !omitted.length ? 'complete' : entry.savedFrameCount ? 'partial' : 'unavailable';
+    if ((entry.sdkFrameCount === null && entry.savedFrameCount !== 0)
+        || canonicalJson(entry.omittedRanges) !== canonicalJson(omitted) || entry.status !== status) throw new Error('temporal coverage status/ranges are inconsistent');
     seen.add(entry.ref);
   }
+  const visible = {
+    returnedFrames: value.coverage.reduce((n, e) => n + (e.sdkFrameCount ?? 0), 0),
+    returnedUnknownActions: value.coverage.filter((e) => e.sdkFrameCount === null).length,
+    savedFrames: value.coverage.reduce((n, e) => n + e.savedFrameCount, 0),
+    completeActions: value.coverage.filter((e) => e.status === 'complete').length,
+  };
+  if (Object.keys(visible).some((key) => value[key] < visible[key] || (!value.coverageOmittedActions && value[key] !== visible[key]))
+      || value.returnedUnknownActions - visible.returnedUnknownActions + value.completeActions - visible.completeActions > value.coverageOmittedActions
+      || value.savedFrames - visible.savedFrames > value.returnedFrames - visible.returnedFrames
+      || value.completeActions - visible.completeActions > value.savedFrames - visible.savedFrames
+      || (value.coverageOmittedActions === value.returnedUnknownActions - visible.returnedUnknownActions && value.returnedFrames !== visible.returnedFrames)
+      || value.completeActions > value.captureActions - value.returnedUnknownActions
+      || value.completeActions > value.savedFrames) throw new Error('temporal summary aggregate coverage is inconsistent');
+  if (value.resources && (value.resources.frames < value.savedFrames
+      || value.resources.captureActions < value.completeActions + value.coverage.filter((e) => e.status === 'partial').length)) throw new Error('temporal resources contradict saved coverage');
   if (value.deliveryAuthority !== 'avo.tool-receipt.v1' || value.requestAuthority !== 'avo.context-receipt.v1'
       || typeof value.archiveAvailability !== 'string' || value.archiveAvailability.length > 64) throw new Error('temporal summary authority is invalid');
   return freeze(structuredClone(value));
