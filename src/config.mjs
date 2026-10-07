@@ -4,6 +4,7 @@ import path from 'node:path';
 import { normalizePolicyProfile } from './core/policy-profile.mjs';
 import { resolveToolResultMaxChars } from './core/bounded-read.mjs';
 import { providerCapabilitiesFromEnvironment } from './provider-capabilities.mjs';
+import { resolveTemporalEvidenceContract } from './core/temporal-evidence.mjs';
 
 function parseDotEnv(text) {
   const out = {};
@@ -50,6 +51,7 @@ function enumValue(name, fallback, allowed) {
 }
 
 export function getRuntimeConfig({ requireProvider = true } = {}) {
+  const temporalEvidence = resolveTemporalEvidenceContract(process.env.AVO_SDK_TEMPORAL_EVIDENCE);
   const reasoningEffort = String(process.env.OPENAI_REASONING_EFFORT || 'max').trim().toLowerCase();
   const provider = {
     baseUrl: process.env.OPENAI_BASE_URL?.replace(/\/$/, ''),
@@ -71,6 +73,7 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
   });
   return {
     provider,
+    ...(temporalEvidence ? { temporalEvidence } : {}),
     maxActions: integer('AVO_MAX_ACTIONS', 1000),
     maxOuterTurns: integer('AVO_MAX_OUTER_TURNS', 1000),
     stallWindow: integer('AVO_STALL_WINDOW', 8, 2),
@@ -89,6 +92,7 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
 
 export function publicConfigSummary(config) {
   return {
+    ...(config.temporalEvidence ? { temporalEvidence: config.temporalEvidence } : {}),
     providerConfigured: Boolean(config.provider.baseUrl && config.provider.apiKey && config.provider.model),
     wireApi: 'responses',
     reasoningEffort: config.provider.reasoningEffort,

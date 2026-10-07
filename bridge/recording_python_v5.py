@@ -48,6 +48,8 @@ EVIDENCE_ID = re.compile(r"evidence-[0-9]{6,}-[a-f0-9]{12}")
 _seen_supervisor_count: dict[str, int] = {}
 _memory_file_cache: dict[str, pathlib.Path | None] = {}
 _context: dict[str, Any] = {"game_id": None, "episode": 0, "turn": 0, "levels_completed": 0}
+_temporal_enabled = False
+_trace_stopped = False
 
 
 def utc_now() -> str:
@@ -75,6 +77,17 @@ def bounded(value: Any) -> Any:
 
 
 def append_record(channel: str, kind: str, payload: dict[str, Any], *, force_sync: bool = False) -> None:
+    if not _temporal_enabled:
+        _append_record(channel, kind, payload, force_sync=force_sync)
+        return
+    try:
+        _append_record(channel, kind, payload, force_sync=force_sync)
+    except Exception as error:
+        print(f"temporal recorder write unavailable: {type(error).__name__}", file=sys.stderr)
+
+
+def _append_record(channel: str, kind: str, payload: dict[str, Any], *, force_sync: bool = False) -> None:
+    global _trace_stopped
     target = ARC_TRACE if channel == "arc" else MEMORY_TRACE
     with _lock:
         _sequence[channel] += 1
@@ -90,8 +103,18 @@ def append_record(channel: str, kind: str, payload: dict[str, Any], *, force_syn
             "turn": _context.get("turn", 0),
             **bounded(payload),
         }
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if _temporal_enabled and channel == "arc":
+            if _trace_stopped:
+                return
+            if len(line.encode()) > 512 * 1024:
+                record = {"schema_version": 5, "kind": "arc.record_omitted", "sha256": hashlib.sha256(line.encode()).hexdigest(), "bytes": len(line.encode())}
+                line = json.dumps(record, separators=(",", ":")) + "\n"
+            if (target.stat().st_size if target.exists() else 0) + len(line.encode()) > 64 * 1024 * 1024 - 4096:
+                line = json.dumps({"schema_version": 5, "kind": "arc.trace_omitted", "reason": "TRACE_FILE_LIMIT"}, separators=(",", ":")) + "\n"
+                _trace_stopped = True
         with target.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.write(line)
             handle.flush()
             _since_fsync[channel] += 1
             if force_sync or _since_fsync[channel] >= FSYNC_INTERVAL:
@@ -112,11 +135,14 @@ def operation_and_params(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 def stdin_relay(source: TextIO, target: TextIO) -> None:
+    global _temporal_enabled
     try:
         for line in source:
             request = parse_json(line)
             if isinstance(request, dict):
                 operation, params = operation_and_params(request)
+                if params.get("temporal_capture") is not None:
+                    _temporal_enabled = True
                 game_id = params.get("game_id") or params.get("gameId") or request.get("game_id") or request.get("gameId")
                 if game_id:
                     _context["game_id"] = str(game_id).lower()
@@ -178,6 +204,16 @@ def pop_pending(response: dict[str, Any]) -> dict[str, Any] | None:
 
 def transition_record(request: dict[str, Any] | None, response: dict[str, Any]) -> dict[str, Any]:
     body = unwrap_response(response)
+    capture = body.get("frame", {}).get("temporal_evidence") if isinstance(body.get("frame"), dict) else None
+    summary = None
+    if isinstance(capture, dict):
+        summary = {key: capture.get(key) for key in ("schema", "scope", "intentRef", "sdkReturned", "status", "reasons", "omittedRanges", "sourceBytes")}
+        summary["capture_sha256"] = canonical_hash(capture)
+        summary["frames"] = [{key: entry.get(key) for key in ("index", "sourceSha256", "gridContentHash")} for entry in capture.get("frames", [])[:31]]
+        summary["finalFrame"] = capture.get("finalFrame")
+        # Diagnostic recording retains hashes/counts, never temporal pixels.
+        response = {**response, "frame": {key: value for key, value in body["frame"].items() if key != "temporal_evidence"}}
+        body = response["frame"]
     frame = body.get("frame")
     levels = body.get("levels_completed", body.get("levelsCompleted"))
     prior_levels = int(_context.get("levels_completed", 0))
@@ -190,6 +226,7 @@ def transition_record(request: dict[str, Any] | None, response: dict[str, Any]) 
     reasoning = params.get("reasoning")
     reasoning_text = json.dumps(reasoning, ensure_ascii=False) if reasoning is not None else ""
     return {
+        **({"temporal_capture": summary} if summary is not None else {}),
         "request_id": request.get("request_id") if request else response.get("id"),
         "operation": request.get("operation") if request else "unmatched",
         "request_sha256": request.get("request_sha256") if request else None,

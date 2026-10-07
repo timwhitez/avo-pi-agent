@@ -3,6 +3,7 @@ import { AvoArcAgent as BaseAvoArcAgent } from './avo-agent-base.mjs';
 import { DurableMemory } from './durable-memory.mjs';
 import { EvidenceStore } from './evidence-store.mjs';
 import { EPISODE_OBSERVATION_SCHEMA } from './observation.mjs';
+import { TemporalEvidenceArchive } from './temporal-evidence.mjs';
 
 export class DurableAvoArcAgent extends BaseAvoArcAgent {
   constructor(options) {
@@ -29,6 +30,8 @@ export class DurableAvoArcAgent extends BaseAvoArcAgent {
     this.assertHypothesisEvidence();
     this.memory.maintain();
     this.attemptId = `attempt-${String(this.evidenceSequence + 1).padStart(6, '0')}`;
+    if (this.temporalEvidence) this.temporalArchive = new TemporalEvidenceArchive({ memoryDir: config.memoryDir,
+      runId: config.runId, versionedGameId: config.versionedGameId, gameId, contract: this.temporalEvidence }).load(this.evidenceLedger);
   }
 
   recordEvidence(input) {

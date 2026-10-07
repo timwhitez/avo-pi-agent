@@ -5,6 +5,7 @@ import { summarizeEvidenceEvents } from '../core/evidence-store.mjs';
 import { EPISODE_OBSERVATION_SCHEMA } from '../core/observation.mjs';
 import { POLICY_PROFILE_NAMES } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { resolveTemporalEvidenceContract, temporalContractSha256 } from '../core/temporal-evidence.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
 import {
   validateWorkspaceCapabilityAttestation,
@@ -185,6 +186,10 @@ export function evaluatePublicRunCapsule(value, {
     'run capsule runtime policy profile differs from its attestation',
     reasons,
   );
+  try {
+    const temporal = resolveTemporalEvidenceContract(runtime.config?.temporalEvidence);
+    requireCondition((policyProfile.temporalEvidenceSha256 ?? null) === (temporal ? temporalContractSha256(temporal) : null), 'run capsule temporal capability digest differs from runtime', reasons);
+  } catch { reasons.push('run capsule temporal capability is malformed'); }
   const workspaceCapability = recordOrEmpty(capsule.workspaceCapability);
   const workspaceAttestation = recordOrEmpty(workspaceCapability.attestation);
   try {

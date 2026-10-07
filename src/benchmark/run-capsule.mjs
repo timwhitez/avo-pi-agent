@@ -21,6 +21,7 @@ import {
 } from '../core/policy-profile.mjs';
 import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { resolveTemporalEvidenceContract, temporalContractSha256 } from '../core/temporal-evidence.mjs';
 import { buildUtilityChildEnvironment } from '../local/child-environment.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import {
@@ -61,6 +62,8 @@ export const RUN_CAPSULE_COMPONENT_FILES = Object.freeze([
   'package-lock.json',
   'bridge/requirements.txt',
   'bridge/arc_bridge.py',
+  'bridge/recording_python_v5.py',
+  'src/core/temporal-evidence.mjs',
   'scripts/pi-provider-smoke.mjs',
   'scripts/run-real-public.mjs',
   'scripts/run-real-public-locked.mjs',
@@ -312,7 +315,8 @@ export function buildRunCapsule({
       || providerIdentity.modelFingerprint !== provenance?.providerModelFingerprint) {
     throw new Error('run provenance provider identity differs from the effective provider config');
   }
-  const toolSchemas = canonicalToolSchemas(workspaceMode, policyProfile);
+  const temporalEvidence = resolveTemporalEvidenceContract(config?.temporalEvidence);
+  const toolSchemas = canonicalToolSchemas(workspaceMode, policyProfile, temporalEvidence);
   const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
   const providerToolSchemas = convertResponsesTools(piTools, {
     supportsStrictMode: false,
@@ -346,13 +350,14 @@ export function buildRunCapsule({
     policyProfile: {
       requested: policyProfile,
       effective: policyProfile,
+      ...(temporalEvidence ? { temporalEvidenceSha256: temporalContractSha256(temporalEvidence) } : {}),
     },
     prompts: {
       systemSha256: sha256(systemPrompt),
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
-      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile, config?.temporalEvidence),
       compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
@@ -404,6 +409,7 @@ export function buildRunCapsule({
         maxOuterTurns: positiveInteger(config?.maxOuterTurns, 1000, 'maxOuterTurns'),
         stallWindow: positiveInteger(config?.stallWindow, 8, 'stallWindow'),
         policyProfile,
+        ...(temporalEvidence ? { temporalEvidence } : {}),
         memorySurfaceLimit: boundedInteger(config?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
         workspaceMode,
         workspacePythonTimeoutMs: positiveInteger(config?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
@@ -428,8 +434,8 @@ export function buildRunCapsule({
   return sealRunCapsule(definition, { createdAt });
 }
 
-function canonicalToolSchemas(workspaceMode, policyProfile) {
-  return effectiveAvoToolContract(workspaceMode, policyProfile);
+function canonicalToolSchemas(workspaceMode, policyProfile, temporalEvidence) {
+  return effectiveAvoToolContract(workspaceMode, policyProfile, temporalEvidence);
 }
 
 function initialPromptTemplateSha256(policyProfile) {
@@ -439,8 +445,8 @@ function initialPromptTemplateSha256(policyProfile) {
   }));
 }
 
-export function productionProviderToolSchemaDigest(workspaceMode = 'files-only', policyProfile) {
-  const piTools = canonicalToolSchemas(workspaceMode, policyProfile)
+export function productionProviderToolSchemaDigest(workspaceMode = 'files-only', policyProfile, temporalEvidence) {
+  const piTools = canonicalToolSchemas(workspaceMode, policyProfile, temporalEvidence)
     .map((tool) => piToolContract(tool, Type));
   const providerTools = convertResponsesTools(piTools, {
     supportsStrictMode: false,
@@ -632,12 +638,13 @@ export function verifyRunCapsuleExecution({
   const providerCapabilities = assertProviderCapabilities(config?.provider?.capabilities);
   const policyProfile = normalizePolicyProfile(definition.runtime.config.policyProfile);
   if (canonicalJson(definition.policyProfile)
-      !== canonicalJson({ requested: policyProfile, effective: policyProfile })) {
+      !== canonicalJson(profileDescriptor(policyProfile, definition.runtime.config.temporalEvidence))) {
     throw new Error('requested and effective policy profiles differ from the sealed runtime');
   }
   const toolSchemas = canonicalToolSchemas(
     definition.runtime.config.workspaceMode,
     policyProfile,
+    definition.runtime.config.temporalEvidence,
   );
   const piTools = toolSchemas.map((tool) => piToolContract(tool, Type));
   const providerToolSchemas = convertResponsesTools(piTools, {
@@ -654,7 +661,7 @@ export function verifyRunCapsuleExecution({
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: initialPromptTemplateSha256(policyProfile),
-      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile, config?.temporalEvidence),
       compactionNoticeTemplateSha256: COMPACTION_NOTICE_TEMPLATE_SHA256,
     },
     tools: {
@@ -803,7 +810,7 @@ export function validateRunCapsule(capsule) {
   }
   const profile = normalizePolicyProfile(capsule.definition.runtime?.config?.policyProfile);
   if (canonicalJson(capsule.definition.policyProfile)
-      !== canonicalJson({ requested: profile, effective: profile })) {
+      !== canonicalJson(profileDescriptor(profile, capsule.definition.runtime.config.temporalEvidence))) {
     throw new Error('run capsule policy profile is absent or inconsistent');
   }
   if (capsule.definition.experiment !== null && capsule.definition.experiment !== undefined) {
@@ -1115,6 +1122,7 @@ function verifyEffectiveConfig(actual, expected) {
     maxOuterTurns: positiveInteger(actual?.maxOuterTurns, 1000, 'maxOuterTurns'),
     stallWindow: positiveInteger(actual?.stallWindow, 8, 'stallWindow'),
     policyProfile: normalizePolicyProfile(actual?.policyProfile),
+    ...(resolveTemporalEvidenceContract(actual?.temporalEvidence) ? { temporalEvidence: resolveTemporalEvidenceContract(actual.temporalEvidence) } : {}),
     memorySurfaceLimit: boundedInteger(actual?.memorySurfaceLimit, 4, 0, 8, 'memorySurfaceLimit'),
     workspaceMode: String(actual?.workspaceMode || 'files-only'),
     workspacePythonTimeoutMs: positiveInteger(actual?.workspacePythonTimeoutMs, 10_000, 'workspacePythonTimeoutMs'),
@@ -1270,4 +1278,9 @@ function stableCompare(left, right) {
 
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function profileDescriptor(profile, temporalEvidence) {
+  const contract = resolveTemporalEvidenceContract(temporalEvidence);
+  return { requested: profile, effective: profile, ...(contract ? { temporalEvidenceSha256: temporalContractSha256(contract) } : {}) };
 }

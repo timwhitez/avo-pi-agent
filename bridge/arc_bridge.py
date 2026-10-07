@@ -13,6 +13,7 @@ redirected to stderr and filtered before any record is written.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -174,9 +175,7 @@ def total_levels_or_none(value: Any) -> int | None:
     return None
 
 
-def model_grid(raw_frame: Any) -> list[Any]:
-    """Expose the final frame from an official action's temporal sequence."""
-
+def frame_sequence(raw_frame: Any) -> list[Any]:
     frame = jsonable(raw_frame)
     if (
         isinstance(frame, list)
@@ -188,12 +187,94 @@ def model_grid(raw_frame: Any) -> list[Any]:
             for candidate in frame
         )
     ):
-        frame = frame[-1]
+        return frame
+    return [frame] if frame else []
+
+
+def model_grid(raw_frame: Any) -> list[Any]:
+    """Expose the final frame from an official action's temporal sequence."""
+    frames = frame_sequence(raw_frame)
+    frame = frames[-1] if frames else jsonable(raw_frame)
     if not isinstance(frame, list) or any(not isinstance(row, list) for row in frame):
         raise ValueError("ARC frame must be a two-dimensional grid or frame sequence")
     if any(any(isinstance(cell, (list, tuple, dict)) for cell in row) for row in frame):
         raise ValueError("ARC frame must not contain nested cells")
     return frame
+
+
+def temporal_context(value: Any, game_id: str) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"schema", "scope", "beforeEpisodeId", "intentRef"}:
+        raise ValueError("invalid temporal capture request")
+    scope = value.get("scope")
+    keys = {"runId", "versionedGameId", "gameId", "attemptId", "episodeId", "actionOrdinal"}
+    if value["schema"] != "avo.sdk-temporal-contract.v1" or not isinstance(scope, dict) or set(scope) != keys:
+        raise ValueError("unsupported temporal capture contract/scope")
+    if any(not isinstance(scope[k], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}", scope[k]) for k in keys - {"actionOrdinal"}):
+        raise ValueError("invalid temporal capture scope")
+    if scope["versionedGameId"] != game_id or type(scope["actionOrdinal"]) is not int or not 1 <= scope["actionOrdinal"] <= 9007199254740991:
+        raise ValueError("temporal capture scope mismatch")
+    if not re.fullmatch(r"episode-[0-9]{6,}", str(value["beforeEpisodeId"])) or (value["intentRef"] is not None and not re.fullmatch(r"evidence-[0-9]{6,}-[a-f0-9]{12}", str(value["intentRef"]))):
+        raise ValueError("invalid temporal capture linkage")
+    return value
+
+
+def temporal_grid(grid: Any) -> tuple[str, str, str]:
+    if not isinstance(grid, list) or not 1 <= len(grid) <= 64 or not isinstance(grid[0], list) or not 1 <= len(grid[0]) <= 64:
+        raise ValueError("FRAME_SHAPE")
+    if any(not isinstance(row, list) or len(row) != len(grid[0]) or any(type(cell) is not int or abs(cell) > 9007199254740991 for cell in row) for row in grid):
+        raise ValueError("FRAME_CELLS")
+    source = json.dumps(grid, separators=(",", ":"))
+    if len(source) > 65536:
+        raise ValueError("FRAME_SOURCE_LIMIT")
+    source_hash = hashlib.sha256(source.encode()).hexdigest()
+    content_hash = hashlib.sha256(json.dumps({"schema": "avo.grid-content.v1", "frame": grid}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return source, source_hash, content_hash
+
+
+def capture_temporal_frames(raw_frame: Any, context: dict) -> dict:
+    frames = frame_sequence(raw_frame)
+    count = len(frames)
+    captured = []
+    reasons = []
+    source_bytes = 0
+    final = None
+    if count:
+        try:
+            source, source_hash, content_hash = temporal_grid(frames[-1])
+            source_bytes = len(source)
+            final = {"index": count - 1, "source": "response.frame", "sourceSha256": source_hash, "gridContentHash": content_hash}
+        except ValueError as error:
+            reasons.append(str(error))
+        for index in range(count - 1):
+            if len(captured) >= 31:
+                reasons.append("ACTION_FRAME_LIMIT")
+                break
+            try:
+                source, source_hash, content_hash = temporal_grid(frames[index])
+                if source_bytes + len(source) > 262144:
+                    raise ValueError("ACTION_SOURCE_LIMIT")
+            except ValueError as error:
+                reasons.append(str(error))
+                break
+            source_bytes += len(source)
+            captured.append({"index": index, "grid": frames[index], "sourceSha256": source_hash, "gridContentHash": content_hash})
+    else:
+        reasons.append("SDK_EMPTY")
+    omitted = []
+    if len(captured) < max(0, count - 1):
+        omitted.append([len(captured), count - 1])
+    if count and final is None:
+        omitted.append([count - 1, count])
+    return {
+        "schema": "avo.sdk-temporal-capture.v1", "scope": context["scope"],
+        "intentRef": context["intentRef"], "beforeEpisodeId": context["beforeEpisodeId"],
+        "sdkReturned": {"status": "known", "frameCount": count, "finalFrameIndex": count - 1 if count else None},
+        "status": "complete" if count and not omitted else "partial" if captured or final else "unavailable",
+        "reasons": reasons, "frames": captured, "finalFrame": final,
+        "omittedRanges": omitted, "sourceBytes": source_bytes,
+    }
 
 
 def serialize_frame(raw: Any) -> dict[str, Any]:
@@ -392,6 +473,7 @@ def main() -> int:
                 key = resolve_environment_key(request, open_environments)
                 target = resolve_environment(request, open_environments)
                 lifecycle = environment_lifecycles[key]
+                capture = temporal_context(request.get("temporal_capture"), open_environments[key][1])
                 if command == "step" and is_episode_terminal(lifecycle.get("state")):
                     raise ValueError(
                         "EPISODE_TERMINAL: gameplay step rejected; use reset or finish"
@@ -409,7 +491,10 @@ def main() -> int:
                     if command == "step"
                     else target.step(action, data=data, reasoning=reasoning)
                 )
+                temporal = capture_temporal_frames(getattr(raw, "frame", []), capture) if capture else None
                 frame = serialize_frame(raw)
+                if temporal is not None:
+                    frame["temporal_evidence"] = temporal
                 lifecycle["state"] = str(frame["state"])
                 response = {"ok": True, "frame": frame}
             elif command == "lifecycle":

@@ -14,6 +14,7 @@ import {
   policyUsesStrategy,
 } from './policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { TEMPORAL_READ_TOOL, resolveTemporalEvidenceContract, validateTemporalScope, temporalContractSha256, temporalReadError } from './temporal-evidence.mjs';
 import { WorkspaceSandbox } from './workspace.mjs';
 import { TRAJECTORY_EVIDENCE_SCHEMA } from './evidence-store.mjs';
 import {
@@ -53,20 +54,20 @@ const ACTION_EXPECTATION_SCHEMA = {
   },
 };
 
-export function effectiveAvoTools(workspaceMode = 'files-only', policyProfile) {
+export function effectiveAvoTools(workspaceMode = 'files-only', policyProfile, temporalEvidence) {
   return filterToolsForPolicy(
-    SEALED_AVO_TOOLS,
+    resolveTemporalEvidenceContract(temporalEvidence)?.mode === 'capture-read' ? [...SEALED_AVO_TOOLS, TEMPORAL_READ_TOOL] : SEALED_AVO_TOOLS,
     workspaceMode,
     policyProfile,
   );
 }
 
-export function effectiveAvoToolNames(workspaceMode = 'files-only', policyProfile) {
-  return effectiveAvoTools(workspaceMode, policyProfile).map((tool) => tool.name);
+export function effectiveAvoToolNames(workspaceMode = 'files-only', policyProfile, temporalEvidence) {
+  return effectiveAvoTools(workspaceMode, policyProfile, temporalEvidence).map((tool) => tool.name);
 }
 
-export function effectiveAvoToolContract(workspaceMode = 'files-only', policyProfile) {
-  return policyToolContract(effectiveAvoTools(workspaceMode, policyProfile));
+export function effectiveAvoToolContract(workspaceMode = 'files-only', policyProfile, temporalEvidence) {
+  return policyToolContract(effectiveAvoTools(workspaceMode, policyProfile, temporalEvidence));
 }
 
 export class AvoArcAgent {
@@ -75,6 +76,9 @@ export class AvoArcAgent {
     this.environment = environment;
     this.loop = loop;
     this.config = config;
+    this.temporalEvidence = resolveTemporalEvidenceContract(config.temporalEvidence);
+    if (this.temporalEvidence) validateTemporalScope({ runId: config.runId, versionedGameId: config.versionedGameId, gameId,
+      attemptId: 'attempt-000001', episodeId: 'episode-000001', actionOrdinal: 1 });
     const levelBudgets = config.perLevelBudgets ?? [];
     if (!Array.isArray(levelBudgets) || levelBudgets.some((budget) => !Number.isSafeInteger(budget) || budget < 1)) {
       throw new Error('perLevelBudgets must be an array of positive integers');
@@ -138,6 +142,7 @@ export class AvoArcAgent {
       ? await this.environment.start()
       : await this.environment.observe();
     this.frame = this.adoptFrame(raw);
+    if (this.temporalEvidence && this.frame.gameId !== this.config.versionedGameId) throw new Error('temporal initial observation version differs from opened game');
     this.executionGuids.push(this.frame.guid);
     const evidence = this.recordEvidence({ type: 'initial-observation', frame: this.frame });
     this.uniqueStates.add(evidence.observationContentHash);
@@ -199,6 +204,11 @@ export class AvoArcAgent {
     let anchor;
     return {
       ...this.runtimeStatusCore(),
+      ...(this.temporalEvidence?.mode === 'capture-read' ? { temporalHistory: {
+        recovery: { tool: 'trajectory_frames_read', arguments: { view: 'actions', startSequence: 1, limit: 1 } },
+        latestActionRef: this.evidenceLedger.findLast((e) => e.temporalEvidence)?.id ?? null,
+        latestCaptureStatus: this.evidenceLedger.findLast((e) => e.temporalEvidence)?.temporalEvidence.status ?? 'none',
+      } } : {}),
       get currentObservation() {
         if (anchor === undefined) anchor = agent.currentObservationAnchor();
         return anchor;
@@ -681,7 +691,27 @@ export class AvoArcAgent {
           return this.toolResult('Run finished.', { summary }, true);
         },
       },
+      ...(this.temporalEvidence?.mode === 'capture-read' ? [{ ...TEMPORAL_READ_TOOL, execute: async (input) => this.readTemporalFrames(input) }] : []),
     ];
+  }
+
+  temporalCaptureContext(action, data, kind) {
+    if (!this.temporalEvidence) return undefined;
+    const input = { scope: { runId: this.config.runId, versionedGameId: this.config.versionedGameId, gameId: this.gameId,
+      attemptId: this.attemptId, episodeId: `episode-${String(this.episodeSequence + (kind === 'reset' ? 1 : 0)).padStart(6, '0')}`, actionOrdinal: this.actions + 1 },
+      beforeEpisodeId: this.episodeId(), action, data, kind, beforeObservationId: this.currentObservationId };
+    return this.temporalArchive?.recordIntent(input) ?? { schema: this.temporalEvidence.schema, scope: input.scope,
+      beforeEpisodeId: input.beforeEpisodeId, intentRef: null, captureFailure: 'ARCHIVE_UNAVAILABLE' };
+  }
+
+  readTemporalFrames(input) {
+    let value;
+    try {
+      if (!this.temporalArchive) throw Object.assign(new Error('archive unavailable'), { code: 'ARCHIVE_UNAVAILABLE' });
+      value = this.temporalArchive.read(input, { parents: this.evidenceLedger, attemptId: this.attemptId, B: this.toolResultMaxChars });
+    } catch (error) { value = temporalReadError(error, this.toolResultMaxChars); }
+    const { chunk, actions, frames, ...metadata } = value;
+    return this.toolResult(JSON.stringify(value), { ...value, contextExactEvidence: false, temporalView: metadata });
   }
 
   async act({ action, x, y, reasoning = '' } = {}, trace = null) {
@@ -717,10 +747,11 @@ export class AvoArcAgent {
     let phase = 'environment';
     try {
       if (trace) trace.phase = phase;
-      const raw = await this.environment.step(action, data, { text: reasoning });
+      const temporalContext = this.temporalCaptureContext(action, data, 'gameplay');
+      const raw = await (temporalContext ? this.environment.step(action, data, { text: reasoning }, temporalContext) : this.environment.step(action, data, { text: reasoning }));
       phase = 'transition';
       if (trace) trace.phase = phase;
-      const result = this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay' });
+      const result = this.acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind: 'gameplay', temporalContext });
       if (trace) trace.phase = 'complete';
       return result;
     } catch (error) {
@@ -862,7 +893,8 @@ export class AvoArcAgent {
     const previousFrame = this.frame;
     let phase = 'environment';
     try {
-      const raw = await this.environment.reset({ text: rationale });
+      const temporalContext = this.temporalCaptureContext('RESET', {}, 'reset');
+      const raw = await (temporalContext ? this.environment.reset({ text: rationale }, temporalContext) : this.environment.reset({ text: rationale }));
       phase = 'transition';
       return this.acceptEnvironmentTransition({
         raw,
@@ -871,6 +903,7 @@ export class AvoArcAgent {
         data: {},
         reasoning: rationale,
         kind: 'reset',
+        temporalContext,
       });
     } catch (error) {
       this.finished = true;
@@ -879,7 +912,7 @@ export class AvoArcAgent {
     }
   }
 
-  acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind }) {
+  acceptEnvironmentTransition({ raw, previousFrame, action, data, reasoning, kind, temporalContext }) {
     const previousLevel = this.currentLevel;
     this.previousFrame = previousFrame;
     this.frame = this.adoptFrame(raw);
@@ -908,6 +941,7 @@ export class AvoArcAgent {
       beforeFrame: previousFrame,
       frame: this.frame,
       levelDelta: objectiveLevelDelta,
+      ...(this.temporalEvidence ? { temporalContext, temporalCapture: raw?.temporal_evidence } : {}),
     });
     const wasNew = !this.uniqueStates.has(evidence.observationContentHash);
     this.uniqueStates.add(evidence.observationContentHash);
@@ -942,6 +976,7 @@ export class AvoArcAgent {
         ok: true,
         frame: this.frame,
         evidenceRef: evidence.id,
+        ...(evidence.temporalEvidence ? { temporalEvidence: evidence.temporalEvidence } : {}),
         contextExactEvidence: false,
         observationView: this.observationView(formatted.representation),
         progressed,
@@ -1155,6 +1190,8 @@ export class AvoArcAgent {
     data = {},
     reasoning = '',
     levelDelta = 0,
+    temporalContext,
+    temporalCapture,
   }) {
     this.evidenceSequence += 1;
     const afterIdentity = observationIdentity(frame, {
@@ -1208,6 +1245,11 @@ export class AvoArcAgent {
       fullReset: Boolean(frame?.fullReset),
       episodeId: this.episodeId(),
       createdAt: new Date().toISOString(),
+      ...(temporalContext ? { temporalEvidence: this.temporalArchive?.captureAction({ context: temporalContext, capture: temporalCapture, frame,
+        afterObservationId: afterIdentity.episodeObservationId }) ?? {
+        schema: 'avo.sdk-temporal-ref.v1', contractSha256: temporalContractSha256(this.temporalEvidence), manifestRef: null, manifestDigest: null,
+        status: 'unavailable', sdkFrameCount: null, savedFrameCount: 0, savedRanges: [], omittedRanges: [], reasons: ['ARCHIVE_UNAVAILABLE'],
+      } } : {}),
     };
     const digest = crypto.createHash('sha256').update(JSON.stringify(core)).digest('hex');
     const event = Object.freeze({
@@ -1386,7 +1428,7 @@ export class AvoArcAgent {
   exposedTools() {
     const tools = filterToolsForPolicy(this.tools(), this.workspace.mode, this.policyProfile);
     if (canonicalJson(policyToolContract(tools)) !== canonicalJson(
-      effectiveAvoToolContract(this.workspace.mode, this.policyProfile),
+      effectiveAvoToolContract(this.workspace.mode, this.policyProfile, this.temporalEvidence),
     )) {
       throw new Error('runtime tool contract differs from the sealed production policy profile');
     }
@@ -1421,9 +1463,12 @@ export class AvoArcAgent {
       productionToolContract: effectiveAvoToolContract(
         this.workspace.mode,
         this.policyProfile,
+        this.temporalEvidence,
       ),
       workspaceMode: this.workspace.mode,
       policyProfile: this.policyProfile,
+      ...(this.temporalEvidence ? { temporalEvidence: this.temporalEvidence } : {}),
+      ...(this.temporalEvidence ? { temporalScope: { runId: this.config.runId, versionedGameId: this.config.versionedGameId } } : {}),
       toolResultMaxChars: this.toolResultMaxChars,
       initialPrompt,
       shouldStop: () => this.isDone(),
@@ -1464,6 +1509,7 @@ export class AvoArcAgent {
       memoryClaimsSurfaced: this.memoryClaimsSurfaced,
       episodeId: this.episodeId(),
       trajectoryEvidence: this.trajectoryEvidence(),
+      ...(this.temporalArchive ? { temporalEvidence: this.temporalArchive.summary(this.evidenceLedger, this.attemptId) } : {}),
       objective: this.objectiveState(),
       won: isWin(this.frame),
       loop: this.loop.kind,
@@ -1613,6 +1659,7 @@ function trajectoryView(event, part) {
     levelDelta: event.levelDelta,
     fullReset: event.fullReset,
     createdAt: event.createdAt,
+    ...(event.temporalEvidence ? { temporalEvidence: event.temporalEvidence } : {}),
   };
 }
 

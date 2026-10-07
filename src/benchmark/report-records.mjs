@@ -1,6 +1,7 @@
 import { REPORT_LIMITS } from './report-safe-files.mjs';
 import { deriveActionBudget } from '../arc/action-budget.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { normalizeTemporalSummary, aggregateTemporalSummaries } from '../core/temporal-evidence.mjs';
 import {
   aggregateMechanismMetrics,
   normalizeMechanismMetrics,
@@ -244,6 +245,7 @@ export function normalizeGameRecord(value, sourcePath = '$') {
     loop: optionalString(value.loop, 'loop', sourcePath),
     executions,
     trajectoryEvidence,
+    ...(value.temporalEvidence === undefined ? {} : { temporalEvidence: normalizeTemporalSummary(value.temporalEvidence) }),
     mechanismMetrics,
     actionBudget,
     outerTurnBudget,
@@ -524,11 +526,13 @@ export function aggregateAttemptTelemetry(attempts) {
       throw new Error(`attempt ${index + 1} episodeId is inconsistent with resets`);
     }
   }
+  const temporalEvidence = aggregateTemporalSummaries(attempts.map((attempt) => attempt.temporalEvidence));
   const mechanismMetrics = aggregateMechanismMetrics(attempts.map((attempt) => attempt.mechanismMetrics));
   return Object.freeze({
     ...totals,
     episodeId: `episode-${String(totals.resets + 1).padStart(6, '0')}`,
     ...(mechanismMetrics ? { mechanismMetrics } : {}),
+    ...(temporalEvidence ? { temporalEvidence } : {}),
   });
 }
 

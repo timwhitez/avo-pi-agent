@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 
 import { normalizeActionSequence, normalizeJournalRead, normalizeMemoryRead } from '../core/bounded-read.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { normalizeTemporalRead } from '../core/temporal-evidence.mjs';
 
 // Shared schemas and bounded builders for audit receipts (#344, #346). The
 // selector builders reuse the same pure parameter normalizers the tools run
@@ -49,6 +50,7 @@ function identifier(value) {
 // selector. Unknown, oversized or non-scalar values make the selector
 // incomplete, and incomplete selectors never prove two requests equal.
 const SELECTORS = {
+  trajectory_frames_read: normalizeTemporalRead,
   // trajectory_read effective view mirrors readTrajectory: a ref selects
   // exact-ref mode, so the summary pagination defaults never apply there.
   trajectory_read(params) {
@@ -214,6 +216,7 @@ export function buildToolReceipt({
       }
       : null,
     readEnvelope,
+    ...(details?.temporalView ? { temporalView: details.temporalView } : {}),
     retention: { bodyAvailable: false, bodyRef: null, omissionReason: 'receipts carry digests, not bodies' },
   });
 }
@@ -384,7 +387,7 @@ export function buildExecutionTerminal({
 // --- #345 phase 1: read visibility (observation only) -----------------------
 export const READ_VISIBILITY_SCHEMA = 'avo.read-visibility.v1';
 export const LOOP_TERMINATION_SCHEMA = 'avo.loop-termination.v1';
-export const READ_TOOLS = new Set(['trajectory_read', 'memory_read', 'journal_read', 'observe', 'knowledge_read', 'workspace_read', 'workspace_list']);
+export const READ_TOOLS = new Set(['trajectory_read', 'trajectory_frames_read', 'memory_read', 'journal_read', 'observe', 'knowledge_read', 'workspace_read', 'workspace_list']);
 
 // The content version of what a read returned, with its domain: the record's
 // own version when the tool reports one, else the observation payload, else
@@ -725,6 +728,11 @@ export function buildLoopTermination({ scope, terminationReason, noActionInnerTu
  * the Agent's attemptId) to an adapter receipt and re-applies the byte bound.
  */
 export function bindCliReceipt(receipt, { runId = null, versionedGameId = null, cliAttempt = null } = {}) {
+  if (receipt.temporalView) for (const scope of [receipt.scope, receipt.resultScope, receipt.temporalView.scope]) {
+    if (scope && ((scope.runId != null && scope.runId !== runId) || (scope.versionedGameId != null && scope.versionedGameId !== versionedGameId))) {
+      throw new Error('temporal receipt scope contradicts CLI run/version binding');
+    }
+  }
   return bound({
     ...receipt,
     scope: { ...auditScope(receipt.scope ?? {}), runId: identifier(runId), versionedGameId: identifier(versionedGameId) },
