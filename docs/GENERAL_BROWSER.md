@@ -209,3 +209,12 @@ the recorded absolute installation/run paths, then remove only that private
 `.venv-browser` and any selected general run/short-temp artifacts. Preserve ARC
 `.venv`, system Chrome, cached Playwright and unrelated runs. Uninstall is an
 explicit operator action; run/doctor never deletes an installation.
+
+Final implementation validation at `ad7375c`: the requested single full run had
+860 tests, 845 pass, 15 fail, zero skips in 617.486 s. All 29 new tests passed.
+Existing failures remain unclassified: isolated owned-run 11/13 (30.395 s),
+owned-workspace 3/5 (41.697 s), public-runner 0/1 (99.495 s); isolated native
+container-owner passed 8/8 (26.637 s). Existing deadlines/concurrency were not
+changed, and the full suite was not rerun. Secret scan passed; offline demo won
+25/25 synthetic games (those two commands were not separately timed). The PR
+is draft because the full gate remains red; this is not a #383 resolution.
