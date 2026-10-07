@@ -8,6 +8,7 @@ import {
 } from '../core/policy-profile.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
 import { resolveToolResultMaxChars } from '../core/bounded-read.mjs';
+import { resolveTemporalEvidenceContract } from '../core/temporal-evidence.mjs';
 import {
   assertProviderCapabilities,
   providerCapabilityDigest,
@@ -465,7 +466,17 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       productionToolContract,
       toolResultMaxChars: initializedToolResultMaxChars,
       currentObservationRequired = false,
+      temporalEvidence: initializedTemporalEvidence,
+      temporalScope: initializedTemporalScope,
     }) {
+      const temporalEvidence = resolveTemporalEvidenceContract(config.temporalEvidence);
+      if (canonicalJson(initializedTemporalEvidence ?? null) !== canonicalJson(temporalEvidence ?? null)
+          || tools.some((tool) => tool.name === 'trajectory_frames_read') !== (temporalEvidence?.mode === 'capture-read')) {
+        throw new Error('Pi temporal capability differs from initialized tools/configuration');
+      }
+      if (temporalEvidence && initializedPolicyProfile && canonicalJson(initializedTemporalScope) !== canonicalJson({ runId: config.runId, versionedGameId: config.versionedGameId })) {
+        throw new Error('Pi temporal source scope differs from initialized agent');
+      }
       if (typeof runtimeStatus !== 'function') {
         throw new Error('Pi production loop requires a runtimeStatus callback');
       }
@@ -528,7 +539,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       const receiptScope = () => {
         try {
           const anchor = runtimeStatus()?.currentObservation;
-          return anchor ? { gameId: anchor.gameId, attemptId: anchor.attemptId, episodeId: anchor.episodeId } : {};
+          return anchor ? { gameId: anchor.gameId, attemptId: anchor.attemptId, episodeId: anchor.episodeId,
+            ...(temporalEvidence ? { runId: config.runId, versionedGameId: config.versionedGameId } : {}) } : {};
         } catch {
           return {};
         }
@@ -597,7 +609,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           }
           const receipt = emitReceipt(receiptState, () => buildToolReceipt({
             scope: callScope,
-            resultScope: ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope,
+            resultScope: details.temporalView?.scope ?? (ENVIRONMENT_TOOLS.has(tool.name) ? receiptScope() : callScope),
             toolCallId: callId,
             toolName: tool.name,
             startSequence,
@@ -654,7 +666,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         });
         runTelemetry.receipts.pendingPrepared = preparedVisibility(bounded, {
           anchor: status.anchor,
-          scope: status.anchor ? { gameId: status.anchor.gameId, attemptId: status.anchor.attemptId, episodeId: status.anchor.episodeId } : {},
+          scope: temporalEvidence ? receiptScope() : status.anchor ? { gameId: status.anchor.gameId, attemptId: status.anchor.attemptId, episodeId: status.anchor.episodeId } : {},
           selectors: runTelemetry.receipts.selectors,
         });
         // streamSimple estimates this view again when choosing the output cap.
@@ -961,7 +973,7 @@ export function recordPiLifecycleTelemetry(telemetry, event) {
 
 function countToolCall(telemetry, name) {
   telemetry.toolCalls += 1;
-  if (name === 'observe' || name === 'trajectory_read') telemetry.evidenceRetrievals += 1;
+  if (name === 'observe' || name === 'trajectory_read' || name === 'trajectory_frames_read') telemetry.evidenceRetrievals += 1;
   if (name === 'memory_read' || name === 'memory_update') telemetry.memoryCalls += 1;
   if (name === 'journal_read' || name === 'hypothesis_propose' || name === 'hypothesis_evaluate') {
     telemetry.journalCalls += 1;
@@ -1312,14 +1324,16 @@ function positiveEnvInt(name, fallback) {
   return parsed;
 }
 
-export function runtimeStatusTemplate(policyProfile) {
-  return normalizePolicyProfile(policyProfile) === 'minimal-v1'
+export const TEMPORAL_STATUS_SUFFIX = '\ntemporal_history_recovery={temporalRecovery}\ntemporal_latest_action_ref={temporalLatestActionRef}\ntemporal_latest_capture_status={temporalLatestCaptureStatus}';
+export function runtimeStatusTemplate(policyProfile, temporalEvidence) {
+  const base = normalizePolicyProfile(policyProfile) === 'minimal-v1'
     ? MINIMAL_RUNTIME_STATUS_TEMPLATE
     : RUNTIME_STATUS_TEMPLATE;
+  return base + (resolveTemporalEvidenceContract(temporalEvidence)?.mode === 'capture-read' ? TEMPORAL_STATUS_SUFFIX : '');
 }
 
-export function runtimeStatusTemplateSha256(policyProfile) {
-  return crypto.createHash('sha256').update(runtimeStatusTemplate(policyProfile)).digest('hex');
+export function runtimeStatusTemplateSha256(policyProfile, temporalEvidence) {
+  return crypto.createHash('sha256').update(runtimeStatusTemplate(policyProfile, temporalEvidence)).digest('hex');
 }
 
 export function legacyRuntimeStatusTemplateSha256(policyProfile) {
@@ -1365,6 +1379,10 @@ export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policy
       .replace('{observationSha256}', () => anchor.payloadSha256)
       .replace('{observationRecovery}', () => recoveryText(anchor.recovery));
   }
+  if (status?.temporalHistory) text += TEMPORAL_STATUS_SUFFIX
+    .replace('{temporalRecovery}', () => JSON.stringify(status.temporalHistory.recovery))
+    .replace('{temporalLatestActionRef}', () => status.temporalHistory.latestActionRef ?? 'none')
+    .replace('{temporalLatestCaptureStatus}', () => status.temporalHistory.latestCaptureStatus ?? 'none');
   return { text, value, anchor: anchor ?? null };
 }
 
@@ -1437,14 +1455,15 @@ function injectRuntimeStatus(messages, {
   onEvent,
   timestamp,
 }) {
-  const status = runtimeStatusMessage(runtimeStatus(), {
+  const snapshot = runtimeStatus();
+  const status = runtimeStatusMessage(snapshot, {
     outerTurns,
     maxOuterTurns,
     policyProfile,
   });
   onEvent({
     type: 'avo_runtime_status',
-    templateSha256: status.anchor ? runtimeStatusTemplateSha256(policyProfile) : legacyRuntimeStatusTemplateSha256(policyProfile),
+    templateSha256: status.anchor ? runtimeStatusTemplateSha256(policyProfile, snapshot.temporalHistory ? 'capture-read' : undefined) : legacyRuntimeStatusTemplateSha256(policyProfile),
     status: status.value,
     currentObservationRef: status.anchor?.observationRef ?? null,
     currentAnchorVerified: status.anchor !== null,

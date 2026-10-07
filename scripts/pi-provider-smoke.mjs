@@ -53,7 +53,7 @@ try {
     },
   });
   const state = { observed: false, done: false };
-  const tools = effectiveAvoTools(config.workspaceMode, config.policyProfile)
+  const tools = effectiveAvoTools(config.workspaceMode, config.policyProfile, config.temporalEvidence)
     .map((tool) => ({
       ...tool,
       async execute(params = {}) {
@@ -101,6 +101,7 @@ try {
     systemPrompt: 'You are a protocol diagnostic. Call observe exactly once. Read continuation_nonce from its large result, then call finish exactly once with that nonce as the exact summary. Do not call another tool.',
     initialPrompt: 'Perform the two required production-schema tool calls now.',
     tools,
+    ...(config.temporalEvidence ? { temporalEvidence: config.temporalEvidence } : {}),
     shouldStop: () => state.done,
     runtimeStatus: () => ({
       state: state.done ? 'WIN' : 'ACTIVE',

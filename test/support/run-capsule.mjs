@@ -11,6 +11,7 @@ import { effectivePiSystemPrompt, runtimeStatusTemplateSha256 } from '../../src/
 import { evaluateScorecardCoverage, normalizeScorecardSnapshot } from '../../src/benchmark/scorecard-evidence.mjs';
 import { providerCapabilityDigest } from '../../src/provider-capabilities.mjs';
 import { providerCapabilities } from './provider.mjs';
+import { temporalContractSha256 } from '../../src/core/temporal-evidence.mjs';
 
 const ARC_RUNTIME = Object.freeze({
   arcAgiVersion: '0.9.9',
@@ -31,17 +32,18 @@ export function workspaceAttestationFixture(config = {}) {
   const policyProfile = String(config.policyProfile || 'current-v1');
   const isolated = mode === 'isolated-python';
   return Object.freeze({
-    schema: 'avo.workspace-capability.v2',
+    schema: config.temporalEvidence ? 'avo.workspace-capability.v3' : 'avo.workspace-capability.v2',
     requested: {
       mode,
       policyProfile,
+      ...(config.temporalEvidence ? { temporalEvidence: config.temporalEvidence } : {}),
       containerRuntime: isolated ? String(config.workspaceContainerRuntime || 'docker') : null,
       containerImage: isolated ? String(config.workspaceContainerImage || 'python:3.12-slim') : null,
     },
     effective: {
       mode,
       policyProfile,
-      enabledTools: effectiveAvoToolNames(mode, policyProfile),
+      enabledTools: effectiveAvoToolNames(mode, policyProfile, config.temporalEvidence),
       container: isolated ? {
         runtimeVersionSha256: 'a'.repeat(64),
         imageId: `sha256:${'b'.repeat(64)}`,
@@ -334,25 +336,25 @@ function privateRunCapsuleFixture({
       dirtyStateSha256: '4'.repeat(64),
     },
     components: { files: components, setSha256: digest(components) },
-    policyProfile: { requested: policyProfile, effective: policyProfile },
+    policyProfile: { requested: policyProfile, effective: policyProfile, ...(source?.temporalEvidence ? { temporalEvidenceSha256: temporalContractSha256(source.temporalEvidence) } : {}) },
     prompts: {
       systemSha256: digestText(effectivePiSystemPrompt(policySystemPrompt(policyProfile), 'files-only')),
       developerPresent: false,
       developerSha256: null,
       initialTemplateSha256: digest({ policyProfile, renderer: policyInitialPrompt.toString() }),
-      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile),
+      runtimeStatusTemplateSha256: runtimeStatusTemplateSha256(policyProfile, source?.temporalEvidence),
       compactionNoticeTemplateSha256: '6'.repeat(64),
       ...source?.prompts,
     },
     tools: {
       schemaSha256: digest(toolContract),
       providerSchemaSha256: providerToolSchemaSha256,
-      enabled: effectiveAvoToolNames('files-only', policyProfile),
+      enabled: effectiveAvoToolNames('files-only', policyProfile, source?.temporalEvidence),
       executionMode: 'sequential',
     },
     workspaceCapability: {
-      sha256: digest(workspaceAttestationFixture({ policyProfile })),
-      attestation: workspaceAttestationFixture({ policyProfile }),
+      sha256: digest(workspaceAttestationFixture({ policyProfile, ...(source?.temporalEvidence ? { temporalEvidence: source.temporalEvidence } : {}) })),
+      attestation: workspaceAttestationFixture({ policyProfile, ...(source?.temporalEvidence ? { temporalEvidence: source.temporalEvidence } : {}) }),
     },
     transcript: {
       policySha256: 'b'.repeat(64),
@@ -428,6 +430,7 @@ function privateRunCapsuleFixture({
         stallWindow: 8,
         memorySurfaceLimit: 4,
         policyProfile,
+        ...(source?.temporalEvidence ? { temporalEvidence: source.temporalEvidence } : {}),
         workspaceMode: 'files-only',
         workspacePythonTimeoutMs: 10_000,
         workspaceContainerRuntime: 'docker',

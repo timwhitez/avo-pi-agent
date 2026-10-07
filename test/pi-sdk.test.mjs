@@ -155,7 +155,11 @@ test('Pi SDK adapter registers a Responses provider and TypeBox-compatible tools
     fs.mkdirSync(path.join(root, 'src', 'trajectory'), { recursive: true });
     fs.copyFileSync('src/trajectory/audit-events.mjs', path.join(root, 'src', 'trajectory', 'audit-events.mjs'));
     fs.copyFileSync('src/core/policy-profile.mjs', path.join(root, 'src', 'core', 'policy-profile.mjs'));
-  fs.copyFileSync('src/core/bounded-read.mjs', path.join(root, 'src', 'core', 'bounded-read.mjs'));
+    fs.copyFileSync('src/core/bounded-read.mjs', path.join(root, 'src', 'core', 'bounded-read.mjs'));
+    for (const file of ['src/core/temporal-evidence.mjs', 'src/core/evidence-store.mjs', 'src/core/evidence-lock.mjs', 'src/local/regular-file-evidence.mjs', 'src/local/authority-directory.mjs', 'src/benchmark/report-safe-files.mjs']) {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.copyFileSync(file, path.join(root, file));
+    }
     const module = await import(`${pathToFileURL(path.join(root, 'src', 'loop', 'pi-sdk.mjs')).href}?test=${Date.now()}`);
     const events = [];
     const loop = await module.createPiSdkLoop({

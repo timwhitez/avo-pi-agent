@@ -8,6 +8,7 @@ import { effectiveAvoToolNames } from '../core/avo-agent-base.mjs';
 import { normalizePolicyProfile } from '../core/policy-profile.mjs';
 import { containerCliEnv, WorkspaceSandbox } from '../core/workspace.mjs';
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { resolveTemporalEvidenceContract } from '../core/temporal-evidence.mjs';
 
 export const WORKSPACE_CAPABILITY_SCHEMA = 'avo.workspace-capability.v2';
 const MODES = new Set(['disabled', 'files-only', 'isolated-python']);
@@ -87,10 +88,10 @@ export async function attestWorkspaceCapability(config, {
   env = process.env,
 } = {}) {
   const requested = workspaceRequest(config);
-  const enabledTools = effectiveAvoToolNames(requested.mode, requested.policyProfile);
+  const enabledTools = effectiveAvoToolNames(requested.mode, requested.policyProfile, requested.temporalEvidence);
   if (requested.mode !== 'isolated-python') {
     return deepFreeze({
-      schema: WORKSPACE_CAPABILITY_SCHEMA,
+      schema: requested.temporalEvidence ? 'avo.workspace-capability.v3' : WORKSPACE_CAPABILITY_SCHEMA,
       requested,
       effective: {
         mode: requested.mode,
@@ -162,7 +163,7 @@ export async function attestWorkspaceCapability(config, {
       throw new Error('isolated workspace preflight did not verify every isolation check');
     }
     const value = {
-      schema: WORKSPACE_CAPABILITY_SCHEMA,
+      schema: requested.temporalEvidence ? 'avo.workspace-capability.v3' : WORKSPACE_CAPABILITY_SCHEMA,
       requested,
       effective: {
         mode: requested.mode,
@@ -188,12 +189,14 @@ export async function attestWorkspaceCapability(config, {
 }
 
 export function validateWorkspaceCapabilityAttestation(value, { config = null } = {}) {
-  if (!value || value.schema !== WORKSPACE_CAPABILITY_SCHEMA || value.verified !== true
+  if (!value || ![WORKSPACE_CAPABILITY_SCHEMA, 'avo.workspace-capability.v3'].includes(value.schema) || value.verified !== true
       || !hasExactKeys(value, ['checks', 'effective', 'requested', 'schema', 'verified'])
-      || !hasExactKeys(value.requested, ['containerImage', 'containerRuntime', 'mode', 'policyProfile'])
+      || !hasExactKeys(value.requested, ['containerImage', 'containerRuntime', 'mode', 'policyProfile', ...(value.schema === 'avo.workspace-capability.v3' ? ['temporalEvidence'] : [])])
       || !hasExactKeys(value.effective, ['container', 'enabledTools', 'mode', 'policyProfile'])) {
     throw new Error('workspace capability attestation is absent or malformed');
   }
+  const temporalEvidence = resolveTemporalEvidenceContract(value.requested.temporalEvidence);
+  if ((value.schema === 'avo.workspace-capability.v3') !== Boolean(temporalEvidence)) throw new Error('workspace temporal schema differs from capability');
   const mode = String(value.requested?.mode || '');
   if (!MODES.has(mode) || value.effective?.mode !== mode) {
     throw new Error('workspace requested and effective modes differ');
@@ -203,7 +206,7 @@ export function validateWorkspaceCapabilityAttestation(value, { config = null } 
     throw new Error('workspace requested and effective policy profiles differ');
   }
   if (canonicalJson(value.effective?.enabledTools)
-      !== canonicalJson(effectiveAvoToolNames(mode, policyProfile))) {
+      !== canonicalJson(effectiveAvoToolNames(mode, policyProfile, temporalEvidence))) {
     throw new Error('workspace effective tool set differs from the initialized mode');
   }
   if (config) {
@@ -252,6 +255,7 @@ function workspaceRequest(config) {
   return Object.freeze({
     mode,
     policyProfile: normalizePolicyProfile(config?.policyProfile),
+    ...(resolveTemporalEvidenceContract(config?.temporalEvidence) ? { temporalEvidence: resolveTemporalEvidenceContract(config.temporalEvidence) } : {}),
     containerRuntime: mode === 'isolated-python'
       ? requiredLine(config?.workspaceContainerRuntime || 'docker', 'workspace container runtime')
       : null,

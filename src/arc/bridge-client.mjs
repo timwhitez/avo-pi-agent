@@ -290,12 +290,12 @@ export class ArcBridgeClient {
     return (await this.request({ command: 'observe' })).frame;
   }
 
-  async step(action, data = {}, reasoning = undefined) {
-    return (await this.request({ command: 'step', action, data, reasoning })).frame;
+  async step(action, data = {}, reasoning = undefined, temporalCapture = undefined) {
+    return (await this.request({ command: 'step', action, data, reasoning, ...capturePayload(temporalCapture) })).frame;
   }
 
-  async reset(reasoning = undefined) {
-    return (await this.request({ command: 'reset', reasoning })).frame;
+  async reset(reasoning = undefined, temporalCapture = undefined) {
+    return (await this.request({ command: 'reset', reasoning, ...capturePayload(temporalCapture) })).frame;
   }
 
   async lifecycle() {
@@ -330,11 +330,11 @@ export class ArcBridgeClient {
       async observe() {
         return (await client.request({ command: 'observe', handle: safeHandle })).frame;
       },
-      async step(action, data = {}, reasoning = undefined) {
-        return (await client.request({ command: 'step', action, data, reasoning, handle: safeHandle })).frame;
+      async step(action, data = {}, reasoning = undefined, temporalCapture = undefined) {
+        return (await client.request({ command: 'step', action, data, reasoning, handle: safeHandle, ...capturePayload(temporalCapture) })).frame;
       },
-      async reset(reasoning = undefined) {
-        return (await client.request({ command: 'reset', reasoning, handle: safeHandle })).frame;
+      async reset(reasoning = undefined, temporalCapture = undefined) {
+        return (await client.request({ command: 'reset', reasoning, handle: safeHandle, ...capturePayload(temporalCapture) })).frame;
       },
       async lifecycle() {
         return (await client.request({ command: 'lifecycle', handle: safeHandle })).lifecycle;
@@ -378,4 +378,10 @@ function positiveTimeout(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_REQUEST_TIMEOUT_MS;
   return Math.max(100, Math.min(Math.trunc(parsed), 30 * 60_000));
+}
+
+function capturePayload(context) {
+  if (!context) return {};
+  const { schema, scope, beforeEpisodeId, intentRef } = context;
+  return { temporal_capture: { schema, scope, beforeEpisodeId, intentRef } };
 }

@@ -109,6 +109,9 @@ async function listPublic() {
 
 async function runPublic(args) {
   const config = getRuntimeConfig();
+  if (config.temporalEvidence && !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$/.test(process.env.AVO_REAL_RUN_ID || '')) {
+    throw new Error('temporal capture requires an explicit unique AVO_REAL_RUN_ID before opening ARC');
+  }
   let workspaceAttestation = null;
   const selection = parseSelection(args);
   const results = [];
@@ -208,6 +211,7 @@ async function runPublic(args) {
         ?? deriveActionBudget(info, { hardCap: config.maxActions });
       const gameConfig = {
         ...config,
+        ...(config.temporalEvidence ? { runId: process.env.AVO_REAL_RUN_ID, versionedGameId } : {}),
         maxActions: actionBudget.total,
         perLevelBudgets: actionBudget.perLevelBudgets,
         maxOuterTurns: frozenBudget?.outerTurnBudget
@@ -235,6 +239,7 @@ async function runPublic(args) {
       const allowedToolNames = new Set(effectiveAvoToolNames(
         gameConfig.workspaceMode,
         gameConfig.policyProfile,
+        gameConfig.temporalEvidence,
       ));
       const onLoopEvent = (event) => {
         if (event.type === 'message_end' && event.message?.role === 'assistant'

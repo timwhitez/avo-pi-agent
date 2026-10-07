@@ -86,6 +86,53 @@ budget remaining). Hypothesis confirmation means
 prediction agreement with later evidence, not policy improvement. See
 [claim boundaries](docs/AVO_CONFORMANCE.md).
 
+## Optional SDK temporal evidence
+
+`AVO_SDK_TEMPORAL_EVIDENCE=off|capture|capture-read` defaults to `off` (also
+when absent). Off preserves the final-only bridge, tools, prompts, events and
+report fields, and creates no temporal archive. Enabled runs require an explicit
+unique `AVO_REAL_RUN_ID`; the actual opened versioned game binds every capture.
+`capture` saves bounded evidence without exposing another model tool.
+`capture-read` adds `trajectory_frames_read`: `actions` discovers main action
+refs; `index` lists saved SDK frame indexes; `frame` and `region` return exact
+canonical JSON chunks with executable `nextRequest` continuations.
+
+Only frames returned by an already legal action or RESET are captured. Reads
+make zero environment calls. The final observation remains the sole current
+anchor; intermediate frames are historical, with no invented lifecycle or score
+metadata. Admission is fixed to `allow-partial` in `avo.sdk-temporal-contract.v1`:
+quotas, unsupported grids or capture failures disclose exact saved/omitted ranges
+and reasons, and never replay an action. A prefix plus the final alias can be saved.
+
+| Frozen v1 boundary | Limit |
+| --- | --- |
+| Action/frame | 32 saved frame occurrences including final; rectangular safe-integer grids up to 64×64; 64 KiB canonical source/frame and 256 KiB/action |
+| Records | 48 KiB source/chunk (stored as ≤16,000-character pieces through EvidenceStore); 16 KiB capture metadata/manifest; 2 KiB parent pointer |
+| Unit, across attempts/restarts | 4,096 frames and capture actions; 32 MiB source; 48 MiB archive; 20,000 events, reserving 4 MiB and 10,240 events for controls |
+| Reads | 1,024 successful reservations and 1,048,576 characters/unit; ≤24,000 characters/read, further bounded by `toolResultMaxChars`; ≤8 index entries/page |
+| Recorder | 512 KiB/opt-in record, 64 MiB trace with a 4 KiB omission-marker reserve; capture summaries contain hashes/counts, no temporal pixels |
+
+The underlying EvidenceStore limits remain 128 KiB/event, 64 MiB/file and
+100,000 events. Archives live under private memory `evidence/temporal-v1/`,
+separate from the main action ledger. Archive creation commits a required
+read-allowance witness. It retains reservations even if their charge append fails;
+missing witnesses or charge suffixes disable reads instead of restoring quotas.
+Corrupt/missing evidence disables temporal access; verified final evidence stays
+in the main ledger. Recovery discovers earlier attempts in the same run/version;
+it does not restore SDK state or import another run's archive.
+
+Retention is the entire private run lifetime, with no automatic eviction or TTL.
+Existing operator cleanup of that private run also removes its temporal evidence.
+The run bound is the selected versioned-game count × 48 MiB. SDK-returned capture,
+archive manifest/parent pointer, tool receipt and prepared/wire receipt are
+separate witnesses; they establish neither model understanding nor ARC benefit.
+The same-commit experiment-v3 declaration supports `off → capture-read` and
+`capture → capture-read` using the existing two-arm validators. Its results retain
+run/game/arm-bound capture coverage and known archive/read resource subtotals;
+missing summaries or resource meters remain explicitly unknown. Paid experiments,
+real ARC and real provider validation remain separate and are **NOT_RUN** for
+this engineering change. Default stays off.
+
 ## Runs and evidence
 
 Managed runs own their processes and workspace containers. Use the UI or the

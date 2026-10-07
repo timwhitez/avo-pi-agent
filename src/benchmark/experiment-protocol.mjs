@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { actionBudgetPolicy, deriveGameBudgets } from '../arc/action-budget.mjs';
 import { effectiveAvoToolContract } from '../core/avo-agent-base.mjs';
+import { resolveTemporalEvidenceContract } from '../core/temporal-evidence.mjs';
 import { EvidenceStore, summarizeEvidenceEvents } from '../core/evidence-store.mjs';
 import {
   EPISODE_OBSERVATION_SCHEMA,
@@ -35,8 +36,10 @@ export { aggregateMechanismMetrics, normalizeMechanismMetrics } from './mechanis
 
 import {
   EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_PLAN_V3_SCHEMA,
   EXPERIMENT_RESULT_V3_SCHEMA,
   EXPERIMENT_RUN_V2_SCHEMA,
+  EXPERIMENT_RUN_V3_SCHEMA,
   EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
   assertExperimentCapsuleV2,
   assertExperimentEnvironmentV2,
@@ -52,8 +55,10 @@ import {
 
 export {
   EXPERIMENT_PLAN_V2_SCHEMA,
+  EXPERIMENT_PLAN_V3_SCHEMA,
   EXPERIMENT_RESULT_V3_SCHEMA,
   EXPERIMENT_RUN_V2_SCHEMA,
+  EXPERIMENT_RUN_V3_SCHEMA,
   EXPERIMENT_SOURCE_VERIFICATION_SCHEMA,
   buildSourceVerificationRecord,
   readSourceVerificationRecord,
@@ -95,11 +100,11 @@ const INCIDENT_METRICS = Object.freeze({
 
 export function sealExperimentPlan(definition) {
   const input = cloneRecord(definition, 'experiment plan definition');
-  const conditions = input.schema === EXPERIMENT_PLAN_V2_SCHEMA ? input.commonConditions : input.conditions;
+  const conditions = [EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_PLAN_V3_SCHEMA].includes(input.schema) ? input.commonConditions : input.conditions;
   if (conditions?.runtime && !Object.hasOwn(conditions.runtime, 'noToolContinuations')) {
     conditions.runtime.noToolContinuations = 3;
   }
-  if (input.schema === EXPERIMENT_PLAN_V2_SCHEMA) return sealExperimentPlanV2(input);
+  if ([EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_PLAN_V3_SCHEMA].includes(input.schema)) return sealExperimentPlanV2(input);
   requireExactKeys(input, [
     'arms', 'changedVariable', 'conditions', 'createdAt', 'execution',
     'experimentId', 'hypothesis', 'manifests', 'schema',
@@ -121,7 +126,7 @@ export function sealExperimentPlan(definition) {
 }
 
 export function validateExperimentPlan(value) {
-  if (value?.schema === EXPERIMENT_PLAN_V2_SCHEMA) return validateExperimentPlanV2(value);
+  if ([EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_PLAN_V3_SCHEMA].includes(value?.schema)) return validateExperimentPlanV2(value);
   const plan = cloneRecord(value, 'experiment plan');
   requireExactKeys(plan, [
     'arms', 'changedVariable', 'conditions', 'createdAt', 'execution',
@@ -223,7 +228,7 @@ export function loadExperimentRunFromEnvironment(env = process.env, { executionP
 }
 
 export function validateExperimentRunBinding(value) {
-  if (value?.schema === EXPERIMENT_RUN_V2_SCHEMA) return validateExperimentRunBindingV2(value);
+  if ([EXPERIMENT_RUN_V2_SCHEMA, EXPERIMENT_RUN_V3_SCHEMA].includes(value?.schema)) return validateExperimentRunBindingV2(value);
   const binding = cloneRecord(value, 'experiment run binding');
   requireExactKeys(binding, [
     'arm', 'changedVariable', 'conditionsSha256', 'experimentId', 'gitCommit',
@@ -265,6 +270,7 @@ export function assertExperimentEnvironment(run, {
     return assertExperimentEnvironmentV2(plan, run.binding, { provider, config, env, git, executionPolicy });
   }
   const binding = validateBindingForPlan(plan, run.binding);
+  if (resolveTemporalEvidenceContract(config?.temporalEvidence)) throw new Error('temporal capability requires typed experiment v3');
   return assertEnvironmentConditions(plan.conditions, binding.policyProfile, { provider, config, env, git });
 }
 

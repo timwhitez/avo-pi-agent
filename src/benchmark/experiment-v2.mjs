@@ -6,9 +6,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { canonicalJson } from '../local/canonical-json.mjs';
+import { TEMPORAL_CONTRACT_V1, resolveTemporalEvidenceContract, temporalContractSha256 } from '../core/temporal-evidence.mjs';
+import { runtimeStatusTemplateSha256 } from '../loop/pi-sdk.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
 import { effectiveAvoToolContract } from '../core/avo-agent-base.mjs';
 import { normalizeMechanismMetrics } from './mechanism-metrics.mjs';
+import { normalizeGameRecord } from './report-records.mjs';
 import { evaluatePublicRunCapsule } from './run-capsule-authority.mjs';
 import { productionProviderToolSchemaDigest, validateRunCapsule } from './run-capsule.mjs';
 import { projectPublicRunCapsule } from './run-capsule-public.mjs';
@@ -28,6 +31,10 @@ import { experimentIdentitySha256, experimentProtocolInternals as v1 } from './e
 // its own exact source identity. This is not a general causal attribution
 // framework, and it never authorises a run by itself.
 
+export const EXPERIMENT_PLAN_V3_SCHEMA = 'avo.benchmark-experiment-plan.v3';
+export const EXPERIMENT_RUN_V3_SCHEMA = 'avo.benchmark-experiment-run.v3';
+export const EXPERIMENT_RESULT_V4_SCHEMA = 'avo.benchmark-experiment-result.v4';
+export const TEMPORAL_SOURCE_VERIFICATION_SCHEMA = 'avo.benchmark-experiment-source-verification.v2';
 export const EXPERIMENT_PLAN_V2_SCHEMA = 'avo.benchmark-experiment-plan.v2';
 export const EXPERIMENT_RUN_V2_SCHEMA = 'avo.benchmark-experiment-run.v2';
 export const EXPERIMENT_RESULT_V2_SCHEMA = 'avo.benchmark-experiment-result.v2';
@@ -107,7 +114,7 @@ export function readSnapshotSource({ root, componentPaths, declaredCommit = null
  * modules from a temporary snapshot. Importing executes the arm's code, so it
  * is only done when the caller explicitly states the arm was reviewed.
  */
-export async function deriveArmToolContract({ repoDir, commit, workspaceMode, policyProfile, allowImport = false }) {
+export async function deriveArmToolContract({ repoDir, commit, workspaceMode, policyProfile, temporalEvidence, allowImport = false }) {
   if (allowImport !== true) {
     return { tools: null, componentFiles: null, toolContractSha256: null, providerToolSchemaSha256: null, reason: 'import-not-authorised' };
   }
@@ -123,12 +130,12 @@ export async function deriveArmToolContract({ repoDir, commit, workspaceMode, po
     fs.writeFileSync(path.join(snapshot, 'package.json'), JSON.stringify({ type: 'module' }));
     const agent = await import(pathToFileURL(path.join(snapshot, 'src/core/avo-agent-base.mjs')).href);
     const capsule = await import(pathToFileURL(path.join(snapshot, 'src/benchmark/run-capsule.mjs')).href);
-    const tools = agent.effectiveAvoToolContract(workspaceMode, policyProfile);
+    const tools = agent.effectiveAvoToolContract(workspaceMode, policyProfile, temporalEvidence);
     return {
       tools,
       componentFiles: [...capsule.RUN_CAPSULE_COMPONENT_FILES],
       toolContractSha256: sha256(canonicalJson(tools)),
-      providerToolSchemaSha256: capsule.productionProviderToolSchemaDigest(workspaceMode, policyProfile),
+      providerToolSchemaSha256: capsule.productionProviderToolSchemaDigest(workspaceMode, policyProfile, temporalEvidence),
       reason: null,
     };
   } finally {
@@ -326,8 +333,9 @@ export async function buildDescriptionChange({ repoDir, baselineCommit, interven
 /** Recomputes a sealed plan's arms and verdict from the repository. */
 export async function verifyExperimentPlanSourcesV2(plan, { repoDir, allowImport = false }) {
   const record = await buildSourceVerificationRecord(plan, { repoDir, allowImport });
-  const matches = record.singleVariable === true && record.reasons.length === 0;
-  return { verified: matches, singleVariable: { singleVariable: record.singleVariable, reasons: [...record.reasons] } };
+  const verified = isTemporal(plan) ? record.capabilityVerified : record.singleVariable;
+  const matches = verified === true && record.reasons.length === 0;
+  return { verified: matches, singleVariable: { singleVariable: verified, reasons: [...record.reasons] } };
 }
 
 const SOURCE_VERIFICATION_KEYS = Object.freeze([
@@ -347,11 +355,12 @@ const MAX_SOURCE_VERIFICATION_BYTES = 256 * 1024;
  * the record commitment, so that would be circular.)
  */
 export function planSourceIdentitySha256({ change, arms }) {
-  return sha256(canonicalJson({ arms, change, changedVariable: 'tool-description' }));
+  return sha256(canonicalJson({ arms, change, changedVariable: change.schema === 'avo.sdk-temporal-change.v1' ? 'sdk-temporal-evidence' : 'tool-description' }));
 }
 
 /** Strict field validator for the versioned source-verification record. */
 export function validateSourceVerificationRecord(value) {
+  if (value?.schema === TEMPORAL_SOURCE_VERIFICATION_SCHEMA) return validateTemporalSourceRecord(value);
   const record = v1.cloneRecord(value, 'experiment source verification');
   v1.requireExactKeys(record, SOURCE_VERIFICATION_KEYS, 'experiment source verification');
   if (record.schema !== EXPERIMENT_SOURCE_VERIFICATION_SCHEMA) throw new Error('experiment source verification schema is invalid');
@@ -401,6 +410,7 @@ export function validateSourceVerificationRecord(value) {
  * verdict is computed here, never supplied by the caller.
  */
 export async function buildSourceVerificationRecord(plan, { repoDir, allowImport = false }) {
+  if (isTemporal(plan)) return (await buildTemporalEvidenceChange({ repoDir, commit: plan.arms.baseline.gitCommit, baselineMode: plan.change.arms.baseline.mode, componentPaths: plan.arms.baseline.components.map((c) => c.path), workspaceMode: plan.commonConditions.runtime.workspaceMode, policyProfile: plan.commonConditions.policyProfile, allowImport })).sourceVerification;
   const rebuilt = await buildDescriptionChange({
     repoDir,
     baselineCommit: plan.arms.baseline.gitCommit,
@@ -448,6 +458,11 @@ export function assertSourceVerificationMatchesPlan(plan, record) {
       || canonicalJson(record.arms) !== canonicalJson(plan.arms)) {
     throw new Error('experiment source verification record does not bind this plan\'s arms and change');
   }
+  if (isTemporal(plan)) {
+    validateTemporalSourceRecord(record);
+    if (!record.capabilityVerified || !record.sourceBytesVerified || !record.gitIdentityVerified || !record.toolContractDerived || record.reasons.length) throw new Error('temporal source capability was not derived and verified');
+    return true;
+  }
   if (record.singleVariable !== true || record.sourceBytesVerified !== true || record.gitIdentityVerified !== true
       || record.toolContractDerived !== true || record.literalReplacement.exact !== true
       || record.reasons.length !== 0 || record.literalReplacement.reasons.length !== 0) {
@@ -478,6 +493,11 @@ export function verifyPlanSourceBytes(plan, { repoDir }) {
       throw new Error(`experiment source verification: ${arm} arm source bytes differ from the plan`);
     }
     sources[arm] = source;
+  }
+  if (isTemporal(plan)) {
+    validateTemporalChange(plan.change);
+    if (sources.baseline.gitCommit !== sources.intervention.gitCommit || sources.baseline.gitTree !== sources.intervention.gitTree || sources.baseline.componentSetSha256 !== sources.intervention.componentSetSha256) throw new Error('temporal arms must use the same committed source');
+    return true;
   }
   const change = plan.change;
   const beforeBytes = sources.baseline.files.get(change.sourcePath);
@@ -528,7 +548,7 @@ export function validateExperimentPlanV2(value) {
     'exposure', 'hypothesis', 'manifests', 'planSha256', 'registrationMode', 'schedule', 'schema',
     'singleVariable', 'sourceVerificationSha256',
   ], 'experiment v2 plan');
-  if (plan.schema !== EXPERIMENT_PLAN_V2_SCHEMA) throw new Error('experiment v2 plan schema is invalid');
+  if (![EXPERIMENT_PLAN_V2_SCHEMA, EXPERIMENT_PLAN_V3_SCHEMA].includes(plan.schema)) throw new Error('experiment v2 plan schema is invalid');
   v1.requireSafeId(plan.experimentId, 'experiment ID');
   v1.requireTimestamp(plan.createdAt, 'experiment creation time');
   v1.requireLine(plan.hypothesis, 'experiment hypothesis', 1000);
@@ -538,7 +558,7 @@ export function validateExperimentPlanV2(value) {
   // mandatory byte-level re-check at load time certifies it.
   v1.requireSha(plan.sourceVerificationSha256, 'experiment source verification commitment');
   if (!REGISTRATION_MODES.includes(plan.registrationMode)) throw new Error('experiment registrationMode must be prospective or retrospective');
-  if (plan.changedVariable !== 'tool-description') throw new Error('experiment v2 supports only changedVariable=tool-description');
+  if (plan.changedVariable !== (isTemporal(plan) ? 'sdk-temporal-evidence' : 'tool-description')) throw new Error('experiment v2 supports only changedVariable=tool-description');
   const verdict = v1.cloneRecord(plan.singleVariable, 'experiment single-variable verdict');
   v1.requireExactKeys(verdict, ['reasons', 'singleVariable'], 'experiment single-variable verdict');
   if (verdict.singleVariable !== true || !Array.isArray(verdict.reasons) || verdict.reasons.length !== 0) {
@@ -546,16 +566,19 @@ export function validateExperimentPlanV2(value) {
   }
 
   const change = v1.cloneRecord(plan.change, 'experiment change');
-  v1.requireExactKeys(change, CHANGE_KEYS, 'experiment change');
-  v1.requireSafeId(change.toolName, 'changed tool name');
-  v1.requireLine(change.sourcePath, 'changed source path', 256);
-  if (path.isAbsolute(change.sourcePath) || change.sourcePath.split('/').includes('..')) throw new Error('changed source path must be repository-relative');
-  for (const name of ['afterFileSha256', 'beforeFileSha256', 'commonToolContractSha256', 'patchSha256']) v1.requireSha(change[name], `change ${name}`);
-  if (decodeStringLiteral(change.beforeLiteral) === null || decodeStringLiteral(change.afterLiteral) === null) {
-    throw new Error('experiment change literals must be simple quoted string literals; other forms need manual review');
-  }
-  if (change.patchSha256 !== sha256(canonicalJson({ sourcePath: change.sourcePath, beforeLiteral: change.beforeLiteral, afterLiteral: change.afterLiteral }))) {
-    throw new Error('experiment change patch hash does not match its declared replacement');
+  if (isTemporal(plan)) validateTemporalChange(change);
+  else {
+    v1.requireExactKeys(change, CHANGE_KEYS, 'experiment change');
+    v1.requireSafeId(change.toolName, 'changed tool name');
+    v1.requireLine(change.sourcePath, 'changed source path', 256);
+    if (path.isAbsolute(change.sourcePath) || change.sourcePath.split('/').includes('..')) throw new Error('changed source path must be repository-relative');
+    for (const name of ['afterFileSha256', 'beforeFileSha256', 'commonToolContractSha256', 'patchSha256']) v1.requireSha(change[name], `change ${name}`);
+    if (decodeStringLiteral(change.beforeLiteral) === null || decodeStringLiteral(change.afterLiteral) === null) {
+      throw new Error('experiment change literals must be simple quoted string literals; other forms need manual review');
+    }
+    if (change.patchSha256 !== sha256(canonicalJson({ sourcePath: change.sourcePath, beforeLiteral: change.beforeLiteral, afterLiteral: change.afterLiteral }))) {
+      throw new Error('experiment change patch hash does not match its declared replacement');
+    }
   }
 
   const common = v1.cloneRecord(plan.commonConditions, 'experiment common conditions');
@@ -566,8 +589,10 @@ export function validateExperimentPlanV2(value) {
 
   const arms = v1.cloneRecord(plan.arms, 'experiment arms');
   v1.requireExactKeys(arms, v1.ARMS, 'experiment arms');
-  for (const arm of v1.ARMS) validateSourceBinding(arms[arm], `${arm} arm`, change.sourcePath);
-  if (arms.baseline.gitCommit === arms.intervention.gitCommit) throw new Error('experiment arms must be different commits');
+  for (const arm of v1.ARMS) validateSourceBinding(arms[arm], `${arm} arm`, isTemporal(plan) ? 'src/core/temporal-evidence.mjs' : change.sourcePath);
+  if (isTemporal(plan)) {
+    for (const key of ['gitCommit', 'gitTree', 'componentSetSha256', 'components']) if (canonicalJson(arms.baseline[key]) !== canonicalJson(arms.intervention[key])) throw new Error('temporal arms require the same committed source closure');
+  } else if (arms.baseline.gitCommit === arms.intervention.gitCommit) throw new Error('experiment arms must be different commits');
   // The recorded verdict must agree with the bound identities: the same
   // component paths, identical bytes except the changed file, and that file's
   // hashes equal to the declared change.
@@ -577,7 +602,7 @@ export function validateExperimentPlanV2(value) {
   }
   arms.baseline.components.forEach((component, index) => {
     const other = arms.intervention.components[index].sha256;
-    const consistent = component.path === change.sourcePath
+    const consistent = !isTemporal(plan) && component.path === change.sourcePath
       ? component.sha256 === change.beforeFileSha256 && other === change.afterFileSha256 && other !== component.sha256
       : other === component.sha256;
     if (!consistent) throw new Error(`experiment arm component ${component.path} contradicts the declared single change`);
@@ -683,14 +708,15 @@ function repetitionLimit(plan) {
 // --- run binding ------------------------------------------------------------
 
 export function validateExperimentRunBindingV2(value) {
+  const temporal = value?.schema === EXPERIMENT_RUN_V3_SCHEMA;
   const binding = v1.cloneRecord(value, 'experiment v2 run binding');
   v1.requireExactKeys(binding, [
     'arm', 'changedVariable', 'commonConditionsSha256', 'componentSetSha256', 'experimentId', 'gitCommit', 'gitTree',
     'executionPolicy', 'executionPolicySha256', 'manifestSha256', 'phase', 'planSha256', 'policyProfile',
     'providerEndpointSha256', 'providerModelSha256', 'providerToolSchemaSha256', 'replicate', 'schema',
-    'sourceVerificationSha256', 'toolContractSha256',
+    'sourceVerificationSha256', 'toolContractSha256', ...(temporal ? ['temporalEvidence', 'temporalEvidenceSha256'] : []),
   ], 'experiment v2 run binding');
-  if (binding.schema !== EXPERIMENT_RUN_V2_SCHEMA) throw new Error('experiment v2 run binding schema is invalid');
+  if (![EXPERIMENT_RUN_V2_SCHEMA, EXPERIMENT_RUN_V3_SCHEMA].includes(binding.schema)) throw new Error('experiment v2 run binding schema is invalid');
   v1.requireSafeId(binding.experimentId, 'experiment ID');
   for (const field of ['commonConditionsSha256', 'componentSetSha256', 'manifestSha256', 'planSha256', 'providerEndpointSha256',
     'providerModelSha256', 'providerToolSchemaSha256', 'sourceVerificationSha256', 'toolContractSha256']) {
@@ -705,7 +731,11 @@ export function validateExperimentRunBindingV2(value) {
     throw new Error('experiment v2 run Git identity is invalid');
   }
   if (!v1.PHASES.includes(binding.phase) || !v1.ARMS.includes(binding.arm)) throw new Error('experiment v2 selector is invalid');
-  if (binding.changedVariable !== 'tool-description') throw new Error('experiment v2 changed variable is invalid');
+  if (temporal) {
+    const contract = resolveTemporalEvidenceContract(binding.temporalEvidence ?? 'off');
+    if ((binding.temporalEvidenceSha256 ?? null) !== (contract ? temporalContractSha256(contract) : null)) throw new Error('temporal run binding digest differs from frozen capability');
+  }
+  if (binding.changedVariable !== (temporal ? 'sdk-temporal-evidence' : 'tool-description')) throw new Error('experiment v2 changed variable is invalid');
   v1.strictInteger(binding.replicate, 'experiment v2 replicate', 1, v1.MAX_REPETITIONS);
   return v1.deepFreeze(binding);
 }
@@ -714,7 +744,8 @@ export function expectedBindingV2(plan, phase, arm, replicate, executionPolicy =
   const source = plan.arms[arm];
   const policy = validateExecutionPolicy(executionPolicy, 'experiment effective execution policy');
   return {
-    schema: EXPERIMENT_RUN_V2_SCHEMA,
+    schema: isTemporal(plan) ? EXPERIMENT_RUN_V3_SCHEMA : EXPERIMENT_RUN_V2_SCHEMA,
+    ...(isTemporal(plan) ? temporalBinding(plan.change.arms[arm].mode) : {}),
     experimentId: plan.experimentId,
     planSha256: plan.planSha256,
     sourceVerificationSha256: plan.sourceVerificationSha256,
@@ -768,6 +799,7 @@ export function loadExperimentRunV2(plan, env, { executionPolicy = plan.commonCo
   if (!verificationFile) {
     throw new Error('an experiment v2 run requires AVO_EXPERIMENT_SOURCE_VERIFICATION_FILE for its sealed plan');
   }
+  if (isTemporal(plan) && (resolveTemporalEvidenceContract(env.AVO_SDK_TEMPORAL_EVIDENCE)?.mode ?? 'off') !== plan.change.arms[arm].mode) throw new Error('AVO_SDK_TEMPORAL_EVIDENCE contradicts selected temporal experiment arm');
   const record = readSourceVerificationRecord(verificationFile);
   assertSourceVerificationMatchesPlan(plan, record);
   const repoDir = String(env.AVO_EXPERIMENT_SOURCE_REPO || '').trim() || process.cwd();
@@ -791,15 +823,18 @@ export function loadExperimentRunV2(plan, env, { executionPolicy = plan.commonCo
 // The tool contracts are always the running checkout's own: an arm is checked
 // by running this in that arm's checkout.
 export function assertExperimentEnvironmentV2(plan, bindingValue, { provider, config, env, git: gitState, executionPolicy = null }) {
+  if (!isTemporal(plan) && resolveTemporalEvidenceContract(config?.temporalEvidence)) throw new Error('temporal capability requires typed experiment v3');
   const binding = validateBindingForPlanV2(plan, bindingValue);
   v1.assertEnvironmentConditions({ ...plan.commonConditions, gitCommit: binding.gitCommit }, binding.policyProfile, { provider, config, env, git: gitState });
   const workspaceMode = config?.workspaceMode;
-  const tools = effectiveAvoToolContract(workspaceMode, binding.policyProfile);
-  const providerSchema = productionProviderToolSchemaDigest(workspaceMode, binding.policyProfile);
+  const contract = isTemporal(plan) ? resolveTemporalEvidenceContract(config?.temporalEvidence) : undefined;
+  if (isTemporal(plan) && canonicalJson(contract ?? null) !== canonicalJson(binding.temporalEvidence)) throw new Error('effective temporal configuration differs from selected arm');
+  const tools = effectiveAvoToolContract(workspaceMode, binding.policyProfile, contract);
+  const providerSchema = productionProviderToolSchemaDigest(workspaceMode, binding.policyProfile, contract);
   const declared = decodeStringLiteral(binding.arm === 'baseline' ? plan.change.beforeLiteral : plan.change.afterLiteral);
   if (sha256(canonicalJson(tools)) !== binding.toolContractSha256 || providerSchema !== binding.providerToolSchemaSha256
-      || sha256(canonicalJson(withoutDescription(tools, plan.change.toolName))) !== plan.change.commonToolContractSha256
-      || tools.find((tool) => tool.name === plan.change.toolName)?.description !== declared) {
+      || (!isTemporal(plan) && (sha256(canonicalJson(withoutDescription(tools, plan.change.toolName))) !== plan.change.commonToolContractSha256
+      || tools.find((tool) => tool.name === plan.change.toolName)?.description !== declared))) {
     throw new Error('effective tool contract differs from the selected experiment arm');
   }
   // The effective execution policy is parsed exactly once by the runner and
@@ -819,6 +854,7 @@ export function assertExperimentCapsuleV2(plan, bindingValue, capsule) {
   const binding = validateBindingForPlanV2(plan, bindingValue);
   v1.assertCapsuleConditions({ ...plan.commonConditions, gitCommit: binding.gitCommit }, plan.manifests[binding.phase], binding, capsule);
   const definition = capsule.definition;
+  if (isTemporal(plan) && canonicalJson(definition.runtime.config.temporalEvidence ?? null) !== canonicalJson(binding.temporalEvidence)) throw new Error('capsule temporal capability differs from arm');
   if (definition.git?.tree !== binding.gitTree
       || definition.components?.setSha256 !== binding.componentSetSha256
       || definition.tools?.schemaSha256 !== binding.toolContractSha256
@@ -879,7 +915,9 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
       for (const versionedGameId of plan.manifests[phase].versionedGameIds) {
         const arms = Object.fromEntries(v1.ARMS.map((arm) => {
           const entry = entries.find((item) => item.phase === phase && item.arm === arm && item.replicate === replicate);
-          return [arm, entry?.games.get(versionedGameId) ?? notRunArmFacts()];
+          const facts = entry?.games.get(versionedGameId) ?? notRunArmFacts();
+          return [arm, isTemporal(plan) && !entry?.games.has(versionedGameId)
+            ? { ...facts, ...temporalFacts(plan, undefined, null, arm) } : facts];
         }));
         units.push({
           unit: `${plan.experimentId}:${phase}:${versionedGameId}:${replicate}`,
@@ -894,7 +932,7 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
     || unit.arms.baseline.levelsCompleted !== unit.arms.intervention.levelsCompleted);
   const preRegistered = plan.registrationMode === 'prospective' && orderUnverified.length === 0;
   const result = {
-    schema: EXPERIMENT_RESULT_V3_SCHEMA,
+    schema: isTemporal(plan) ? EXPERIMENT_RESULT_V4_SCHEMA : EXPERIMENT_RESULT_V3_SCHEMA,
     experimentId: plan.experimentId,
     planSha256: plan.planSha256,
     sourceVerificationSha256: plan.sourceVerificationSha256,
@@ -911,6 +949,7 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
       baseline: armObservedCost(units, 'baseline'),
       intervention: armObservedCost(units, 'intervention'),
     },
+    ...(isTemporal(plan) ? { temporalEvidence: Object.fromEntries(v1.ARMS.map((arm) => [arm, armTemporalResources(units, arm)])) } : {}),
     scheduleOrder: {
       verified: orderUnverified.length === 0 && timed.length > 0,
       checkedUnits: timed.map((entry) => entry.key),
@@ -929,7 +968,28 @@ export function validateExperimentResultsV2(plan, evidenceEntries, { repoDir = n
 // Non-intervention conditions: the arm's own verified source identity
 // (commit, tree, component set, tool schemas) is expected to differ and is
 // checked per arm; everything else must be identical across arms.
-function comparableArmCondition(capsule) {
+function comparableArmCondition(capsule, plan) {
+  if (isTemporal(plan)) {
+    const copy = structuredClone(capsule);
+    const mode = plan.change.arms[capsule.experiment.arm].mode;
+    const contract = resolveTemporalEvidenceContract(mode);
+    if (canonicalJson(copy.runtime.config.temporalEvidence ?? null) !== canonicalJson(contract ?? null)) throw new Error('result temporal capability differs from declared arm');
+    if (copy.toolSchemaSha256 !== plan.arms[capsule.experiment.arm].toolContractSha256) throw new Error('result temporal tools differ from declared arm');
+    const tools = effectiveAvoToolContract(copy.runtime.config.workspaceMode, plan.commonConditions.policyProfile, contract);
+    if (canonicalJson(copy.enabledTools) !== canonicalJson(tools.map((tool) => tool.name))
+        || copy.toolSchemaSha256 !== sha256(canonicalJson(tools))
+        || copy.providerToolSchemaSha256 !== productionProviderToolSchemaDigest(copy.runtime.config.workspaceMode, plan.commonConditions.policyProfile, contract)
+        || copy.prompts.runtimeStatusTemplateSha256 !== runtimeStatusTemplateSha256(plan.commonConditions.policyProfile, contract)) {
+      throw new Error('result temporal interface differs from derived contract');
+    }
+    delete copy.runtime.config.temporalEvidence;
+    delete copy.policyProfile.temporalEvidenceSha256;
+    copy.enabledTools = copy.enabledTools.filter((name) => name !== 'trajectory_frames_read');
+    copy.prompts.runtimeStatusTemplateSha256 = null;
+    if (copy.workspaceCapability?.attestation?.requested) delete copy.workspaceCapability.attestation.requested.temporalEvidence;
+    copy.workspaceCapability.attestation.schema = 'avo.workspace-capability.v2';
+    return { ...v1.comparableCapsuleCondition(copy), policyProfile: copy.policyProfile, prompts: copy.prompts, enabledTools: copy.enabledTools };
+  }
   const { gitCommit: _commit, gitTree: _tree, componentSetSha256: _components, ...rest } = v1.comparableCapsuleCondition(capsule);
   // The v1 comparison removes the profile because v1 arms change it; v2 arms
   // share one profile, so profile, prompts and enabled tool names must match.
@@ -992,22 +1052,26 @@ function resolveCompleteEntry(plan, entry, selector) {
     ...selector,
     runId: report.runId,
     startedAt,
-    condition: comparableArmCondition(capsule),
+    condition: comparableArmCondition(capsule, plan),
     // A report accepted through the complete-score rules is the only evidence
     // that can form a comparable pair.
-    games: new Map(report.games.map((game) => [game.versionedGameId, {
-      executionStatus: 'completed',
-      runId: report.runId,
-      pairEligible: true,
-      won: game.won,
-      levelsCompleted: game.levelsCompleted,
-      observedProgress: { levelsCompleted: game.levelsCompleted, totalLevels: game.totalLevels },
-      observedCost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector.key} ${game.versionedGameId} mechanism metrics`)),
-      costMeteringLayer: 'run-report-games',
-      costMeteringComplete: true,
-      costCoverage: { source: 'complete-report', complete: true },
-      sourceRef: `report:${report.runId}:${game.versionedGameId}`,
-    }])),
+    games: new Map(report.games.map((game) => {
+      const temporal = isTemporal(plan) ? temporalFacts(plan, game, report.runId, selector.arm) : {};
+      return [game.versionedGameId, {
+        executionStatus: 'completed',
+        runId: report.runId,
+        pairEligible: true,
+        won: game.won,
+        levelsCompleted: game.levelsCompleted,
+        observedProgress: { levelsCompleted: game.levelsCompleted, totalLevels: game.totalLevels },
+        observedCost: unitCost(normalizeMechanismMetrics(game.mechanismMetrics, `${selector.key} ${game.versionedGameId} mechanism metrics`)),
+        costMeteringLayer: 'run-report-games',
+        costMeteringComplete: temporal.temporalCoverage?.resourcesKnown ?? true,
+        costCoverage: { source: 'complete-report', complete: true },
+        sourceRef: `report:${report.runId}:${game.versionedGameId}`,
+        ...temporal,
+      }];
+    })),
   };
 }
 
@@ -1033,7 +1097,11 @@ function resolveIncompleteEntry(plan, entry, selector) {
     comparable: true,
     capsuleEvidenceSha256: entry.privateCapsuleEvidence.sha256,
   });
-  const audited = readAuditedRun(entry.auditRun, runId, selector, published);
+  const { audited, sourceReport } = readAuditedRun(entry.auditRun, runId, selector, published);
+  const temporal = isTemporal(plan) ? new Map((sourceReport.games ?? []).map((game) => {
+    const facts = temporalFacts(plan, game, runId, selector.arm);
+    return [facts.temporalEvidence?.unit.versionedGameId ?? game.versionedGameId, facts];
+  })) : null;
   if (!['error', 'censored', 'unknown'].includes(audited.executionOutcome.status)) {
     throw new Error(`experiment result ${selector.key} incomplete entry needs its run's audited error/censored/unknown outcome`);
   }
@@ -1042,6 +1110,7 @@ function resolveIncompleteEntry(plan, entry, selector) {
   const games = new Map();
   for (const game of audited.games) {
     const observedCost = game.metrics ?? game.observedSubtotal ?? null;
+    const temporalFact = isTemporal(plan) ? temporal.get(game.versionedGameId) ?? temporalFacts(plan, undefined, runId, selector.arm) : {};
     games.set(game.versionedGameId, {
       executionStatus: game.outcome.status,
       runId,
@@ -1055,12 +1124,13 @@ function resolveIncompleteEntry(plan, entry, selector) {
       },
       observedCost,
       costMeteringLayer: game.meteringLayer,
-      costMeteringComplete: game.metrics !== null,
+      costMeteringComplete: game.metrics !== null && (temporalFact.temporalCoverage?.resourcesKnown ?? true),
       costCoverage: game.coverage ?? null,
       sourceRef: `${game.sourceRef}:${runId}`,
+      ...temporalFact,
     });
   }
-  return { ...selector, runId, startedAt, condition: comparableArmCondition(published), games };
+  return { ...selector, runId, startedAt, condition: comparableArmCondition(published, plan), games };
 }
 
 /**
@@ -1086,7 +1156,7 @@ function readAuditedRun(auditRun, runId, selector, published) {
   const normalized = normalizeAuditInputs(manifest);
   const derived = normalized.runs.find((run) => run.runId === runId);
   if (!derived) throw new Error(`experiment result ${selector.key} audit export does not include run ${runId}`);
-  assertAuditedSourceReportBinding(manifest, derived, published, selector);
+  const sourceReport = assertAuditedSourceReportBinding(manifest, derived, published, selector);
   const exported = readJsonFileEvidence(path.join(outputDir, 'runs', `${runId}.json`), {
     root: outputDir,
     purpose: 'audit run record',
@@ -1095,7 +1165,7 @@ function readAuditedRun(auditRun, runId, selector, published) {
   if (canonicalJson({ schema: AUDIT_SCHEMA, exportId, ...derived }) !== canonicalJson(exported)) {
     throw new Error(`experiment result ${selector.key} audit run record differs from its re-derived source facts`);
   }
-  return derived;
+  return { audited: derived, sourceReport };
 }
 
 /**
@@ -1125,7 +1195,30 @@ function assertAuditedSourceReportBinding(manifest, derived, published, selector
       || canonicalJson(experimentBinding) !== canonicalJson(published.experiment)) {
     throw new Error(`experiment result ${selector.key} audit source report is not bound to its sealed run capsule`);
   }
-  return true;
+  return evidence.value;
+}
+
+function temporalFacts(plan, game, runId, arm) {
+  const contract = resolveTemporalEvidenceContract(plan.change.arms[arm].mode);
+  const summary = game?.temporalEvidence === undefined ? null : normalizeGameRecord(game).temporalEvidence;
+  if (summary && (!contract || summary.unit.runId !== runId || summary.contractSha256 !== temporalContractSha256(contract))) {
+    throw new Error('temporal summary run/capability differs from enclosing run and arm');
+  }
+  return { temporalEvidence: summary, temporalCoverage: {
+    status: contract ? summary ? 'reported' : 'unknown' : 'disabled',
+    resourcesKnown: !contract || summary?.resources != null,
+  } };
+}
+
+function armTemporalResources(units, arm) {
+  const facts = units.map((unit) => unit.arms[arm]).filter((fact) => fact.temporalCoverage.status !== 'disabled');
+  const known = facts.map((fact) => fact.temporalEvidence?.resources).filter((resources) => resources != null);
+  return {
+    observedSubtotal: known.length ? Object.fromEntries(Object.keys(known[0]).map((key) => [key, known.reduce((n, resources) => n + resources[key], 0)])) : null,
+    coverage: { expectedUnits: facts.length, reportedUnits: facts.filter((fact) => fact.temporalEvidence !== null).length,
+      knownResourceUnits: known.length, unknownResourceUnits: facts.length - known.length,
+      complete: facts.every((fact) => fact.temporalEvidence !== null && fact.temporalCoverage.resourcesKnown) },
+  };
 }
 
 // The sealed effective execution policy must exist and must be the plan's
@@ -1225,3 +1318,71 @@ function sha256(value) {
 }
 
 export { experimentIdentitySha256 };
+
+function isTemporal(plan) { return plan?.schema === EXPERIMENT_PLAN_V3_SCHEMA; }
+function temporalBinding(mode) {
+  const temporalEvidence = resolveTemporalEvidenceContract(mode) ?? null;
+  return { temporalEvidence, temporalEvidenceSha256: temporalEvidence ? temporalContractSha256(temporalEvidence) : null };
+}
+function validateTemporalChange(change) {
+  v1.requireExactKeys(change, ['schema', 'issue', 'compatibilityBaseline', 'contractSha256', 'storageSchema', 'frameSchema', 'toolName', 'arms'], 'temporal change');
+  if (change.schema !== 'avo.sdk-temporal-change.v1' || change.issue !== 385
+      || change.compatibilityBaseline !== 'e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1'
+      || change.contractSha256 !== temporalContractSha256(TEMPORAL_CONTRACT_V1)
+      || change.storageSchema !== 'avo.sdk-temporal-action.v1' || change.frameSchema !== 'avo.sdk-temporal-frame-chunk.v1'
+      || change.toolName !== 'trajectory_frames_read') throw new Error('temporal change differs from frozen v1 declaration');
+  v1.requireExactKeys(change.arms, v1.ARMS, 'temporal change arms');
+  for (const arm of v1.ARMS) {
+    const mode = change.arms[arm].mode;
+    v1.requireExactKeys(change.arms[arm], mode === 'off' ? ['mode'] : ['mode', 'admission'], 'temporal arm');
+    if (mode !== 'off' && change.arms[arm].admission !== 'allow-partial') throw new Error('temporal admission must be allow-partial');
+  }
+  if (!['off', 'capture'].includes(change.arms.baseline.mode) || change.arms.intervention.mode !== 'capture-read') throw new Error('temporal change supports off/capture to capture-read only');
+  return change;
+}
+
+export async function buildTemporalEvidenceChange({ repoDir, commit, baselineMode = 'off', componentPaths, workspaceMode, policyProfile, allowImport = false }) {
+  const change = validateTemporalChange({ schema: 'avo.sdk-temporal-change.v1', issue: 385,
+    compatibilityBaseline: 'e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', contractSha256: temporalContractSha256(TEMPORAL_CONTRACT_V1),
+    storageSchema: 'avo.sdk-temporal-action.v1', frameSchema: 'avo.sdk-temporal-frame-chunk.v1', toolName: 'trajectory_frames_read',
+    arms: { baseline: { mode: baselineMode, ...(baselineMode !== 'off' ? { admission: 'allow-partial' } : {}) }, intervention: { mode: 'capture-read', admission: 'allow-partial' } } });
+  const source = readGitSource({ repoDir, commit, componentPaths });
+  const contracts = {};
+  for (const arm of v1.ARMS) contracts[arm] = await deriveArmToolContract({ repoDir, commit: source.gitCommit, workspaceMode, policyProfile,
+    temporalEvidence: resolveTemporalEvidenceContract(change.arms[arm].mode), allowImport });
+  const reasons = [];
+  const paths = canonicalJson([...componentPaths].sort());
+  for (const arm of v1.ARMS) if (!contracts[arm].tools || canonicalJson(contracts[arm].componentFiles?.slice().sort()) !== paths) reasons.push(`source-tool-closure-unverified:${arm}`);
+  const baseTools = (arm) => contracts[arm].tools?.filter((tool) => tool.name !== change.toolName);
+  if (canonicalJson(baseTools('baseline') ?? null) !== canonicalJson(baseTools('intervention') ?? null)) reasons.push('base-tool-contract-differs');
+  if (!contracts.intervention.tools?.some((t) => t.name === change.toolName) || contracts.baseline.tools?.some((t) => t.name === change.toolName)) reasons.push('temporal-tool-inventory-differs');
+  const arms = Object.fromEntries(v1.ARMS.map((arm) => [arm, sourceBinding(source, contracts[arm])]));
+  const sourceVerification = validateTemporalSourceRecord({ schema: TEMPORAL_SOURCE_VERIFICATION_SCHEMA, changedVariable: 'sdk-temporal-evidence',
+    planIdentitySha256: planSourceIdentitySha256({ change, arms }), change, arms,
+    baseToolContractSha256: baseTools('baseline') ? sha256(canonicalJson(baseTools('baseline'))) : null,
+    sourceBytesVerified: true, gitIdentityVerified: true, toolContractDerived: v1.ARMS.every((arm) => Boolean(contracts[arm].tools)),
+    capabilityVerified: reasons.length === 0, reasons });
+  return { change, arms, singleVariable: { singleVariable: reasons.length === 0, reasons }, sourceVerification,
+    sourceVerificationSha256: sha256(canonicalJson(sourceVerification)) };
+}
+
+function validateTemporalSourceRecord(value) {
+  const record = v1.cloneRecord(value, 'temporal source verification');
+  v1.requireExactKeys(record, ['schema', 'changedVariable', 'planIdentitySha256', 'change', 'arms', 'baseToolContractSha256',
+    'sourceBytesVerified', 'gitIdentityVerified', 'toolContractDerived', 'capabilityVerified', 'reasons'], 'temporal source verification');
+  if (record.schema !== TEMPORAL_SOURCE_VERIFICATION_SCHEMA || record.changedVariable !== 'sdk-temporal-evidence') throw new Error('temporal source verification schema is invalid');
+  validateTemporalChange(record.change);
+  v1.requireExactKeys(record.arms, v1.ARMS, 'temporal source arms');
+  for (const arm of v1.ARMS) validateSourceBinding(record.arms[arm], arm, 'src/core/temporal-evidence.mjs', { allowUnderived: true });
+  for (const key of ['gitCommit', 'gitTree', 'components', 'componentSetSha256']) if (canonicalJson(record.arms.baseline[key]) !== canonicalJson(record.arms.intervention[key])) throw new Error('temporal source arms must have the same commit/tree/closure');
+  for (const key of ['sourceBytesVerified', 'gitIdentityVerified', 'toolContractDerived', 'capabilityVerified']) if (typeof record[key] !== 'boolean') throw new Error('temporal verification states must be boolean');
+  if (record.sourceBytesVerified !== v1.ARMS.every((arm) => record.arms[arm].sourceEvidence.sourceBytesVerified)
+      || record.gitIdentityVerified !== v1.ARMS.every((arm) => record.arms[arm].sourceEvidence.gitIdentityVerified)
+      || record.toolContractDerived !== v1.ARMS.every((arm) => Boolean(record.arms[arm].toolContractSha256))) throw new Error('temporal source verification contradicts its source bindings');
+  if (record.toolContractDerived) v1.requireSha(record.baseToolContractSha256, 'temporal base tool hash');
+  else if (record.baseToolContractSha256 !== null) throw new Error('underived temporal tools must stay null');
+  requireReasonList(record.reasons, 'temporal verification reasons');
+  if (record.capabilityVerified !== (record.toolContractDerived && record.reasons.length === 0)) throw new Error('temporal verification verdict contradicts its derivation');
+  if (record.planIdentitySha256 !== planSourceIdentitySha256(record)) throw new Error('temporal verification identity differs from its arms/change');
+  return v1.deepFreeze(record);
+}
