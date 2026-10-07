@@ -52,6 +52,17 @@ when running Python-dependent tests; see [VALIDATION.md](VALIDATION.md).
 Paid runs are separate from the normal edit-test cycle. The optional web UI has
 its own [setup and controls](apps/mission-control-v3/README.md).
 
+## Optional general browser tasks
+
+`node src/general/cli.mjs run --profile=general-browser-v1 --task-file=/absolute/task.txt`
+is a separate opt-in host-Python browser entry; as root also require
+`--browser-user=<existing non-root account>`. Install its hash-locked wheel stack
+with `./scripts/setup-browser.sh` into `.venv-browser`, never the ARC venv.
+Python has the selected account’s host file/process/network authority; privilege
+separation is not a sandbox. Chrome keeps its sandbox. See the
+[general browser guide](docs/GENERAL_BROWSER.md) for installation, doctor, privacy,
+ref/image delivery and localhost validation. ARC profiles and tools stay unchanged.
+
 ## Profiles and tools
 
 `AVO_POLICY_PROFILE=minimal-v1` keeps interaction, evidence and the selected

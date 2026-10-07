@@ -214,3 +214,26 @@ function assertRecord(value, label) {
     throw new TypeError(`${label} must be an object`);
   }
 }
+
+export function buildBrowserChildEnvironment({ source = process.env, venv, browserRoot, name, endpoint = '', tmpRoot = `${browserRoot}/tmp` }) {
+  if (![venv, browserRoot].every((p) => typeof p === 'string' && p.startsWith('/')) || !/^[a-z0-9-]{1,32}$/.test(name)) {
+    throw new Error('browser environment requires absolute private paths and a short host-issued name');
+  }
+  const result = {};
+  copyKnown(result, source, ['LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ']);
+  Object.assign(result, {
+    LANG: result.LANG || 'C.UTF-8', PATH: `${venv}/bin:/usr/bin:/bin`,
+    PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONNOUSERSITE: '1',
+    PYTHON_DOTENV_DISABLED: '1', BROWSER_USE_SETUP_LOGGING: 'false', AVO_DISABLE_DOTENV: '1',
+    HOME: `${browserRoot}/home`, XDG_CONFIG_HOME: `${browserRoot}/home/config`,
+    XDG_CACHE_HOME: `${browserRoot}/home/cache`, XDG_DATA_HOME: `${browserRoot}/home/data`,
+    TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot,
+    BH_HOME: `${browserRoot}/harness`, BH_CONFIG_DIR: `${browserRoot}/harness/config`,
+    BH_RUNTIME_DIR: `${browserRoot}/runtime`, BH_TMP_DIR: `${browserRoot}/tmp`,
+    BH_AGENT_WORKSPACE: `${browserRoot}/helper-workspace`, BU_NAME: name, BU_CDP_WS: endpoint,
+    BH_REQUIRE_EXISTING_DAEMON: '1', BH_TELEMETRY: '0', BROWSER_HARNESS_TELEMETRY: '0',
+    ANONYMIZED_TELEMETRY: 'false', BH_UPDATE_CHECK: '0', BH_RECORD: '0', BH_OPEN_LIVE_URL: '0',
+    BROWSER_USE_CLOUD_SYNC: 'false', BH_DOMAIN_SKILLS: '0', BH_TAB_MARKER: '0',
+  });
+  return Object.freeze(result);
+}

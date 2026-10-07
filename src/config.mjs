@@ -50,8 +50,7 @@ function enumValue(name, fallback, allowed) {
   return value;
 }
 
-export function getRuntimeConfig({ requireProvider = true } = {}) {
-  const temporalEvidence = resolveTemporalEvidenceContract(process.env.AVO_SDK_TEMPORAL_EVIDENCE);
+export function getProviderConfig({ requireProvider = true } = {}) {
   const reasoningEffort = String(process.env.OPENAI_REASONING_EFFORT || 'max').trim().toLowerCase();
   const provider = {
     baseUrl: process.env.OPENAI_BASE_URL?.replace(/\/$/, ''),
@@ -71,6 +70,12 @@ export function getRuntimeConfig({ requireProvider = true } = {}) {
     required: requireProvider,
     reasoningEffort,
   });
+  return provider;
+}
+
+export function getRuntimeConfig({ requireProvider = true } = {}) {
+  const temporalEvidence = resolveTemporalEvidenceContract(process.env.AVO_SDK_TEMPORAL_EVIDENCE);
+  const provider = getProviderConfig({ requireProvider });
   return {
     provider,
     ...(temporalEvidence ? { temporalEvidence } : {}),
