@@ -229,11 +229,29 @@ the recorded absolute installation/run paths, then remove only that private
 `.venv`, system Chrome, cached Playwright and unrelated runs. Uninstall is an
 explicit operator action; run/doctor never deletes an installation.
 
-Previous implementation validation at `ad7375c`: the requested single full run had
-860 tests, 845 pass, 15 fail, zero skips in 617.486 s. All 29 new tests passed.
-Existing failures remain unclassified: isolated owned-run 11/13 (30.395 s),
-owned-workspace 3/5 (41.697 s), public-runner 0/1 (99.495 s); isolated native
-container-owner passed 8/8 (26.637 s). Existing deadlines/concurrency were not
-changed, and the full suite was not rerun. Secret scan passed; offline demo won
-25/25 synthetic games (those two commands were not separately timed). That implementation gate was red and the PR was draft. Review-fix validation is
-reported separately; this is not a #383 resolution.
+Review-fix validation at `3bfa29d` (later documentation-only commit records
+results): the requested full suite ran once, 849/865 pass, 16 fail, zero skips,
+642.941 s. All 34 browser/entry/ARC tests passed in that run. Targeted acceptance
+passed 34/34 (322.026 s), plus focused authority checks 6/6 and 2/2.
+
+The six affected existing files are unchanged from main. The five non-public-runner
+files each passed one isolated rerun with unchanged PATH/image/deadlines:
+
+| File | Pass | Fail | Skip | Duration |
+| --- | ---: | ---: | ---: | ---: |
+| isolated `test/cli-report-write.test.mjs` | 11/11 | 0 | 0 | 69.563 s |
+| isolated `test/owned-run.test.mjs` | 13/13 | 0 | 0 | 24.032 s |
+| isolated `test/owned-workspace.test.mjs` | 5/5 | 0 | 0 | 33.481 s |
+| isolated `test/workspace-container-owner.test.mjs` | 8/8 | 0 | 0 | 23.866 s |
+| isolated `test/workspace-output.test.mjs` | 14/14 | 0 | 0 | 43.720 s |
+
+The public-runner baseline failure is tracked by #383; this full run failed at a
+missing exhaust-open report, rather than the supplied main baseline's recover-open
+ETIMEDOUT at 60000 ms. It was not rerun. Other full-run failures involved existing
+CLI/ownership/heartbeat/pause and 10-second workspace limits. Their exact causes
+remain UNKNOWN; isolated passes do not replace the red full gate. No full retry,
+existing deadline/concurrency change or #383 resolution. One isolated command
+initially used a nonexistent filename; no tests ran, and workspace-output then ran
+once at its correct path. Scan passes; offline demo wins 25/25 synthetic games
+(not separately timed). Review readiness uses the requested exception for these
+existing load-sensitive controls; it is not a merge or capability claim.
