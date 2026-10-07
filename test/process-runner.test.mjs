@@ -6,6 +6,41 @@ import path from 'node:path';
 
 import { runProcess } from '../src/benchmark/process-runner.mjs';
 
+test('raw output previews decode split UTF-8 and flush EOF without changing saved bytes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-process-utf8-'));
+  try {
+    const stdoutFile = path.join(root, 'stdout.log');
+    const stderrFile = path.join(root, 'stderr.log');
+    const chunks = { stdout: [], stderr: [] };
+    let child;
+    const observe = (stream) => (chunk) => {
+      assert.ok(Buffer.isBuffer(chunk));
+      chunks[stream].push(chunk);
+      if (chunks.stdout.length === 1 && chunks.stderr.length === 1) child.send('continue');
+    };
+    const result = await runProcess(process.execPath, ['-e', `
+      process.once('message', () => {
+        process.stdout.write(Buffer.from([0x9b, 0xaa, 0xe2]));
+        process.stderr.write(Buffer.from([0x9b, 0xaa, 0xe2]));
+        process.disconnect();
+      });
+      process.stdout.write(Buffer.from([0xe9]));
+      process.stderr.write(Buffer.from([0xe9]));
+    `], {
+      logRoot: root, stdoutFile, stderrFile, outputEncoding: null, timeoutMs: 10_000,
+      onSpawn: (spawned) => { child = spawned; }, onMessage: () => {},
+      onStdout: observe('stdout'), onStderr: observe('stderr'),
+    });
+    assert.equal(result.status, 0);
+    for (const [stream, file] of [['stdout', stdoutFile], ['stderr', stderrFile]]) {
+      assert.equal(result[stream], '雪�');
+      assert.deepEqual(chunks[stream][0], Buffer.from([0xe9]));
+      assert.deepEqual(Buffer.concat(chunks[stream]), Buffer.from([0xe9, 0x9b, 0xaa, 0xe2]));
+      assert.deepEqual(fs.readFileSync(file), Buffer.concat(chunks[stream]));
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('process runner streams complete logs to disk while keeping only a bounded tail', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-process-runner-'));
   try {

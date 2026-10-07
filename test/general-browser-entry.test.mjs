@@ -13,7 +13,24 @@ import { execFileSync } from 'node:child_process';
 import { generalEntry, parseGeneralArgs } from '../src/general/cli.mjs';
 import { fixtureRuntime } from './support/general-browser.mjs';
 import { withLoopback, sendToolCall } from './support/responses-loopback.mjs';
-import { providerEnvironment } from './support/provider.mjs';
+import { providerEnvironment, providerCapabilities } from './support/provider.mjs';
+import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
+import { GENERAL_PROFILE, GENERAL_PROMPT, GENERAL_TOOL_CONTRACT } from '../src/core/policy-profile.mjs';
+import { resolveTemporalEvidenceContract } from '../src/core/temporal-evidence.mjs';
+
+test('general Pi rejects temporal capability even with matching initialized capture contract', async () => {
+  const temporalEvidence = resolveTemporalEvidenceContract('capture');
+  const config = { provider: { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'synthetic', model: 'synthetic', capabilities: providerCapabilities() },
+    policyProfile: GENERAL_PROFILE, workspaceMode: 'disabled', toolResultMaxChars: 24000,
+    temporalEvidence, runId: 'synthetic-run', versionedGameId: 'synthetic-v1' };
+  const loop = await createPiSdkLoop(config);
+  await assert.rejects(loop.run({ runKind: 'general-browser', systemPrompt: GENERAL_PROMPT,
+    tools: GENERAL_TOOL_CONTRACT, productionToolContract: GENERAL_TOOL_CONTRACT,
+    policyProfile: GENERAL_PROFILE, workspaceMode: 'disabled', toolResultMaxChars: 24000,
+    temporalEvidence, temporalScope: { runId: config.runId, versionedGameId: config.versionedGameId },
+    runtimeStatus: () => {},
+  }), /general initialization differs/);
+});
 
 test('entry_cli_default_off and root account fail before browser/provider', async () => {
   for (const args of [[], ['run'], ['run', '--profile=current-v1'], ['run', '--game=x'], ['help', '--json'], ['doctor', '--venv=relative'], ['doctor', '--json', '--json']]) assert.throws(() => parseGeneralArgs(args));
@@ -38,9 +55,9 @@ test('entry_pi_exec_readback_followup real Pi and owned stdin fixture', async ()
     assert.equal(result.finished, true); assert.equal(result.toolCalls, 2); assert.equal(bodies.length, 3);
     assert.deepEqual(bodies[0].tools.map((t) => t.name), ['browser_exec', 'browser_screenshot', 'artifact_read', 'finish']);
     assert.match(JSON.stringify(bodies[2]), /HEAD/); assert.match(JSON.stringify(bodies[2]), /nextRequest/);
-    assert.doesNotMatch(JSON.stringify(bodies), /environment_actions|current_observation_ref|Solve game/);
+    assert.doesNotMatch(JSON.stringify(bodies), /environment_actions|current_observation_ref|Solve game|trajectory_frames_read|temporal_history/);
     assert.ok(runtime.read({ ref: refs[0] }).text.length <= 24000);
-  }, providerEnvironment());
+  }, { ...providerEnvironment(), AVO_SDK_TEMPORAL_EVIDENCE: 'capture-read' });
 });
 
 test('entry tool budget exposes finish only on next actual HTTP request', async () => {

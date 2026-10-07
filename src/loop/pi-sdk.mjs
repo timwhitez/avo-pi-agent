@@ -504,7 +504,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           && initializedToolResultMaxChars !== maxToolResultChars) {
         throw new Error('Pi production loop tool result bound differs from the initialized limit');
       }
-      if (general && (!initializedPolicyProfile || workspaceMode !== 'disabled' || !productionToolContract
+      if (general && (temporalEvidence || !initializedPolicyProfile || workspaceMode !== 'disabled' || !productionToolContract
           || canonicalJson(policyToolContract(tools)) !== canonicalJson(GENERAL_TOOL_CONTRACT)
           || canonicalJson(productionToolContract) !== canonicalJson(GENERAL_TOOL_CONTRACT)
           || systemPrompt !== GENERAL_PROMPT || initializedToolResultMaxChars !== maxToolResultChars)) {

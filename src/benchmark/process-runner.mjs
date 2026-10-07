@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { buildExecutionTerminal } from '../trajectory/audit-events.mjs';
 import { wasAtomicWriteCommitted, writeJsonAtomic, REPORT_LIMITS } from './report-safe-files.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
@@ -138,6 +139,8 @@ export async function runProcess(command, args, {
 
   let stdoutTail = '';
   let stderrTail = '';
+  const stdoutDecoder = outputEncoding === null ? new StringDecoder('utf8') : null;
+  const stderrDecoder = outputEncoding === null ? new StringDecoder('utf8') : null;
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let timedOut = false;
@@ -180,7 +183,7 @@ export async function runProcess(command, args, {
       failStream(new Error(`child stdout exceeded ${stdoutLimit} byte limit`));
       return;
     }
-    stdoutTail = appendTail(stdoutTail, String(chunk), tailLimit);
+    stdoutTail = appendTail(stdoutTail, stdoutDecoder ? stdoutDecoder.write(chunk) : String(chunk), tailLimit);
     if (!invokeCallback(onStdout, chunk, 'stdout', failStream)) return;
     writeWithBackpressure(child.stdout, stdoutSink, chunk);
   });
@@ -190,7 +193,7 @@ export async function runProcess(command, args, {
       failStream(new Error(`child stderr exceeded ${stderrLimit} byte limit`));
       return;
     }
-    stderrTail = appendTail(stderrTail, String(chunk), tailLimit);
+    stderrTail = appendTail(stderrTail, stderrDecoder ? stderrDecoder.write(chunk) : String(chunk), tailLimit);
     if (!invokeCallback(onStderr, chunk, 'stderr', failStream)) return;
     writeWithBackpressure(child.stderr, stderrSink, chunk);
   });
@@ -225,6 +228,8 @@ export async function runProcess(command, args, {
       resolve({ status, signal });
     });
   });
+  if (stdoutDecoder) stdoutTail = appendTail(stdoutTail, stdoutDecoder.end(), tailLimit);
+  if (stderrDecoder) stderrTail = appendTail(stderrTail, stderrDecoder.end(), tailLimit);
   control?.stop();
 
   if (timeout) clearTimeout(timeout);
