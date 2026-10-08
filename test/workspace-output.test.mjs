@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { WorkspaceSandbox } from '../src/core/workspace.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent-base.mjs';
+import { TEST_TIMEOUT_SCALE, testObservationBudget } from './support/timeout-scale.mjs';
 
 function sandbox(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'avo-output-'));
@@ -73,6 +74,8 @@ test('real isolated Python returns bounded complete output envelopes', { skip: !
   const image = inspected.stdout.trim();
   assert.match(image, /^sha256:[a-f0-9]{64}$/);
   t.diagnostic(`Real container image: ${image}`);
+  const timeoutMs = testObservationBudget(10_000);
+  t.diagnostic(`AVO_TEST_TIMEOUT_SCALE=${TEST_TIMEOUT_SCALE}; ordinary container observation budget=${timeoutMs}ms`);
   const cases = [
     ['normal', 'print(2 + 3)', '5\n', '', false, false],
     ['exact limit', "import sys; sys.stdout.write('a' * 200000)", 'a'.repeat(200000), '', false, false],
@@ -83,7 +86,7 @@ test('real isolated Python returns bounded complete output envelopes', { skip: !
   ];
   for (const [label, code, stdout, stderr, stdoutTruncated, stderrTruncated] of cases) {
     await t.test(label, async (t) => {
-      const result = await sandbox(t, { containerImage: image }).runPython(code);
+      const result = await sandbox(t, { containerImage: image, timeoutMs }).runPython(code);
       assert.equal(result.ok, true, result.error);
       assert.equal(result.stdout, stdout);
       assert.equal(result.stderr, stderr);
