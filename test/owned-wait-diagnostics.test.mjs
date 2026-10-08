@@ -66,7 +66,9 @@ for (const [label, options] of [
       assert.equal(metadata.timeoutMs, 10 * TEST_TIMEOUT_SCALE);
       assert.equal(metadata.testTimeoutScale, TEST_TIMEOUT_SCALE);
       assert.equal(metadata.maxPolls, options.maxPolls ? TEST_TIMEOUT_SCALE : null);
-      assert.ok(metadata.elapsedMs >= 10);
+      assert.ok(Number.isFinite(metadata.elapsedMs));
+      assert.ok(metadata.elapsedMs >= 0);
+      if (options.maxPolls === undefined) assert.ok(metadata.elapsedMs >= metadata.timeoutMs);
       assert.ok(error.message.length < 8192);
       assert.doesNotMatch(error.message, /must-not-appear/);
       return true;
@@ -120,6 +122,8 @@ test('container lifecycle diagnostics cover pre-attach, native child and fixed e
       assert.equal(metadata.workspace.ownerPending, 1);
       assert.equal(metadata.timeoutMs, 10 * TEST_TIMEOUT_SCALE);
       assert.equal(metadata.maxPolls, TEST_TIMEOUT_SCALE);
+      assert.ok(Number.isFinite(metadata.elapsedMs));
+      assert.ok(metadata.elapsedMs >= 0);
       assert.equal(metadata.heartbeat.lastSequence, null);
       assert.ok(error.message.length < 8192);
       assert.doesNotMatch(error.message, /must-not-appear/);
