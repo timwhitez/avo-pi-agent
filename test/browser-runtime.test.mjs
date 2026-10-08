@@ -2,11 +2,48 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fixtureRuntime } from './support/general-browser.mjs';
+import { fixtureRuntime, trackTestDirectory, testDirectory } from './support/general-browser.mjs';
 import { buildBrowserChildEnvironment } from '../src/local/child-environment.mjs';
 import crypto from 'node:crypto';
 import { runProcess } from '../src/benchmark/process-runner.mjs';
-import { BrowserRuntime, createPrivateRun, resolveBrowserIdentity, parseStrictDoctor } from '../src/general/browser-runtime.mjs';
+import { BrowserRuntime, createPrivateRun, resolveBrowserIdentity, parseStrictDoctor, removeBrowserTemp } from '../src/general/browser-runtime.mjs';
+
+test('proven browser closure removes only its own process temp', async () => {
+  const r = fixtureRuntime();
+  const foreign = fixtureRuntime();
+  const link = `${foreign.tmpRoot}-link`;
+  fs.symlinkSync(foreign.tmpRoot, link);
+  try {
+    fs.writeFileSync(path.join(foreign.tmpRoot, 'keep'), 'foreign');
+    assert.equal((await r.exec(`import os\nfrom pathlib import Path\nos.symlink(${JSON.stringify(foreign.tmpRoot)}, ${JSON.stringify(path.join(r.tmpRoot, 'foreign-link'))})\np=Path(${JSON.stringify(path.join(r.tmpRoot, 'nested'))})\np.mkdir()\n(p/'temp').write_text('temporary')`)).details.ok, true);
+    const cleanup = await r.close();
+    assert.equal(fs.existsSync(r.tmpRoot), false);
+    assert.equal(cleanup.processTemp.state, 'removed');
+    assert.equal(fs.readFileSync(path.join(foreign.tmpRoot, 'keep'), 'utf8'), 'foreign');
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+  } finally { fs.unlinkSync(link); await foreign.close(); }
+});
+
+for (const replacement of ['directory', 'symlink']) test(`process temp identity refuses a replacement ${replacement}`, async () => {
+  const r = fixtureRuntime();
+  const foreign = testDirectory('g-foreign-');
+  const original = `${r.tmpRoot}-original`;
+  fs.writeFileSync(path.join(foreign, 'keep'), 'foreign');
+  fs.renameSync(r.tmpRoot, original);
+  if (replacement === 'symlink') fs.symlinkSync(foreign, r.tmpRoot);
+  else fs.mkdirSync(r.tmpRoot);
+  try {
+    const cleanup = await r.close();
+    assert.deepEqual(cleanup.processTemp, { state: 'retained', reason: 'process temp identity changed' });
+    assert.equal(fs.readFileSync(path.join(foreign, 'keep'), 'utf8'), 'foreign');
+    assert.equal(fs.lstatSync(r.tmpRoot).isSymbolicLink(), replacement === 'symlink');
+    assert.equal(fs.existsSync(original), true);
+  } finally {
+    if (replacement === 'symlink') fs.unlinkSync(r.tmpRoot); else fs.rmdirSync(r.tmpRoot);
+    fs.renameSync(original, r.tmpRoot);
+    assert.equal((await removeBrowserTemp(r.tmpRoot, r.identity, r.tmpIdentity)).state, 'removed');
+  }
+});
 
 test('browser_env_deny_forced_controls', () => {
   const env = buildBrowserChildEnvironment({ source: { OPENAI_API_KEY: 'synthetic', BROWSER_USE_API_KEY: 'synthetic', HTTP_PROXY: 'synthetic', BU_AUTOSPAWN: '0', PYTHONPATH: 'x', LANG: 'C.UTF-8' }, venv: '/private/venv', browserRoot: '/private/browser', name: 'g-test' });
@@ -67,7 +104,14 @@ test('artifact FIFO refusal; closed active execution cancels; cleanup unknown st
   await new Promise((resolve) => setTimeout(resolve, 50));
   await r.close(); assert.equal((await active).details.effects, 'unknown');
   const unknown = fixtureRuntime(); unknown.children.push({ controller: new AbortController(), promise: Promise.resolve(), result: { drainTimedOut: true } });
-  await assert.rejects(unknown.close(), /cleanup unknown/);
+  try {
+    await assert.rejects(unknown.close(), (error) => {
+      assert.match(error.message, /cleanup unknown/);
+      assert.deepEqual(error.cleanup.processTemp, { state: 'retained', reason: 'owned-child closure unknown' });
+      return true;
+    });
+    assert.equal(fs.existsSync(unknown.tmpRoot), true);
+  } finally { unknown.children = []; await unknown.close(); }
 });
 
 test('test-owned ENOSPC sink retains only saved prefix and its hash', async () => {
@@ -102,7 +146,7 @@ test('private handover uses descriptors, leaves before parents; browser cannot w
     return original.fchown(fd, uid, gid);
   };
   let root;
-  try { root = createPrivateRun(runId, identity); }
+  try { root = trackTestDirectory(createPrivateRun(runId, identity), identity); }
   finally { fs.chownSync = original.chown; fs.chmodSync = original.chmod; fs.fchownSync = original.fchown; }
   assert.equal(fs.statSync(root).uid, process.geteuid());
   assert.equal(fs.statSync(path.join(root, 'host')).mode & 0o777, 0o700);

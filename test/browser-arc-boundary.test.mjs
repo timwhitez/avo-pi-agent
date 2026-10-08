@@ -9,18 +9,19 @@ import { POLICY_PROFILE_NAMES, policySystemPrompt, normalizePolicyProfile } from
 import { runtimeStatusMessage, runtimeStatusTemplate, transcriptPolicySource, pruneGeneralImages } from '../src/loop/pi-sdk.mjs';
 import { withLoopback } from './support/responses-loopback.mjs';
 import { scripted, environment, runAgent } from './support/pi-agent-run.mjs';
+import { testDirectory } from './support/general-browser.mjs';
 import { RUN_CAPSULE_COMPONENT_FILES } from '../src/benchmark/run-capsule.mjs';
 
 for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac33053689583d6bf6cc47a8d6a8e0b']) {
-  const base = path.resolve(`.bt/baseline-${revision.slice(0, 7)}`);
   function prepareBaseline() {
-    fs.mkdirSync(base, { recursive: true });
+    const base = testDirectory(`baseline-${revision.slice(0, 7)}-`);
     const archive = execFileSync('git', ['archive', revision, 'src'], { maxBuffer: 16 * 1024 * 1024 });
     execFileSync('tar', ['-x', '-C', base], { input: archive });
+    return base;
   }
 
   test(`arc_baseline_contract_bytes_all_profiles_modes (${revision.slice(0, 7)}); unchanged policy digest and honest source changes`, async () => {
-    prepareBaseline();
+    const base = prepareBaseline();
     const policy = await import(pathToFileURL(path.join(base, 'src/core/policy-profile.mjs')));
     const agent = await import(pathToFileURL(path.join(base, 'src/core/avo-agent-base.mjs')));
     const pi = await import(pathToFileURL(path.join(base, 'src/loop/pi-sdk.mjs')));
@@ -40,7 +41,7 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
   });
 
   test(`arc_mock_pi_frame_finish_action_contract (${revision.slice(0, 7)}) baseline versus candidate actual HTTP bodies`, async () => {
-    prepareBaseline();
+    const base = prepareBaseline();
     // Run the same installed Pi synthetic game from the baseline modules and candidate.
     const baselineAgent = await import(pathToFileURL(path.join(base, 'src/core/avo-agent.mjs')));
     const baselinePi = await import(pathToFileURL(path.join(base, 'src/loop/pi-sdk.mjs')));
@@ -48,7 +49,7 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
     const turns = [{ callId: 'a1', name: 'act', args: { action: 'ACTION1' } }, { callId: 'f1', name: 'finish', args: {} }];
     const requestSets = [];
     for (const candidate of [false, true]) await withLoopback(scripted(turns), async ({ url, bodies }) => {
-      const root = fs.mkdtempSync(path.resolve('.bt/arc-diff-'));
+      const root = testDirectory('arc-diff-');
       const env = environment({ gameId: 'visibility-v1', step: () => ({ game_id: 'visibility-v1', frame: [[1,0],[0,0]], state: 'WIN', levels_completed: 3, win_levels: 3, guid: 'guid-1', available_actions: ['ACTION1'] }) });
       if (candidate) {
         const markers = { AVO_GENERAL_BROWSER_USER: 'does-not-exist', AVO_GENERAL_BROWSER_VENV: '/missing-browser-stack', BU_CDP_WS: 'unusable', BROWSER_USE_API_KEY: 'synthetic', BH_HOME: '/unusable' };

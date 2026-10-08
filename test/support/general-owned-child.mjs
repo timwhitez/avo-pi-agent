@@ -13,5 +13,5 @@ const r = new BrowserRuntime({ root: createPrivateRun(runId, identity), identity
 const abort = async () => { await r.close(); await scope.close(); lock.release(); process.exit(0); };
 process.on('SIGTERM', abort);
 await r.start();
-fs.writeFileSync(process.argv[4], JSON.stringify({ host: process.pid, group: Number(process.env.AVO_PROCESS_GROUP), children: r.children.map((v) => v.child.pid) }));
+fs.writeFileSync(process.argv[4], JSON.stringify({ host: process.pid, group: Number(process.env.AVO_PROCESS_GROUP), children: r.children.map((v) => v.child.pid), root: r.root, tmpRoot: r.tmpRoot, tmpIdentity: r.tmpIdentity, identity }));
 await new Promise(() => {});
