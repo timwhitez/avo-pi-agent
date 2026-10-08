@@ -19,16 +19,25 @@ coverage rather than calling it passed.
 `AVO_TEST_TIMEOUT_SCALE` is a test-only observation budget multiplier: an integer
 from 1 to 10, parsed once; malformed values fail. Default 1 is the strict baseline
 (60,000 ms public-runner child capture and 10,000 ms ordinary Docker output
-correctness cases). Use 3 on shared or oversubscribed hosts (180,000 / 30,000 ms):
+correctness cases). Use 3 on shared or oversubscribed hosts (270,000 ms
+public-runner capture, separate 180,000 ms nested job budget, and 30,000 ms
+ordinary Docker output observation):
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" AVO_TEST_WORKSPACE_IMAGE=python:3.12-slim AVO_TEST_TIMEOUT_SCALE=3 npm test
 ```
 
 Diagnostics record the scale and effective observation budget. Intentional
-timeout/signal/overflow controls, nested benchmark job fixture deadlines,
-production deadlines/defaults, output bounds, workloads and default concurrency
-stay unchanged. If sanitizing the test environment, explicitly restore only
+timeout/signal/overflow controls, production deadlines/defaults, output bounds,
+workloads and default concurrency stay unchanged. The public-runner contract's
+positive 60,000 ms nested job fixtures scale before launch/capsule sealing after
+classified job-deadline witnesses (#391): scale 3 uses 180,000 ms nested and
+270,000 ms outer capture. Scale 1 preserves the existing 60,000/60,000 ms bounds;
+only scales above 1 add 50% outer headroom. Already sealed capsules are never
+rewritten. The UI's separate 120,000 ms job stays fixed. Heartbeat observation
+poll counts scale; container-owner 3,000 ms and owned-workspace 4,000 ms
+paused-expiry controls and pause/death/cleanup windows stay fixed.
+If sanitizing the test environment, explicitly restore only
 `AVO_TEST_TIMEOUT_SCALE` for tests that need it; do not broaden product allowlists.
 A scaled pass is robustness evidence for that host context, not resolution of
 the historical #383 runner or Docker causes, which remain UNKNOWN.

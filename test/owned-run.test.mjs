@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { liveGroupMembers } from '../src/local/process-group.mjs';
 import { acquireLocalExecutionLock } from '../src/local/run-lock.mjs';
 import { signalProcessTree } from '../apps/mission-control-v3/lib/run-contract.mjs';
+import { observeOwnedChild, waitForOwnedObservation } from './support/owned-wait.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
 
@@ -147,10 +148,13 @@ try {
       const closed = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
       const exited = new Promise((resolve) => child.once('exit', resolve));
       let groupId = child.pid;
+      let ids;
+      const evidence = observeOwnedChild(child, { root, heartbeat,
+        group: () => groupId, pids: () => [ids?.worker, ids?.bridge] });
       try {
         for (let i = 0; i < 200 && !output.includes('bridge'); i += 1) await delay(10);
         assert.ok(output.includes('bridge'), errors || output);
-        const ids = JSON.parse(output.trim().split('\n')[0]);
+        ids = JSON.parse(output.trim().split('\n')[0]);
         groupId = ids.owner;
         const group = liveGroupMembers(groupId);
         assert.ok(group.includes(ids.worker), 'runner must share the wrapper group');
@@ -163,8 +167,8 @@ try {
           await delay(100);
           assert.equal(fs.readFileSync(heartbeat, 'utf8'), paused);
           signalProcessTree({ pid: groupId }, 'SIGCONT');
-          for (let i = 0; i < 100 && fs.readFileSync(heartbeat, 'utf8') === paused; i += 1) await delay(10);
-          assert.notEqual(fs.readFileSync(heartbeat, 'utf8'), paused);
+          await waitForOwnedObservation(() => fs.readFileSync(heartbeat, 'utf8') !== paused,
+            'resume must restart owned-run heartbeat', evidence, 1000, { maxPolls: 100, checkAfterExpiry: true });
           if (termination.startsWith('normal')) fs.writeFileSync(path.join(root, 'finish'), 'finish');
           else if (termination === 'abort') signalProcessTree({ pid: groupId }, 'SIGTERM');
           else if (termination !== 'normal') child.kill(termination.startsWith('SIGKILL') ? 'SIGKILL' : termination);

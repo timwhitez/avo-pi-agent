@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { controlOwnedRun } from '../src/local/owned-run-control.mjs';
 import { acquireLocalExecutionLock, readLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { observeOwnedChild, waitForOwnedObservation, workspaceFailureReason } from './support/owned-wait.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
 async function waitFor(predicate, message, timeoutMs = null) {
@@ -33,10 +34,12 @@ test('managed production workspace owns real daemon containers across process de
       const worker = path.join(root, 'worker.mjs');
       const wrapper = path.join(root, 'wrapper.mjs');
       const code = "import pathlib,time\np=pathlib.Path('heartbeat.txt')\nfor count in range(10000):\n p.write_text(str(count))\n time.sleep(0.02)";
+      // Deliberate paused-expiry control, not a positive observation budget.
+      const workspaceTimeoutMs = mode === 'paused-timeout' ? 4000 : 15000;
       fs.writeFileSync(worker, `
 import { WorkspaceSandbox } from ${moduleUrl('src/core/workspace.mjs')};
 console.log(JSON.stringify({ worker: process.pid }));
-const workspace = new WorkspaceSandbox({ root: ${JSON.stringify(path.join(root, 'workspace'))}, gameId: 'fixture', mode: 'isolated-python', containerImage: ${JSON.stringify(image)}, timeoutMs: ${mode === 'paused-timeout' ? 4000 : 15000} });
+const workspace = new WorkspaceSandbox({ root: ${JSON.stringify(path.join(root, 'workspace'))}, gameId: 'fixture', mode: 'isolated-python', containerImage: ${JSON.stringify(image)}, timeoutMs: ${workspaceTimeoutMs} });
 try { await workspace.runPython(${JSON.stringify(code)}); } catch (error) { console.error(error.message); }
 `);
       fs.writeFileSync(wrapper, `
@@ -57,8 +60,15 @@ finally { await scope.close(); lock.release(); }
       const closed = new Promise((resolve) => child.once('close', resolve));
       let guardian;
       let ids = [];
+      const nativeEvidence = observeOwnedChild(child, { root, heartbeat, pids: () => {
+        try { return [JSON.parse(output.trim().split('\n')[0]).worker]; } catch { return []; }
+      } });
+      const evidence = { sample: nativeEvidence.sample, snapshot: () => ({ ...nativeEvidence.snapshot(),
+        fixture: { mode, workspaceTimeoutMs,
+          workerOutcome: workspaceFailureReason(errors.replace(/\n$/, ''), workspaceTimeoutMs) } }) };
       try {
-        await waitFor(() => fs.existsSync(heartbeat), () => `heartbeat missing: ${errors}`);
+        await waitForOwnedObservation(() => fs.existsSync(heartbeat), `owned-workspace ${mode} heartbeat missing`, evidence,
+          5000, { maxPolls: 500 });
         guardian = readLocalExecutionLock(root).workspaceGuardian;
         ids = fs.readdirSync(guardian.directory).filter((name) => name.endsWith('-created.json')).map((name) => JSON.parse(fs.readFileSync(path.join(guardian.directory, name))).containerId);
         assert.equal(ids.length, 1);
@@ -69,7 +79,8 @@ finally { await scope.close(); lock.release(); }
         assert.throws(() => acquireLocalExecutionLock({ root, inheritedToken: '' }), /another local/);
         if (mode !== 'paused-timeout') {
           await controlOwnedRun(child.pid, 'resume', { root });
-          await waitFor(() => fs.readFileSync(heartbeat, 'utf8') !== paused, 'resume must restart heartbeat');
+          await waitForOwnedObservation(() => fs.readFileSync(heartbeat, 'utf8') !== paused,
+            'resume must restart owned-workspace heartbeat', evidence, 5000, { maxPolls: 500 });
           if (mode === 'owner-death') child.kill('SIGKILL');
           else if (mode === 'client-death') process.kill(JSON.parse(output.trim().split('\n')[0]).worker, 'SIGKILL');
           else process.kill(guardian.pid, 'SIGKILL');
