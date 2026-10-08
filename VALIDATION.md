@@ -16,6 +16,23 @@ environment first. If container coverage is required, use an already-local image
 and set `AVO_TEST_WORKSPACE_IMAGE` as appropriate; report skipped or unavailable
 coverage rather than calling it passed.
 
+`AVO_TEST_TIMEOUT_SCALE` is a test-only observation budget multiplier: an integer
+from 1 to 10, parsed once; malformed values fail. Default 1 is the strict baseline
+(60,000 ms public-runner child capture and 10,000 ms ordinary Docker output
+correctness cases). Use 3 on shared or oversubscribed hosts (180,000 / 30,000 ms):
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" AVO_TEST_WORKSPACE_IMAGE=python:3.12-slim AVO_TEST_TIMEOUT_SCALE=3 npm test
+```
+
+Diagnostics record the scale and effective observation budget. Intentional
+timeout/signal/overflow controls, nested benchmark job fixture deadlines,
+production deadlines/defaults, output bounds, workloads and default concurrency
+stay unchanged. If sanitizing the test environment, explicitly restore only
+`AVO_TEST_TIMEOUT_SCALE` for tests that need it; do not broaden product allowlists.
+A scaled pass is robustness evidence for that host context, not resolution of
+the historical #383 runner or Docker causes, which remain UNKNOWN.
+
 For web changes:
 
 ```bash

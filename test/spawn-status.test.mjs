@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { spawnWithExpectedStatus } from './support/spawn-status.mjs';
+import { spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { assertSpawnStatus, spawnWithExpectedStatus } from './support/spawn-status.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
 
 const run = (phase, script, options = {}, expectedStatus = 0) => spawnWithExpectedStatus(
@@ -14,6 +16,34 @@ test('spawn status helper preserves successful output and expected failure statu
   assert.equal(result.stdout, 'ok');
   assert.equal(result.stderr, 'note');
   assert.equal(run('expected-rejection', 'process.exit(3);', {}, 3).status, 3);
+});
+
+test('Python shim validation forwards numeric exits and diagnoses inherited launch failures', () => {
+  const options = { stdio: 'inherit' };
+  for (const status of [0, 7]) {
+    const started = performance.now();
+    const result = spawnSync(process.execPath, ['--eval', `process.exit(${status});`], options);
+    assert.equal(assertSpawnStatus('python-shim', result, options, performance.now() - started).status, status);
+    assert.equal(result.metadata.stdoutBytes, 'inherited');
+    assert.equal(result.metadata.stderrBytes, 'inherited');
+  }
+  for (const [command, args, expectedError] of [
+    [path.join(temporaryDirectory('avo-shim-launch-'), 'missing-python'), [], 'ENOENT'],
+    [process.execPath, ['--eval', 'process.kill(process.pid, "SIGTERM");'], null],
+  ]) {
+    const started = performance.now();
+    const result = spawnSync(command, args, options);
+    assert.throws(() => assertSpawnStatus('python-shim', result, options, performance.now() - started), (error) => {
+      const metadata = JSON.parse(error.message.split('\n')[0]);
+      assert.equal(metadata.expectedStatus, 'forwarded');
+      assert.equal(metadata.error?.code ?? null, expectedError);
+      assert.equal(metadata.signal, expectedError ? null : 'SIGTERM');
+      assert.equal(metadata.stdoutBytes, 'inherited');
+      assert.equal(metadata.stderrBytes, 'inherited');
+      assert.ok(error.message.endsWith('\nstdout:\n[inherited]\nstderr:\n[inherited]'));
+      return true;
+    });
+  }
 });
 
 test('spawn timeout diagnostics retain the actual process error and deadline', () => {

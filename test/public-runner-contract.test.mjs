@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
@@ -31,9 +30,12 @@ import { verifyLiveObservation } from './support/live-observation.mjs';
 import { readRunObservation } from '../src/benchmark/run-observation.mjs';
 import { loadResumedRecords } from '../src/benchmark/resume-cache.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
-import { spawnWithExpectedStatus } from './support/spawn-status.mjs';
+import { spawnWithExpectedStatus, withSpawnDiagnostics } from './support/spawn-status.mjs';
+import { TEST_TIMEOUT_SCALE, testObservationBudget } from './support/timeout-scale.mjs';
 
-test('full public-runner boundary completes 25 mocked games in one cumulative session', async () => {
+test('full public-runner boundary completes 25 mocked games in one cumulative session', async (t) => {
+  const runnerTimeoutMs = testObservationBudget(60_000);
+  t.diagnostic(`AVO_TEST_TIMEOUT_SCALE=${TEST_TIMEOUT_SCALE}; runner observation budget=${runnerTimeoutMs}ms`);
   const root = temporaryDirectory('avo-public-contract-');
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
@@ -675,6 +677,8 @@ class Arcade:
   const fakePython = path.join(root, 'fake-python');
   fs.writeFileSync(fakePython, `#!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
+import { assertSpawnStatus } from ${JSON.stringify(pathToFileURL(path.resolve('test/support/spawn-status.mjs')).href)};
 const args = process.argv.slice(2);
 if (args[0] === '-c' && args[1]?.includes('distribution_info')) {
   process.stdout.write(JSON.stringify({
@@ -689,10 +693,13 @@ if (args[0] === '-c' && args[1]?.includes('distribution_info')) {
   }) + '\\n');
   process.exit(0);
 }
-const result = spawnSync('python3', args, {
+const options = {
   stdio: 'inherit',
   env: { ...process.env, PYTHONPATH: ${JSON.stringify(fakePy)} },
-});
+};
+const started = performance.now();
+const result = spawnSync('python3', args, options);
+assertSpawnStatus('python-shim:' + (args[0] ?? 'stdin'), result, options, performance.now() - started);
 process.exit(result.status ?? 1);
 `);
   fs.chmodSync(fakePython, 0o755);
@@ -705,10 +712,9 @@ process.exit(result.status ?? 1);
     ['add', '.'],
     ['commit', '-m', 'contract fixture'],
   ]) {
-    const git = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-    assert.equal(git.status, 0, git.stderr || git.stdout);
+    spawnWithExpectedStatus(`fixture-git:${args.join(' ')}`, 'git', args, { cwd: root, encoding: 'utf8' }, 0);
   }
-  const gitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  const gitSha = spawnWithExpectedStatus('fixture-git-head', 'git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
   const privateDir = path.join(root, 'runs', 'private', 'contract-run');
   const runState = prepareRunState({ root, privateDir, runId: 'contract-run', env: {} });
   const config = {
@@ -871,59 +877,54 @@ try {
   await client.close();
 }
 `;
-  const bridgeGuard = spawnSync(process.execPath, ['--input-type=module', '--eval', bridgeGuardScript], {
+  spawnWithExpectedStatus('bridge-guard', process.execPath, ['--input-type=module', '--eval', bridgeGuardScript], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: childEnv,
-  });
-  assert.equal(bridgeGuard.status, 0, bridgeGuard.stderr || bridgeGuard.stdout);
+  }, 0);
 
   const withoutCapsule = { ...childEnv, AVO_REQUIRE_REAL_PROVIDER: '1' };
   delete withoutCapsule.AVO_RESUME_DIR;
-  const missingCapsule = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const missingCapsule = spawnWithExpectedStatus('missing-capsule', process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: withoutCapsule,
-  });
-  assert.equal(missingCapsule.status, 1, missingCapsule.stderr || missingCapsule.stdout);
-  assert.match(missingCapsule.stderr, /requires a capsule-bound resume directory/);
-  assert.doesNotMatch(missingCapsule.stdout, /\[1\/25\]/);
+  }, 1);
+  assert.match(missingCapsule.stderr, /requires a capsule-bound resume directory/, missingCapsule.diagnostics);
+  assert.doesNotMatch(missingCapsule.stdout, /\[1\/25\]/, missingCapsule.diagnostics);
 
-  const profileDrift = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const profileDrift = spawnWithExpectedStatus('profile-drift', process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: { ...childEnv, AVO_POLICY_PROFILE: 'current-v1' },
-  });
-  assert.equal(profileDrift.status, 1, profileDrift.stderr || profileDrift.stdout);
-  assert.match(profileDrift.stderr, /effective execution config differs/);
-  assert.doesNotMatch(profileDrift.stdout, /\[1\/25\]/);
+  }, 1);
+  assert.match(profileDrift.stderr, /effective execution config differs/, profileDrift.diagnostics);
+  assert.doesNotMatch(profileDrift.stdout, /\[1\/25\]/, profileDrift.diagnostics);
 
   const configFile = path.join(root, 'src', 'config.mjs');
   const originalConfig = fs.readFileSync(configFile);
   fs.appendFileSync(configFile, '\n// post-capsule mutation\n');
-  const rejected = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const rejected = spawnWithExpectedStatus('rejected-checkout', process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: childEnv,
-  });
-  assert.equal(rejected.status, 1, rejected.stderr || rejected.stdout);
-  assert.match(rejected.stderr, /execution Git checkout differs from the sealed run capsule/);
-  assert.doesNotMatch(rejected.stdout, /\[1\/25\]/);
+  }, 1);
+  assert.match(rejected.stderr, /execution Git checkout differs from the sealed run capsule/, rejected.diagnostics);
+  assert.doesNotMatch(rejected.stdout, /\[1\/25\]/, rejected.diagnostics);
   fs.writeFileSync(configFile, originalConfig);
 
-  const subset = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--game=g01'], {
+  const subset = spawnWithExpectedStatus('subset-rejection', process.execPath, ['src/cli.mjs', 'run-public', '--game=g01'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: childEnv,
-  });
-  assert.equal(subset.status, 1, subset.stderr || subset.stdout);
-  assert.match(subset.stderr, /effective public game set differs from the sealed run capsule/);
-  assert.doesNotMatch(subset.stdout, /\[1\/1\]/);
+  }, 1);
+  assert.match(subset.stderr, /effective public game set differs from the sealed run capsule/, subset.diagnostics);
+  assert.doesNotMatch(subset.stdout, /\[1\/1\]/, subset.diagnostics);
 
   const cliFile = path.join(root, 'src', 'cli.mjs');
   const fastRetryBootstrap = `
@@ -956,20 +957,19 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     const capsulePath = path.join(directory, 'run-capsule.json');
     writeRunCapsule(capsulePath, bound, { root: directory });
     const progressPath = path.join(directory, 'progress.jsonl');
-    const execution = spawnSync(process.execPath, ['--input-type=module', '--eval',
+    const execution = spawnWithExpectedStatus(`progress:${mode}`, process.execPath, ['--input-type=module', '--eval',
       fastRetryBootstrap.replace("'--all'", "'--game=g02-v1'")], {
-      cwd: root, encoding: 'utf8', timeout: 60000,
+      cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs,
       env: { ...childEnv, AVO_REPAIR_ROUND: id, AVO_REAL_RUN_ID: id,
         AVO_GAME_CONCURRENCY: '1', AVO_STATUS_TOKEN: '', AVO_TEST_PROGRESS_FILE: progressPath,
         AVO_MEMORY_DIR: state.memoryDir, AVO_WORKSPACE_DIR: state.workspaceDir,
         AVO_RESUME_DIR: path.join(directory, 'resume'), AVO_RUN_CAPSULE_FILE: capsulePath,
         AVO_RUN_CAPSULE_HASH: bound.capsuleHash },
-    });
-    assert.equal(execution.status, exitCode, `${id}: ${execution.stderr}\n${execution.stdout}`);
+    }, exitCode);
     if (mode === 'prefix-error') {
-      assert.match(execution.stderr, /forwarded gameplay count differs from agent accounting/);
+      assert.match(execution.stderr, /forwarded gameplay count differs from agent accounting/, execution.diagnostics);
     }
-    const events = fs.readFileSync(progressPath, 'utf8').trim().split('\n').map(JSON.parse);
+    const events = withSpawnDiagnostics(execution, () => fs.readFileSync(progressPath, 'utf8').trim().split('\n').map(JSON.parse));
     const finished = events.filter((event) => event.name === 'gameFinished').at(-1).value.result;
     assert.equal(finished.actions, actions, id);
     assert.equal(finished.levelsCompleted, levels, id);
@@ -1014,10 +1014,10 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   });
   const exhaustedCapsuleFile = path.join(exhaustedPrivateDir, 'run-capsule.json');
   writeRunCapsule(exhaustedCapsuleFile, exhaustedCapsule, { root: exhaustedPrivateDir });
-  const exhausted = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+  const exhausted = spawnWithExpectedStatus('exhaust-open', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: {
       ...childEnv,
       AVO_REPAIR_ROUND: 'exhaust-open',
@@ -1029,12 +1029,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_RUN_CAPSULE_HASH: exhaustedCapsule.capsuleHash,
       AVO_RUN_CAPSULE_FILE: exhaustedCapsuleFile,
     },
-  });
-  assert.equal(exhausted.status, 1, exhausted.stderr || exhausted.stdout);
-  assert.match(exhausted.stdout, /g01: attempt 1\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/, exhausted.stderr);
-  assert.match(exhausted.stdout, /g01: attempt 2\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/);
+  }, 1);
+  assert.match(exhausted.stdout, /g01: attempt 1\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/, exhausted.diagnostics);
+  assert.match(exhausted.stdout, /g01: attempt 2\/3 failed \(RuntimeError: synthetic persistent environment open failure\); retrying/, exhausted.diagnostics);
   const exhaustedReportFile = path.join(root, 'runs', `${exhaustedRunId}-official-public-environments.json`);
-  const exhaustedReport = JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8'));
+  const exhaustedReport = withSpawnDiagnostics(exhausted, () => JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8')));
   assert.equal(exhaustedReport.summary.games, 0);
   assert.notEqual(exhaustedReport.scoreStatus, 'official');
   assert.equal(exhaustedReport.scorecardCoverage.exact, false);
@@ -1052,22 +1051,21 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     AVO_RUN_CAPSULE_HASH: exhaustedCapsule.capsuleHash,
     AVO_RUN_CAPSULE_FILE: exhaustedCapsuleFile,
   };
-  const partial = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
-    cwd: root, encoding: 'utf8', timeout: 60_000, env: partialEnv,
-  });
-  assert.doesNotMatch(partial.stderr, /resume state authority does not bind/);
-  const partialReport = JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8'));
+  const partial = spawnWithExpectedStatus('partial-state', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, env: partialEnv,
+  }, 0); // Individual game errors are report data, not CLI runError (src/cli.mjs:549–557), so this child exits 0.
+  assert.doesNotMatch(partial.stderr, /resume state authority does not bind/, partial.diagnostics);
+  const partialReport = withSpawnDiagnostics(partial, () => JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8')));
   const partialGames = partialReport.results;
   assert.match(partialGames.find((game) => game.gameId === 'g25').error, /synthetic provider unavailable/);
   assert.equal(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g25.json')), false);
   assert.ok(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g24.json')));
-  const partialRecovery = spawnSync(process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
-    cwd: root, encoding: 'utf8', timeout: 60_000,
+  const partialRecovery = spawnWithExpectedStatus('partial-recovery', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs,
     env: { ...partialEnv, AVO_REPAIR_ROUND: '', AVO_RUN_CLASS: 'recovered' },
-  });
-  assert.equal(partialRecovery.status, 0, partialRecovery.stderr || partialRecovery.stdout);
-  assert.match(partialRecovery.stdout, /\[resume\] 24 completed game checkpoint/);
-  assert.doesNotMatch(partialRecovery.stdout, /g25 resumed from checkpoint/);
+  }, 0);
+  assert.match(partialRecovery.stdout, /\[resume\] 24 completed game checkpoint/, partialRecovery.diagnostics);
+  assert.doesNotMatch(partialRecovery.stdout, /g25 resumed from checkpoint/, partialRecovery.diagnostics);
   assert.ok(fs.existsSync(path.join(exhaustedPrivateDir, 'resume', 'g25.json')));
   fs.rmSync(exhaustedReportFile);
 
@@ -1075,7 +1073,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const result = spawnWithExpectedStatus('recover-open', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: {
       ...childEnv,
       AVO_REPAIR_ROUND: 'recover-open',
@@ -1084,20 +1082,20 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_PRIVATE_ASSISTANT_LOG: '1',
     },
   });
-  const privateFailures = fs.readFileSync(path.join(privateDir, 'tool-failures.jsonl'), 'utf8')
-    .trim().split('\n').map(JSON.parse);
+  const privateFailures = withSpawnDiagnostics(result, () => fs.readFileSync(path.join(privateDir, 'tool-failures.jsonl'), 'utf8')
+    .trim().split('\n').map(JSON.parse));
   assert.ok(privateFailures.some((record) => record.toolName === 'workspace_write'
     && record.outcome === 'tool-reported-unsuccessful' && record.error.includes('PRIVATE_MODEL_REASONING')));
   assert.ok(privateFailures.some((record) => record.toolName === 'workspace_write'
     && record.outcome === 'exception-or-validation'));
   assert.ok(privateFailures.every((record) => record.capsuleHash === capsule.capsuleHash));
-  assert.match(result.stdout, /g02: attempt 2\/3 failed \(RuntimeError: synthetic transient environment reopen failure\); retrying/);
-  assert.match(result.stdout, /g03: attempt 1\/3 failed \(RuntimeError: synthetic transient tracked-open failure\); retrying/);
-  assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/);
-  assert.match(result.stdout, /\[25\/25\] g25/);
-  assert.match(result.stdout, /"games": 25/);
-  assert.match(result.stdout, /"wins": 24/);
-  assert.match(result.stdout, /"officialScore": 0/);
+  assert.match(result.stdout, /g02: attempt 2\/3 failed \(RuntimeError: synthetic transient environment reopen failure\); retrying/, result.diagnostics);
+  assert.match(result.stdout, /g03: attempt 1\/3 failed \(RuntimeError: synthetic transient tracked-open failure\); retrying/, result.diagnostics);
+  assert.doesNotMatch(result.stderr, /raw-card-private-123|raw-guid-private-456/, result.diagnostics);
+  assert.match(result.stdout, /\[25\/25\] g25/, result.diagnostics);
+  assert.match(result.stdout, /"games": 25/, result.diagnostics);
+  assert.match(result.stdout, /"wins": 24/, result.diagnostics);
+  assert.match(result.stdout, /"officialScore": 0/, result.diagnostics);
   const contextRecords = result.stdout.split('\n')
     .filter((line) => line.startsWith('[avo-context] '))
     .map((line) => JSON.parse(line.slice('[avo-context] '.length)));
@@ -1171,11 +1169,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     gameId: 'g01', versionedGameId: 'g01-v1', attempt: 1, contextSequence: 5,
     type: 'avo_provider_incident', category: 'http-error', requestSequence: 1,
   }]);
-  assert.doesNotMatch(result.stdout, /PRIVATE_MODEL_REASONING|Received arguments/);
+  assert.doesNotMatch(result.stdout, /PRIVATE_MODEL_REASONING|Received arguments/, result.diagnostics);
 
   const reports = fs.readdirSync(path.join(root, 'runs')).filter((name) => name.endsWith('.json'));
   assert.equal(reports.length, 1);
-  const report = JSON.parse(fs.readFileSync(path.join(root, 'runs', reports[0]), 'utf8'));
+  const report = withSpawnDiagnostics(result, () => JSON.parse(fs.readFileSync(path.join(root, 'runs', reports[0]), 'utf8')));
   assert.equal(report.scoreStatus, 'official');
   assert.equal(report.scorecardCoverage.exact, true);
   assert.equal(report.scorecardEvidence.length, 1);
@@ -1256,22 +1254,19 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(stateAuthority.schema, 'avo.resume-state.v1');
   assert.equal(stateAuthority.activeCapsuleHash, capsule.capsuleHash);
 
-  const recovered = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const recovered = spawnWithExpectedStatus('recovered', process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: { ...childEnv, AVO_RUN_CLASS: 'recovered' },
-  });
-  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
-  assert.match(recovered.stdout, /\[resume\] 25 completed game checkpoint/);
-  assert.match(recovered.stdout, /g25 resumed from checkpoint/);
+  }, 0);
+  assert.match(recovered.stdout, /\[resume\] 25 completed game checkpoint/, recovered.diagnostics);
+  assert.match(recovered.stdout, /g25 resumed from checkpoint/, recovered.diagnostics);
 
   fs.writeFileSync(path.join(root, 'migration.txt'), 'changed capsule condition\n');
-  const migrationCommit = spawnSync('git', ['add', 'migration.txt'], { cwd: root, encoding: 'utf8' });
-  assert.equal(migrationCommit.status, 0, migrationCommit.stderr || migrationCommit.stdout);
-  const committedMigration = spawnSync('git', ['commit', '-m', 'migration condition'], { cwd: root, encoding: 'utf8' });
-  assert.equal(committedMigration.status, 0, committedMigration.stderr || committedMigration.stdout);
-  const migratedGitSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+  spawnWithExpectedStatus('migration-git-add', 'git', ['add', 'migration.txt'], { cwd: root, encoding: 'utf8' }, 0);
+  spawnWithExpectedStatus('migration-git-commit', 'git', ['commit', '-m', 'migration condition'], { cwd: root, encoding: 'utf8' }, 0);
+  const migratedGitSha = spawnWithExpectedStatus('migration-git-head', 'git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
   const migratedState = prepareRunState({
     root,
     privateDir,
@@ -1308,10 +1303,10 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(retryTrajectoryStart.trajectoryEvidence.complete, true);
   const migratedCapsuleFile = path.join(privateDir, `run-capsule.${migratedCapsule.capsuleHash}.json`);
   writeRunCapsule(migratedCapsuleFile, migratedCapsule, { root: privateDir });
-  const migrated = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
+  const migrated = spawnWithExpectedStatus('migrated', process.execPath, ['src/cli.mjs', 'run-public', '--all'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: {
       ...childEnv,
       AVO_RUN_CAPSULE_HASH: migratedCapsule.capsuleHash,
@@ -1319,15 +1314,14 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_RESUME_SOURCE_CAPSULE_HASH: capsule.capsuleHash,
       AVO_RUN_CLASS: 'diagnostic-migrated',
     },
-  });
-  assert.equal(migrated.status, 0, migrated.stderr || migrated.stdout);
-  assert.match(migrated.stdout, /\[resume\] 25 completed game checkpoint/);
+  }, 0);
+  assert.match(migrated.stdout, /\[resume\] 25 completed game checkpoint/, migrated.diagnostics);
 
   const outerRunId = 'outer-contract-run';
-  const outer = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
+  const outer = spawnWithExpectedStatus('outer-contract', process.execPath, ['scripts/run-real-public.mjs'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: {
       ...process.env,
       AVO_DISABLE_DOTENV: '1',
@@ -1344,14 +1338,13 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_POLICY_PROFILE: 'minimal-v1',
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
     },
-  });
-  assert.equal(outer.status, 0, outer.stderr || outer.stdout);
-  assert.match(outer.stdout, /COMPLETE score=0/);
+  }, 0);
+  assert.match(outer.stdout, /COMPLETE score=0/, outer.diagnostics);
 
-  const publishedReport = JSON.parse(fs.readFileSync(
+  const publishedReport = withSpawnDiagnostics(outer, () => JSON.parse(fs.readFileSync(
     path.join(root, 'runs', 'public', `${outerRunId}.json`),
     'utf8',
-  ));
+  )));
   const outerEvidence = readPrivateRunCapsuleEvidence({
     repositoryRoot: root,
     report: publishedReport,
@@ -1405,12 +1398,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       repoRoot: root, runId: id, storageNamespace: 'diagnostic-subject', env: diagnosticEnv,
       options: { mode: 'diagnostic', games: selection ? selection.split(',') : [], reasoningLevel: 'high', actionBudget: 200 },
     });
-    const diagnostic = spawnSync(launch.command, launch.args, {
-      cwd: launch.cwd, encoding: 'utf8', timeout: 60000, detached: launch.detached,
+    const diagnostic = spawnWithExpectedStatus(id, launch.command, launch.args, {
+      cwd: launch.cwd, encoding: 'utf8', timeout: runnerTimeoutMs, detached: launch.detached,
       env: launch.env,
-    });
-    assert.equal(diagnostic.status, 0, diagnostic.stderr || diagnostic.stdout);
-    const report = loadExactRunReport(launch.report);
+    }, 0);
+    const report = withSpawnDiagnostics(diagnostic, () => loadExactRunReport(launch.report));
     assert.equal(report.executionMode, 'diagnostic');
     assert.equal(report.official, false);
     assert.equal(report.officialScore.value, null);
@@ -1429,8 +1421,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     assert.ok(authority.reasons.some((reason) => reason.includes('diagnostic capsule')));
     assert.equal(fs.existsSync(path.join(root, 'runs', 'public', `${id}.json`)), false);
     if (selection) {
-      const relabelled = spawnSync(process.execPath, ['src/cli.mjs', 'run-public', `--game=${selection}`], {
-        cwd: root, encoding: 'utf8', timeout: 60000,
+      const relabelled = spawnWithExpectedStatus('relabelled-diagnostic-subset', process.execPath, ['src/cli.mjs', 'run-public', `--game=${selection}`], {
+        cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs,
         env: { ...diagnosticEnv, AVO_REAL_RUN_ID: id, AVO_REQUIRE_REAL_PROVIDER: '1',
           AVO_DIAGNOSTIC_RUN: '0', AVO_RUN_CLASS: 'recovered',
           AVO_RESUME_DIR: path.join(root, 'runs/private', id, 'resume'),
@@ -1438,9 +1430,8 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
           AVO_WORKSPACE_DIR: path.join(root, 'runs/private', id, 'state', 'workspace'),
           AVO_RUN_CAPSULE_FILE: path.join(root, 'runs/private', id, 'run-capsule.json'),
           AVO_RUN_CAPSULE_HASH: report.provenance.runCapsule.capsuleHash },
-      });
-      assert.equal(relabelled.status, 1);
-      assert.match(relabelled.stderr, /execution intent differs/);
+      }, 1);
+      assert.match(relabelled.stderr, /execution intent differs/, relabelled.diagnostics);
     }
   }
   const recoveredId = 'diagnostic-recovery';
@@ -1448,12 +1439,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const diagnosticRecoveryEnv = { ...diagnosticEnv, AVO_GAME_ATTEMPTS: '1', AVO_TRANSIENT_TURN_RECOVERIES: '1' };
   const allFailedId = 'all-failed-execution';
   const levelBudgetId = 'per-level-budget';
-  const levelBudgetRun = spawnSync(process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g02-v1'], {
-    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+  const levelBudgetRun = spawnWithExpectedStatus('per-level-budget', process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g02-v1'], {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: levelBudgetId, AVO_REPAIR_ROUND: 'level-budget' },
-  });
-  assert.equal(levelBudgetRun.status, 0, levelBudgetRun.stderr || levelBudgetRun.stdout);
-  const levelBudgetReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${levelBudgetId}.json`)));
+  }, 0);
+  const levelBudgetReport = withSpawnDiagnostics(levelBudgetRun, () => JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${levelBudgetId}.json`))));
   assert.equal(levelBudgetReport.status, 'complete');
   assert.equal(levelBudgetReport.scorecardCoverage.exact, true);
   const budgetGame = levelBudgetReport.games[0];
@@ -1464,12 +1454,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(budgetGame.mechanismMetrics.actionBudgetExhaustions, 1);
   assert.deepEqual(budgetGame.actionBudget.perLevelBudgets, [2, 100]);
 
-  const allFailed = spawnSync(process.execPath, ['scripts/run-real-public-locked.mjs'], {
-    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+  const allFailed = spawnWithExpectedStatus('all-failed', process.execPath, ['scripts/run-real-public-locked.mjs'], {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: allFailedId, AVO_REPAIR_ROUND: 'quota-failure' },
-  });
-  assert.equal(allFailed.status, 1, allFailed.stderr || allFailed.stdout);
-  const allFailedReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/public', `${allFailedId}.json`)));
+  }, 1);
+  const allFailedReport = withSpawnDiagnostics(allFailed, () => JSON.parse(fs.readFileSync(path.join(root, 'runs/public', `${allFailedId}.json`))));
   assert.equal(allFailedReport.status, 'failed');
   assert.equal(allFailedReport.failedStage, 'game-completeness');
   assert.match(allFailedReport.error, /synthetic provider quota exhausted/);
@@ -1478,12 +1467,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   assert.equal(fs.existsSync(path.join(root, 'runs/private', allFailedId, 'resume/g01.json')), false);
 
   const cacheId = 'report-without-completion-cache';
-  const cacheRun = spawnSync(process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g02-v1'], {
-    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+  const cacheRun = spawnWithExpectedStatus('report-without-completion-cache', process.execPath, ['scripts/run-public-diagnostic-locked.mjs', '--game=g01-v1,g02-v1'], {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: cacheId, AVO_REPAIR_ROUND: 'missing-completion-cache' },
-  });
-  assert.equal(cacheRun.status, 0, cacheRun.stderr || cacheRun.stdout);
-  const cacheReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${cacheId}.json`)));
+  }, 0);
+  const cacheReport = withSpawnDiagnostics(cacheRun, () => JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${cacheId}.json`))));
   assert.equal(cacheReport.status, 'complete');
   assert.equal(cacheReport.scorecardCoverage.exact, true);
   const cacheObservation = readRunObservation({ root, runId: cacheId });
@@ -1492,23 +1480,21 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     capsuleHash: cacheObservation.capsuleHash,
     stateBinding: inspectRunState(cacheObservation),
   }), /resume state authority/);
-  const partialDiagnostic = spawnSync(process.execPath, recoveryArgs, {
-    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+  const partialDiagnostic = spawnWithExpectedStatus('partial-diagnostic', process.execPath, recoveryArgs, {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_REPAIR_ROUND: 'partial-state' },
-  });
-  assert.equal(partialDiagnostic.status, 1, partialDiagnostic.stderr || partialDiagnostic.stdout);
-  const mixedFailedReport = JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${recoveredId}.json`)));
+  }, 1);
+  const mixedFailedReport = withSpawnDiagnostics(partialDiagnostic, () => JSON.parse(fs.readFileSync(path.join(root, 'runs/diagnostic', `${recoveredId}.json`))));
   assert.equal(mixedFailedReport.failedStage, 'game-completeness');
   assert.match(mixedFailedReport.error, /synthetic provider unavailable after state mutation/);
   const partialObservation = readRunObservation({ root, runId: recoveredId, mode: 'diagnostic' });
   assert.equal(partialObservation.status, 'available');
   assert.equal(fs.readFileSync(path.join(partialObservation.workspaceDir, 'g25', 'partial.txt'), 'utf8'), 'saved before failure');
-  const recoveredDiagnostic = spawnSync(process.execPath, recoveryArgs, {
-    cwd: root, encoding: 'utf8', timeout: 60000, detached: true,
+  const recoveredDiagnostic = spawnWithExpectedStatus('recovered-diagnostic', process.execPath, recoveryArgs, {
+    cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, detached: true,
     env: { ...diagnosticRecoveryEnv, AVO_REAL_RUN_ID: recoveredId, AVO_RESUME_RUN: '1', AVO_REPAIR_ROUND: '' },
-  });
-  assert.equal(recoveredDiagnostic.status, 0, recoveredDiagnostic.stderr || recoveredDiagnostic.stdout);
-  const recoveredReport = JSON.parse(fs.readFileSync(path.join(root, 'runs', 'diagnostic', `${recoveredId}.json`)));
+  }, 0);
+  const recoveredReport = withSpawnDiagnostics(recoveredDiagnostic, () => JSON.parse(fs.readFileSync(path.join(root, 'runs', 'diagnostic', `${recoveredId}.json`))));
   assert.equal(recoveredReport.status, 'complete');
   assert.equal(recoveredReport.official, false);
   assert.equal(recoveredReport.executionMode, 'diagnostic');
@@ -1608,10 +1594,10 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   const experimentReports = [];
   for (const arm of ['baseline', 'intervention']) {
     const experimentRunId = `experiment-tuning-${arm}`;
-    const experimentRun = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
+    const experimentRun = spawnWithExpectedStatus(`experiment:${arm}`, process.execPath, ['scripts/run-real-public.mjs'], {
       cwd: root,
       encoding: 'utf8',
-      timeout: 60_000,
+      timeout: runnerTimeoutMs,
       env: {
         ...process.env,
         AVO_DISABLE_DOTENV: '1',
@@ -1631,12 +1617,11 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
         AVO_EXPERIMENT_ARM: arm,
         AVO_EXPERIMENT_REPETITION: '1',
       },
-    });
-    assert.equal(experimentRun.status, 0, experimentRun.stderr || experimentRun.stdout);
-    const report = JSON.parse(fs.readFileSync(
+    }, 0);
+    const report = withSpawnDiagnostics(experimentRun, () => JSON.parse(fs.readFileSync(
       path.join(root, 'runs', 'public', `${experimentRunId}.json`),
       'utf8',
-    ));
+    )));
     assert.equal(report.status, 'complete');
     assert.equal(report.completeness.actualCount, 3);
     assert.equal(report.experiment.arm, arm);
@@ -1666,10 +1651,10 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
 
   const configFileAfterSuccess = path.join(root, 'src', 'config.mjs');
   const cleanConfig = fs.readFileSync(configFileAfterSuccess);
-  const mutatedOuter = spawnSync(process.execPath, ['scripts/run-real-public.mjs'], {
+  const mutatedOuter = spawnWithExpectedStatus('mutated-outer-checkout', process.execPath, ['scripts/run-real-public.mjs'], {
     cwd: root,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: runnerTimeoutMs,
     env: {
       ...process.env,
       AVO_DISABLE_DOTENV: '1',
@@ -1687,13 +1672,12 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       AVO_BENCHMARK_TIMEOUT_MS: '60000',
       AVO_DEBUG: 'contract-mutate-after-child',
     },
-  });
-  assert.equal(mutatedOuter.status, 1, mutatedOuter.stdout);
-  assert.match(mutatedOuter.stderr, /execution Git checkout differs from the sealed run capsule/);
-  const rejectedReport = JSON.parse(fs.readFileSync(
+  }, 1);
+  assert.match(mutatedOuter.stderr, /execution Git checkout differs from the sealed run capsule/, mutatedOuter.diagnostics);
+  const rejectedReport = withSpawnDiagnostics(mutatedOuter, () => JSON.parse(fs.readFileSync(
     path.join(root, 'runs', 'public', 'outer-mutated-run.json'),
     'utf8',
-  ));
+  )));
   assert.equal(rejectedReport.status, 'failed');
   assert.equal(rejectedReport.failedStage, 'artifact-discovery');
   assert.doesNotMatch(
