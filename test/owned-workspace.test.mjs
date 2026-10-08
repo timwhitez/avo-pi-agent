@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { controlOwnedRun } from '../src/local/owned-run-control.mjs';
 import { acquireLocalExecutionLock, readLocalExecutionLock } from '../src/local/run-lock.mjs';
-import { observeOwnedChild, waitForOwnedObservation } from './support/owned-wait.mjs';
+import { observeOwnedChild, waitForOwnedObservation, workspaceFailureReason } from './support/owned-wait.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
 async function waitFor(predicate, message, timeoutMs = null) {
@@ -65,7 +65,7 @@ finally { await scope.close(); lock.release(); }
       } });
       const evidence = { sample: nativeEvidence.sample, snapshot: () => ({ ...nativeEvidence.snapshot(),
         fixture: { mode, workspaceTimeoutMs,
-          workerOutcome: /isolated workspace Python timed out after \d+ms/.test(errors) ? 'workspace-timeout' : 'unknown' } }) };
+          workerOutcome: workspaceFailureReason(errors.replace(/\n$/, ''), workspaceTimeoutMs) } }) };
       try {
         await waitForOwnedObservation(() => fs.existsSync(heartbeat), `owned-workspace ${mode} heartbeat missing`, evidence,
           5000, { maxPolls: 500 });

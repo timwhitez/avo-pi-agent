@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { observeOwnedChild, observeOwnedWorkspace, waitForOwnedObservation } from './support/owned-wait.mjs';
+import { observeOwnedChild, observeOwnedWorkspace, waitForOwnedObservation, workspaceFailureReason } from './support/owned-wait.mjs';
+import { WorkspaceSandbox } from '../src/core/workspace.mjs';
+import { createWorkspaceContainerOwner } from '../src/local/workspace-container-owner.mjs';
 import { TEST_TIMEOUT_SCALE } from './support/timeout-scale.mjs';
 import { spawnWithExpectedStatus } from './support/spawn-status.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
@@ -102,7 +104,7 @@ test('container lifecycle diagnostics cover pre-attach, native child and fixed e
     assert.equal(code, 'synthetic');
     lifecycle.attached(child);
     await closed;
-    throw new Error('isolated workspace Python timed out after 3000ms: must-not-appear');
+    throw new Error('isolated workspace Python timed out after 3000ms');
   } };
   const owner = { pending: 1 };
   const evidence = observeOwnedWorkspace(workspace, owner, { heartbeat });
@@ -144,6 +146,57 @@ test('container lifecycle diagnostics cover pre-attach, native child and fixed e
     assert.doesNotMatch(JSON.stringify(snapshot), /must-not-appear/);
   } finally { child.kill('SIGKILL'); await closed; }
 });
+
+test('workspace reasons require complete known producer messages and the fixture budget', () => {
+  for (const [message, expected] of [
+    ['isolated workspace Python timed out after 3000ms', 'workspace-timeout'],
+    ['workspace operation cancelled', 'cancelled'],
+    ['workspace operation cancelled before start', 'cancelled'],
+    ['isolated workspace Python timed out after 123ms', 'unknown'],
+    ['isolated workspace Python timed out after 3000ms: extra', 'unknown'],
+    ['prefix isolated workspace Python timed out after 3000ms', 'unknown'],
+    ['workspace operation cancelled: extra', 'unknown'],
+    ['cancelled', 'unknown'],
+    ['isolated workspace runtime exited code=1: isolated workspace Python timed out after 3000ms', 'unknown'],
+    ['isolated workspace runtime exited code=1: workspace operation cancelled', 'unknown'],
+    ['isolated workspace runtime exited code=1: fixture\nisolated workspace Python timed out after 3000ms', 'unknown'],
+    ['isolated workspace runtime exited code=1: fixture\nworkspace operation cancelled', 'unknown'],
+  ]) assert.equal(workspaceFailureReason(message, 3000), expected, message);
+});
+
+// Synthetic runtime CLI through the real workspace and owner; no Docker needed.
+for (const stderr of ['fixture says timed out after 123ms', 'fixture says cancelled']) {
+  test(`runtime stderr cannot invent a workspace reason: ${stderr}`, async () => {
+    const root = temporaryDirectory('avo-workspace-reason-');
+    const runtime = path.join(root, 'runtime');
+    fs.writeFileSync(runtime, `#!/usr/bin/env node
+if (process.argv[2] === 'create') console.log('a'.repeat(64));
+else if (process.argv[2] === 'start') {
+  process.stdin.resume();
+  process.stdin.on('end', () => { process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1; });
+}
+`, { mode: 0o700 });
+    const workspace = new WorkspaceSandbox({ root, gameId: 'synthetic', mode: 'isolated-python',
+      containerRuntime: runtime, timeoutMs: 15000 });
+    const owner = createWorkspaceContainerOwner();
+    const evidence = observeOwnedWorkspace(workspace, owner);
+    try {
+      await assert.rejects(owner.run(workspace, 'unused'), (error) => {
+        assert.equal(error.message, `isolated workspace runtime exited code=1: ${stderr}`);
+        return true;
+      });
+      const snapshot = evidence.snapshot();
+      assert.equal(snapshot.workspace.reasonCode, 'unknown');
+      assert.equal(snapshot.child.exitCode, 1);
+      assert.equal(snapshot.child.signal, null);
+      assert.equal(snapshot.child.status, 'exited');
+      assert.ok(snapshot.child.exitAt);
+      assert.ok(snapshot.child.closeAt);
+      assert.equal(snapshot.workspace.ownerPending, 0);
+      assert.doesNotMatch(JSON.stringify(snapshot), /fixture says/);
+    } finally { await owner.close(); }
+  });
+}
 
 test('owned wait budgets use the existing scale without changing fixed controls', () => {
   const result = spawnWithExpectedStatus('owned-wait-scale', process.execPath, ['--input-type=module', '--eval',

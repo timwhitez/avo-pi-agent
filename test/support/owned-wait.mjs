@@ -82,6 +82,12 @@ export function observeOwnedChild(child, { root, runId, run = () => null, heartb
   } };
 }
 
+export function workspaceFailureReason(message, timeoutMs) {
+  return message === `isolated workspace Python timed out after ${timeoutMs}ms` ? 'workspace-timeout'
+    : message === 'workspace operation cancelled' || message === 'workspace operation cancelled before start'
+      ? 'cancelled' : 'unknown';
+}
+
 // Observe the existing per-instance lifecycle hook without adding a product
 // accessor. The Docker attach client shares the test's group: never scan it.
 export function observeOwnedWorkspace(workspace, owner, { heartbeat } = {}) {
@@ -100,8 +106,7 @@ export function observeOwnedWorkspace(workspace, owner, { heartbeat } = {}) {
     } catch (error) {
       job.state = 'failed';
       // Classify only known structural outcomes; never include runtime streams.
-      job.reasonCode = /timed out after \d+ms/.test(error.message) ? 'workspace-timeout'
-        : /cancelled/.test(error.message) ? 'cancelled' : 'unknown';
+      job.reasonCode = workspaceFailureReason(error.message, workspace.timeoutMs);
       throw error;
     }
   };
