@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { controlOwnedRun } from '../src/local/owned-run-control.mjs';
 import { acquireLocalExecutionLock, readLocalExecutionLock } from '../src/local/run-lock.mjs';
+import { observeOwnedChild, waitForOwnedObservation } from './support/owned-wait.mjs';
 
 const moduleUrl = (file) => JSON.stringify(pathToFileURL(path.resolve(file)).href);
 async function waitFor(predicate, message, timeoutMs = null) {
@@ -57,8 +58,12 @@ finally { await scope.close(); lock.release(); }
       const closed = new Promise((resolve) => child.once('close', resolve));
       let guardian;
       let ids = [];
+      const evidence = observeOwnedChild(child, { root, heartbeat, pids: () => {
+        try { return [JSON.parse(output.trim().split('\n')[0]).worker]; } catch { return []; }
+      } });
       try {
-        await waitFor(() => fs.existsSync(heartbeat), () => `heartbeat missing: ${errors}`);
+        await waitForOwnedObservation(() => fs.existsSync(heartbeat), 'owned-workspace heartbeat missing', evidence,
+          5000, { maxPolls: 500 });
         guardian = readLocalExecutionLock(root).workspaceGuardian;
         ids = fs.readdirSync(guardian.directory).filter((name) => name.endsWith('-created.json')).map((name) => JSON.parse(fs.readFileSync(path.join(guardian.directory, name))).containerId);
         assert.equal(ids.length, 1);
@@ -69,7 +74,8 @@ finally { await scope.close(); lock.release(); }
         assert.throws(() => acquireLocalExecutionLock({ root, inheritedToken: '' }), /another local/);
         if (mode !== 'paused-timeout') {
           await controlOwnedRun(child.pid, 'resume', { root });
-          await waitFor(() => fs.readFileSync(heartbeat, 'utf8') !== paused, 'resume must restart heartbeat');
+          await waitForOwnedObservation(() => fs.readFileSync(heartbeat, 'utf8') !== paused,
+            'resume must restart owned-workspace heartbeat', evidence, 5000, { maxPolls: 500 });
           if (mode === 'owner-death') child.kill('SIGKILL');
           else if (mode === 'client-death') process.kill(JSON.parse(output.trim().split('\n')[0]).worker, 'SIGKILL');
           else process.kill(guardian.pid, 'SIGKILL');

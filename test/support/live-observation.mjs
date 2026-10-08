@@ -4,6 +4,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PersistentMemory } from '../../src/core/memory.mjs';
 import { readRunObservation } from '../../src/benchmark/run-observation.mjs';
+import { observeOwnedChild, waitForOwnedObservation } from './owned-wait.mjs';
 
 // Real authenticated UI -> locked wrapper -> CLI -> Agent -> durable state.
 // Caller supplies the sealed synthetic provider/ARC fixture; never a live service.
@@ -60,11 +61,15 @@ export async function verifyLiveObservation(root, providerEnv) {
       assert.equal(response.status, 201, await response.clone().text());
       const id = (await response.json()).run.id;
       runs.push(id);
+      const evidence = observeOwnedChild(store.children.get(id).child, {
+        root, runId: id, run: () => store.runs.get(id), spawnedAt: store.runs.get(id).startedAt,
+      });
       const get = async (target = id) => GET(new Request(`http://localhost/api/runs/${target}`, { headers }),
         { params: Promise.resolve({ id: target }) });
       const marker = path.join(root, 'runs', `observation-ready-${id}`);
-      await waitFor(() => fs.existsSync(marker) || !store.children.has(id), 'live fixture reaches objective progress');
-      assert.ok(fs.existsSync(marker), JSON.stringify(store.runs.get(id)));
+      await waitForOwnedObservation(() => fs.existsSync(marker) || !store.children.has(id),
+        'live fixture reaches objective progress', evidence, 30000, { pollMs: 25 });
+      assert.ok(fs.existsSync(marker), JSON.stringify(evidence.snapshot()));
       const observation = readRunObservation({ root, runId: id });
       assert.equal(observation.status, 'available');
       assert.equal(observation.public.stateMode, warm ? 'warm-start' : 'cold-start');
@@ -97,7 +102,7 @@ export async function verifyLiveObservation(root, providerEnv) {
         } finally { fs.writeFileSync(contractFile, contract); }
       } else cold = observation;
       fs.writeFileSync(path.join(root, 'runs', `observation-go-${id}`), 'continue');
-      await waitFor(() => !store.children.has(id), 'canonical UI child completes', 60000);
+      await waitForOwnedObservation(() => !store.children.has(id), 'canonical UI child completes', evidence, 60000, { pollMs: 25 });
       const finished = (await (await get()).json()).run;
       assert.equal(finished.state, 'completed', JSON.stringify(finished));
       assert.equal(finished.reportStatus, 'complete');
