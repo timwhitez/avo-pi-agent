@@ -1053,7 +1053,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
   };
   const partial = spawnWithExpectedStatus('partial-state', process.execPath, ['--input-type=module', '--eval', fastRetryBootstrap], {
     cwd: root, encoding: 'utf8', timeout: runnerTimeoutMs, env: partialEnv,
-  }, 1);
+  }, 0); // Individual game errors are report data, not CLI runError (src/cli.mjs:549–557), so this child exits 0.
   assert.doesNotMatch(partial.stderr, /resume state authority does not bind/, partial.diagnostics);
   const partialReport = withSpawnDiagnostics(partial, () => JSON.parse(fs.readFileSync(exhaustedReportFile, 'utf8')));
   const partialGames = partialReport.results;
