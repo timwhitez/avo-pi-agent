@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { buildExecutionTerminal } from '../trajectory/audit-events.mjs';
 import { wasAtomicWriteCommitted, writeJsonAtomic, REPORT_LIMITS } from './report-safe-files.mjs';
 import { readJsonFileEvidence } from '../local/regular-file-evidence.mjs';
@@ -100,6 +101,11 @@ export async function runProcess(command, args, {
   onStderr = null,
   onMessage = null,
   cancellation = null,
+  stdin = null,
+  outputEncoding = 'utf8',
+  returnFailures = false,
+  uid, gid,
+  onSpawn = null,
 } = {}) {
   const tailLimit = Math.max(1024, Math.min(Number(maxTailChars) || DEFAULT_TAIL_CHARS, 4 * 1024 * 1024));
   // Policies are validated before anything is spawned.
@@ -121,7 +127,8 @@ export async function runProcess(command, args, {
     child = spawn(command, args, {
       cwd,
       env: ipc ? { ...childEnv, AVO_PROGRESS_CHANNEL: 'ipc' } : childEnv,
-      stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+      stdio: ipc ? [stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe', 'ipc'] : [stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      uid, gid,
       detached: process.platform !== 'win32' && !ownedGroup,
     });
   } catch (error) {
@@ -132,6 +139,8 @@ export async function runProcess(command, args, {
 
   let stdoutTail = '';
   let stderrTail = '';
+  const stdoutDecoder = outputEncoding === null ? new StringDecoder('utf8') : null;
+  const stderrDecoder = outputEncoding === null ? new StringDecoder('utf8') : null;
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let timedOut = false;
@@ -160,15 +169,21 @@ export async function runProcess(command, args, {
     });
   }
 
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
+  if (stdin !== null) {
+    child.stdin.on('error', (error) => { if (error.code !== 'EPIPE') failStream(error); });
+    child.stdin.end(stdin);
+  }
+  if (outputEncoding !== null) {
+    child.stdout.setEncoding(outputEncoding);
+    child.stderr.setEncoding(outputEncoding);
+  }
   child.stdout.on('data', (chunk) => {
     stdoutBytes += Buffer.byteLength(chunk, 'utf8');
     if (stdoutLimit !== null && stdoutBytes > stdoutLimit) {
       failStream(new Error(`child stdout exceeded ${stdoutLimit} byte limit`));
       return;
     }
-    stdoutTail = appendTail(stdoutTail, chunk, tailLimit);
+    stdoutTail = appendTail(stdoutTail, stdoutDecoder ? stdoutDecoder.write(chunk) : String(chunk), tailLimit);
     if (!invokeCallback(onStdout, chunk, 'stdout', failStream)) return;
     writeWithBackpressure(child.stdout, stdoutSink, chunk);
   });
@@ -178,11 +193,12 @@ export async function runProcess(command, args, {
       failStream(new Error(`child stderr exceeded ${stderrLimit} byte limit`));
       return;
     }
-    stderrTail = appendTail(stderrTail, chunk, tailLimit);
+    stderrTail = appendTail(stderrTail, stderrDecoder ? stderrDecoder.write(chunk) : String(chunk), tailLimit);
     if (!invokeCallback(onStderr, chunk, 'stderr', failStream)) return;
     writeWithBackpressure(child.stderr, stderrSink, chunk);
   });
   child.once('error', (error) => { spawnError = error; });
+  if (onSpawn) invokeCallback(onSpawn, child, 'spawn', failStream);
 
   // Signals are sent only while the owned child has not been observed to
   // close: after close its process-group ID may belong to someone else.
@@ -212,6 +228,8 @@ export async function runProcess(command, args, {
       resolve({ status, signal });
     });
   });
+  if (stdoutDecoder) stdoutTail = appendTail(stdoutTail, stdoutDecoder.end(), tailLimit);
+  if (stderrDecoder) stderrTail = appendTail(stderrTail, stderrDecoder.end(), tailLimit);
   control?.stop();
 
   if (timeout) clearTimeout(timeout);
@@ -223,11 +241,12 @@ export async function runProcess(command, args, {
 
   // The final record (already committed) travels with any failure.
   const withTerminal = (error) => (terminal ? Object.assign(error, { terminal }) : error);
-  if (spawnError) throw withTerminal(spawnError);
-  if (sinkError) throw withTerminal(new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError }));
-  if (streamError) throw withTerminal(streamError);
+  if (!returnFailures && spawnError) throw withTerminal(spawnError);
+  if (!returnFailures && sinkError) throw withTerminal(new Error(`benchmark log sink failed: ${sinkError.message}`, { cause: sinkError }));
+  if (!returnFailures && streamError) throw withTerminal(streamError);
   return {
     ...result,
+    ...(returnFailures ? { stdoutBytes, stderrBytes, drainTimedOut, captureComplete: !spawnError && !sinkError && !streamError && !drainTimedOut, error: (spawnError || sinkError || streamError)?.message || null } : {}),
     ...(terminal ? { terminal } : {}),
     timedOut,
     stdout: stdoutTail,

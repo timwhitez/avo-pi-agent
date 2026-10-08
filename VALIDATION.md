@@ -33,3 +33,18 @@ in [the real-run runbook](docs/REAL_PUBLIC_RUNBOOK.md). Record the tested revisi
 commands, results and any exclusions in the relevant PR or [issues.md](issues.md).
 Synthetic success is contract evidence only. Historical validation is indexed in
 [docs/archive](docs/archive/README.md), not treated as current exact-head evidence.
+
+Optional general browser profile (targeted iteration uses concurrency 1):
+
+```bash
+node --test --test-concurrency=1 test/general-browser-entry.test.mjs test/browser-runtime.test.mjs test/browser-install.test.mjs test/browser-arc-boundary.test.mjs test/browser-localhost.test.mjs
+```
+
+Present-stack localhost tests automatically run with the installed private
+`.venv-browser` and selected Chrome; as root they use nobody. Absence is an
+explicit skip, incompatible installations/startup/sandbox failures are failures.
+Fresh-install controls require the preprepared private `.browser-wheels` cache;
+offline regression never downloads dependencies. See the
+[general browser guide](docs/GENERAL_BROWSER.md) for installation/receipts and
+RED, subprocess, installed-package, localhost and Pi wire evidence distinctions.
+No paid providers, ARC services or outside websites are used.

@@ -20,3 +20,7 @@ coverage/
 state/
 flux/.local
 flux/changes
+.venv-browser/
+.browser-wheels/
+
+.bt/

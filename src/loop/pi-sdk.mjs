@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 import {
+  GENERAL_PROFILE, GENERAL_PROMPT, GENERAL_TOOL_CONTRACT, normalizeGeneralProfile,
   filterToolsForPolicy,
   normalizePolicyProfile,
   policySystemPrompt,
@@ -468,6 +469,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       currentObservationRequired = false,
       temporalEvidence: initializedTemporalEvidence,
       temporalScope: initializedTemporalScope,
+      runKind = 'arc',
+      signal,
     }) {
       const temporalEvidence = resolveTemporalEvidenceContract(config.temporalEvidence);
       if (canonicalJson(initializedTemporalEvidence ?? null) !== canonicalJson(temporalEvidence ?? null)
@@ -487,18 +490,27 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       if (initializedWorkspaceMode && config.workspaceMode && initializedWorkspaceMode !== config.workspaceMode) {
         throw new Error('Pi production loop workspace mode differs from the initialized sandbox');
       }
-      const policyProfile = normalizePolicyProfile(
+      const general = runKind === 'general-browser';
+      if (!general && runKind !== 'arc') throw new Error('invalid Pi run kind');
+      const normalizeProfile = general ? normalizeGeneralProfile : normalizePolicyProfile;
+      const policyProfile = normalizeProfile(
         initializedPolicyProfile || config.policyProfile,
       );
       if (initializedPolicyProfile
-          && normalizePolicyProfile(config.policyProfile) !== policyProfile) {
+          && normalizeProfile(config.policyProfile) !== policyProfile) {
         throw new Error('Pi production loop policy profile differs from runtime configuration');
       }
       if (initializedToolResultMaxChars !== undefined
           && initializedToolResultMaxChars !== maxToolResultChars) {
         throw new Error('Pi production loop tool result bound differs from the initialized limit');
       }
-      if (initializedPolicyProfile) {
+      if (general && (temporalEvidence || !initializedPolicyProfile || workspaceMode !== 'disabled' || !productionToolContract
+          || canonicalJson(policyToolContract(tools)) !== canonicalJson(GENERAL_TOOL_CONTRACT)
+          || canonicalJson(productionToolContract) !== canonicalJson(GENERAL_TOOL_CONTRACT)
+          || systemPrompt !== GENERAL_PROMPT || initializedToolResultMaxChars !== maxToolResultChars)) {
+        throw new Error('Pi general initialization differs from its production contract');
+      }
+      if (!general && initializedPolicyProfile) {
         const permittedTools = filterToolsForPolicy(tools, workspaceMode, policyProfile);
         const actualToolContract = canonicalJson(policyToolContract(tools));
         if (!Array.isArray(productionToolContract)
@@ -546,13 +558,14 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         }
       };
       activeTelemetry = runTelemetry;
+      let abortListener;
       try {
       const effectiveSystemPrompt = effectivePiSystemPrompt(systemPrompt, workspaceMode);
       const seenToolOutcomes = new Set();
       let novelToolOutcomes = 0;
       const piTools = tools.map((tool) => ({
         ...piToolContract(tool, Type),
-        execute: async (callId, params) => {
+        execute: async (callId, params, toolSignal) => {
           const receiptState = runTelemetry.receipts;
           receiptState.wrapperCalls.add(String(callId));
           const startSequence = ++receiptState.toolSequence;
@@ -561,7 +574,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           receiptState.pendingTools.set(callId, { toolName: tool.name, params, startSequence, callScope, originRequestSequence });
           let result;
           try {
-            result = await tool.execute(params);
+            result = await (general ? tool.execute(params, toolSignal) : tool.execute(params));
           } catch (error) {
             receiptState.pendingTools.delete(callId);
             classifyReadReceipt(receiptState, emitReceipt(receiptState, () => buildToolReceipt({
@@ -626,7 +639,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           receiptState.toolKinds.set(String(callId).split('|')[0], tool.name);
           classifyReadReceipt(receiptState, receipt);
           return {
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text }, ...(general && resolvedModel.input.includes('image') && text === originalText
+              ? (result.content || []).filter((b) => b.type === 'image' && b.mimeType === 'image/png' && typeof b.data === 'string' && b.data.length <= 12 * 1024 * 1024).slice(0, 1) : [])],
             details,
             terminate: Boolean(result.terminate),
           };
@@ -659,11 +673,18 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           maxOuterTurns: config.maxOuterTurns,
           policyProfile,
         });
-        const withStatus = replaceRuntimeStatus(messages, status.text);
-        const bounded = boundTranscript(withStatus, {
+        let selectedMessages = general ? pruneGeneralImages(messages) : messages;
+        if (general && transcriptOptions.estimateContextTokens(selectedMessages) > transcriptOptions.maxTokens) {
+          selectedMessages = selectedMessages.map((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image')
+            ? { ...m, content: [...m.content.filter((b) => b.type !== 'image'), { type: 'text', text: 'ref-only; image bytes omitted for context bound. Recover PNG with artifact_read.' }] } : m);
+        }
+        const withStatus = replaceRuntimeStatus(selectedMessages, status.text);
+        let bounded = boundTranscript(withStatus, {
           ...transcriptOptions,
           currentAnchor: status.anchor ?? undefined,
         });
+        if (general) bounded = bounded.map((m) => m[HOST_MESSAGE_FIELD] === 'compaction-notice'
+          ? { ...m, content: [{ type: 'text', text: 'Earlier context was compacted. Recover registered output/PNG refs with artifact_read; never replay effects.' }] } : m);
         runTelemetry.receipts.pendingPrepared = preparedVisibility(bounded, {
           anchor: status.anchor,
           scope: temporalEvidence ? receiptScope() : status.anchor ? { gameId: status.anchor.gameId, attemptId: status.anchor.attemptId, episodeId: status.anchor.episodeId } : {},
@@ -705,7 +726,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         transformContext,
         toolExecution: 'sequential',
         followUpMode: 'one-at-a-time',
-        sessionId: `avo-arc-${Date.now()}`,
+        sessionId: `${general ? 'avo-general' : 'avo-arc'}-${Date.now()}`,
         shouldStopAfterTurn: async ({ message }) => {
           if (shouldStop()) return true;
           if (outerTurns >= config.maxOuterTurns) return true;
@@ -734,7 +755,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
           return true;
         },
         prepareNextTurnWithContext: (turn) => {
-          return prepareRuntimeStatusTurn(turn, {
+          const prepared = prepareRuntimeStatusTurn(turn, {
             runtimeStatus,
             shouldStop,
             outerTurns,
@@ -742,6 +763,12 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
             policyProfile,
             onEvent: emitEvent,
           });
+          if (general && runtimeStatus().tools.length === 1 && runtimeStatus().tools[0] === 'finish') {
+            const finishTools = piTools.filter((tool) => tool.name === 'finish');
+            agent.state.tools = finishTools;
+            if (prepared) prepared.context.tools = finishTools;
+          }
+          return prepared;
         },
       });
       lastEnvironmentActions = runtimeEnvironmentActions(runtimeStatus());
@@ -762,6 +789,11 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         }
         emitEvent(event);
       });
+      if (general && signal) {
+        abortListener = () => agent.abort();
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) throw new Error('general run cancelled before provider start');
+      }
       await agent.prompt(initialPrompt);
       let noToolTurn = !shouldStop()
         && !agent.state.errorMessage
@@ -879,6 +911,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         }),
       };
       } finally {
+        if (abortListener) signal.removeEventListener('abort', abortListener);
         // Calls that started but never returned are reported as incomplete.
         for (const [callId, pending] of runTelemetry.receipts.pendingTools) {
           emitReceipt(runTelemetry.receipts, () => buildToolReceipt({
@@ -1326,6 +1359,7 @@ function positiveEnvInt(name, fallback) {
 
 export const TEMPORAL_STATUS_SUFFIX = '\ntemporal_history_recovery={temporalRecovery}\ntemporal_latest_action_ref={temporalLatestActionRef}\ntemporal_latest_capture_status={temporalLatestCaptureStatus}';
 export function runtimeStatusTemplate(policyProfile, temporalEvidence) {
+  if (policyProfile === GENERAL_PROFILE) return GENERAL_STATUS_TEMPLATE;
   const base = normalizePolicyProfile(policyProfile) === 'minimal-v1'
     ? MINIMAL_RUNTIME_STATUS_TEMPLATE
     : RUNTIME_STATUS_TEMPLATE;
@@ -1341,12 +1375,19 @@ export function legacyRuntimeStatusTemplateSha256(policyProfile) {
 }
 
 function legacyRuntimeStatusTemplate(policyProfile) {
+  if (policyProfile === GENERAL_PROFILE) return GENERAL_STATUS_TEMPLATE;
   return normalizePolicyProfile(policyProfile) === 'minimal-v1'
     ? LEGACY_MINIMAL_RUNTIME_STATUS_TEMPLATE
     : LEGACY_RUNTIME_STATUS_TEMPLATE;
 }
 
 export function runtimeStatusMessage(status, { outerTurns, maxOuterTurns, policyProfile }) {
+  if (policyProfile === GENERAL_PROFILE) {
+    if (status?.runKind !== 'general-browser' || status.policyProfile !== GENERAL_PROFILE || status.currentObservation !== undefined) throw new Error('invalid general status');
+    const value = { runId: statusField(status.runId, 'runId'), state: statusField(status.state, 'state'), terminalReason: statusField(status.terminalReason || 'none', 'terminalReason'), toolCalls: nonNegativeInteger(status.toolCalls, 'toolCalls'), maxTools: nonNegativeInteger(status.maxTools, 'maxTools'), outerTurns: nonNegativeInteger(outerTurns, 'outerTurns'), maxOuterTurns: nonNegativeInteger(maxOuterTurns, 'maxOuterTurns'), remainingMs: nonNegativeInteger(status.remainingMs, 'remainingMs'), tools: status.tools, refs: status.refs };
+    if (value.toolCalls > value.maxTools || value.outerTurns > value.maxOuterTurns) throw new Error('general counters exceed maxima');
+    return { text: GENERAL_STATUS_TEMPLATE + '\n' + canonicalJson(value), value, anchor: null };
+  }
   const value = {
     state: statusField(status?.state, 'state'),
     environmentActions: nonNegativeInteger(status?.environmentActions, 'environmentActions'),
@@ -1962,3 +2003,17 @@ const RECALL_SAFE_TOOLS = new Set([
   'memory_read',
   'journal_read',
 ]);
+
+const GENERAL_STATUS_TEMPLATE = '[AVO_RUNTIME_STATUS general-v1]\nrun_kind=general-browser\nprofile=general-browser-v1\nhost_python=files,subprocesses,network; privilege separation is not a sandbox';
+
+export function pruneGeneralImages(messages) {
+  let retained = false;
+  return messages.toReversed().map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    return { ...m, content: m.content.filter((b) => {
+      if (b.type !== 'image') return true;
+      if (retained) return false;
+      retained = true; return true;
+    }) };
+  }).reverse();
+}
