@@ -33,7 +33,7 @@ test('raw output previews decode split UTF-8 and flush EOF without changing save
     });
     assert.equal(result.status, 0);
     for (const [stream, file] of [['stdout', stdoutFile], ['stderr', stderrFile]]) {
-      assert.equal(result[stream], '雪�');
+      assert.equal(result[stream], '雪\uFFFD');
       assert.deepEqual(chunks[stream][0], Buffer.from([0xe9]));
       assert.deepEqual(Buffer.concat(chunks[stream]), Buffer.from([0xe9, 0x9b, 0xaa, 0xe2]));
       assert.deepEqual(fs.readFileSync(file), Buffer.concat(chunks[stream]));
