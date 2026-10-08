@@ -194,7 +194,9 @@ are not redistributed. A later bundled wheelhouse/browser/image requires payload
 license/NOTICE review. This lock does not checksum/reproduce the entire Ubuntu
 host, interpreter distro package, Chrome or native dependencies.
 
-The tested host uses preinstalled Chrome 154.0.8037.92. Linkage resolves NSS/NSPR,
+The tested host was validated with preinstalled Chrome 154.0.8037.92 and
+155.0.8059.39. The localhost test checks the runtime receipt against the selected
+executable's actual version output. Linkage resolves NSS/NSPR,
 GLib/GIO, ATK/AT-SPI, X11/XCB, GBM/DRM, ALSA, CUPS, Cairo/Pango and fonts.
 If Chrome reports a missing native library, an operator may install the specific
 Ubuntu package (for example `libnss3`, `libgbm1`, `libatk1.0-0t64`, `libasound2t64`

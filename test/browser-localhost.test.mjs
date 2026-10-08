@@ -25,7 +25,10 @@ test('localhost_navigation_observe_input_js_cdp_wait_screenshot; raw False/error
     const r = realRuntime({ imageCapable: true });
     try {
       await r.start(); assert.equal((await r.doctor()).healthy, true);
-      assert.equal(r.receipt.python, '3.12.3'); assert.match(r.receipt.chrome, /154\.0\.8037\.92/);
+      assert.equal(r.receipt.python, '3.12.3');
+      const chromeVersion = execFileSync(r.chrome, ['--version'], { ...r.identity, cwd: path.join(r.browserRoot, 'cwd'), env: r.env, encoding: 'utf8', timeout: 10000 }).trim();
+      assert.equal(r.receipt.chrome, chromeVersion);
+      assert.match(r.receipt.chrome, /^Google Chrome(?: for Testing)? \d+\.\d+\.\d+\.\d+$/);
       const out = await r.exec(`import json\nprint(json.dumps(goto_url(${JSON.stringify(url)})))\nassert wait_for_element("#later", timeout=5)\nfill_input("#name", "synthetic input")\nprint(js("document.querySelector('#name').value"))\nprint(page_info())\nlocal_marker = 1`);
       assert.equal(out.details.ok, true, out.details.stderr); assert.match(out.details.stdout, /synthetic input/);
       const routing=await r.exec(`import sys\nprint(http_get(${JSON.stringify(url)}))\nassert 'fetch_use' not in sys.modules`); assert.equal(routing.details.ok,true,routing.details.stderr); assert.match(routing.details.stdout,/Local fixture/);
