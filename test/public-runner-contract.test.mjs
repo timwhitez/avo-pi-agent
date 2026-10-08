@@ -34,8 +34,11 @@ import { spawnWithExpectedStatus, withSpawnDiagnostics } from './support/spawn-s
 import { TEST_TIMEOUT_SCALE, testObservationBudget } from './support/timeout-scale.mjs';
 
 test('full public-runner boundary completes 25 mocked games in one cumulative session', async (t) => {
-  const runnerTimeoutMs = testObservationBudget(60_000);
-  t.diagnostic(`AVO_TEST_TIMEOUT_SCALE=${TEST_TIMEOUT_SCALE}; runner observation budget=${runnerTimeoutMs}ms`);
+  // Set positive fixture jobs before launch/sealing. Keep the strict scale-1
+  // 60s/60s contract; scaled profiles reserve finite preflight/teardown time.
+  const fixtureJobTimeoutMs = testObservationBudget(60_000);
+  const runnerTimeoutMs = fixtureJobTimeoutMs * (TEST_TIMEOUT_SCALE === 1 ? 1 : 1.5);
+  t.diagnostic(`AVO_TEST_TIMEOUT_SCALE=${TEST_TIMEOUT_SCALE}; fixture job budget=${fixtureJobTimeoutMs}ms; runner observation budget=${runnerTimeoutMs}ms`);
   const root = temporaryDirectory('avo-public-contract-');
   fs.cpSync('src', path.join(root, 'src'), { recursive: true });
   fs.cpSync('bridge', path.join(root, 'bridge'), { recursive: true });
@@ -1336,7 +1339,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
       AVO_POLICY_PROFILE: 'minimal-v1',
-      AVO_BENCHMARK_TIMEOUT_MS: '60000',
+      AVO_BENCHMARK_TIMEOUT_MS: String(fixtureJobTimeoutMs),
     },
   }, 0);
   assert.match(outer.stdout, /COMPLETE score=0/, outer.diagnostics);
@@ -1389,7 +1392,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
     ARC_API_KEY: 'contract-arc-key', ARC_PYTHON: fakePython,
     OPENAI_BASE_URL: 'https://provider.invalid/v1', OPENAI_API_KEY: 'contract-provider-key-1234567890',
     OPENAI_MODEL: 'production-model', OPENAI_REASONING_EFFORT: 'max', ...providerEnvironment(),
-    AVO_MAX_ACTIONS: '200', AVO_POLICY_PROFILE: 'minimal-v1', AVO_BENCHMARK_TIMEOUT_MS: '60000',
+    AVO_MAX_ACTIONS: '200', AVO_POLICY_PROFILE: 'minimal-v1', AVO_BENCHMARK_TIMEOUT_MS: String(fixtureJobTimeoutMs),
     AVO_RESUME_DIR: '', AVO_RUN_CAPSULE_HASH: '', AVO_RUN_CAPSULE_FILE: '', AVO_RUN_CLASS: '',
   };
   for (const selection of ['g01-v1,g02-v1', null]) {
@@ -1611,7 +1614,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
         OPENAI_REASONING_EFFORT: 'max',
         ...providerEnvironment(),
         AVO_MAX_ACTIONS: '200',
-        AVO_BENCHMARK_TIMEOUT_MS: '60000',
+        AVO_BENCHMARK_TIMEOUT_MS: String(fixtureJobTimeoutMs),
         AVO_EXPERIMENT_PLAN_FILE: experimentFile,
         AVO_EXPERIMENT_PHASE: 'tuning',
         AVO_EXPERIMENT_ARM: arm,
@@ -1669,7 +1672,7 @@ await import(${JSON.stringify(pathToFileURL(cliFile).href)});
       ...providerEnvironment(),
       AVO_MAX_ACTIONS: '200',
       AVO_POLICY_PROFILE: 'minimal-v1',
-      AVO_BENCHMARK_TIMEOUT_MS: '60000',
+      AVO_BENCHMARK_TIMEOUT_MS: String(fixtureJobTimeoutMs),
       AVO_DEBUG: 'contract-mutate-after-child',
     },
   }, 1);

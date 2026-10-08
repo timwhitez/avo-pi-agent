@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { observeOwnedChild, waitForOwnedObservation } from './support/owned-wait.mjs';
+import { observeOwnedChild, observeOwnedWorkspace, waitForOwnedObservation } from './support/owned-wait.mjs';
 import { TEST_TIMEOUT_SCALE } from './support/timeout-scale.mjs';
 import { spawnWithExpectedStatus } from './support/spawn-status.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
@@ -16,6 +16,11 @@ for (const [label, options] of [
   ['resume must restart owned-run heartbeat', { maxPolls: 1, checkAfterExpiry: true }],
   ['owned-workspace heartbeat missing', { maxPolls: 1 }],
   ['resume must restart owned-workspace heartbeat', { maxPolls: 1 }],
+  ['owned-workspace guardian-death heartbeat missing', { maxPolls: 1 }],
+  ['container did not start heartbeat', { maxPolls: 1 }],
+  ['resume did not resume writes', { maxPolls: 1 }],
+  ['unrelated fixture did not start', { maxPolls: 1 }],
+  ['unrelated container must survive cleanup', { maxPolls: 1 }],
 ]) test(`${label}: controlled still-running child retains expiry evidence`, async (t) => {
   const root = temporaryDirectory('avo-owned-wait-');
   const heartbeat = path.join(root, 'heartbeat');
@@ -83,6 +88,60 @@ for (const [label, options] of [
     assert.equal(snapshot.executionTerminals[0].process.signal, 'SIGTERM');
     assert.ok(snapshot.executionTerminals[0].committedAt);
     assert.doesNotMatch(JSON.stringify(snapshot), /must-not-appear|xxxx/);
+  } finally { child.kill('SIGKILL'); await closed; }
+});
+
+test('container lifecycle diagnostics cover pre-attach, native child and fixed expiry', async (t) => {
+  const root = temporaryDirectory('avo-workspace-wait-');
+  const heartbeat = path.join(root, 'heartbeat');
+  const child = spawn(process.execPath, ['--eval', 'process.send("ready"); setInterval(() => {}, 1000);'],
+    { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { PATH: process.env.PATH } });
+  const closed = once(child, 'close');
+  // Synthetic workspace double invokes the real producer's lifecycle hook.
+  const workspace = { timeoutMs: 3000, async runPython(code, lifecycle) {
+    assert.equal(code, 'synthetic');
+    lifecycle.attached(child);
+    await closed;
+    throw new Error('isolated workspace Python timed out after 3000ms: must-not-appear');
+  } };
+  const owner = { pending: 1 };
+  const evidence = observeOwnedWorkspace(workspace, owner, { heartbeat });
+  const expectExpiry = async (attached) => assert.rejects(
+    waitForOwnedObservation(() => false, 'container did not start heartbeat', evidence, 10, { maxPolls: 1 }),
+    (error) => {
+      t.diagnostic(error.message);
+      const metadata = JSON.parse(error.message.split('\n')[1]);
+      assert.equal(metadata.child.status, attached ? 'still running' : 'not attached');
+      assert.equal(metadata.child.pid, attached ? child.pid : null);
+      assert.equal(metadata.job.state, attached ? 'running' : 'not started');
+      assert.equal(metadata.workspace.timeoutMs, 3000);
+      assert.equal(metadata.workspace.ownerPending, 1);
+      assert.equal(metadata.timeoutMs, 10 * TEST_TIMEOUT_SCALE);
+      assert.equal(metadata.maxPolls, TEST_TIMEOUT_SCALE);
+      assert.equal(metadata.heartbeat.lastSequence, null);
+      assert.ok(error.message.length < 8192);
+      assert.doesNotMatch(error.message, /must-not-appear/);
+      return true;
+    });
+  try {
+    await once(child, 'message');
+    await expectExpiry(false);
+    let attachedChild;
+    const result = workspace.runPython('synthetic', { attached: (value) => { attachedChild = value; } }).catch((error) => error);
+    assert.equal(attachedChild, child);
+    await expectExpiry(true);
+    child.kill('SIGTERM');
+    await result;
+    owner.pending = 0;
+    const snapshot = evidence.snapshot();
+    assert.equal(snapshot.child.signal, 'SIGTERM');
+    assert.ok(snapshot.child.exitAt);
+    assert.ok(snapshot.child.closeAt);
+    assert.equal(snapshot.job.state, 'failed');
+    assert.equal(snapshot.workspace.reasonCode, 'workspace-timeout');
+    assert.equal(snapshot.workspace.timeoutMs, 3000);
+    assert.equal(snapshot.workspace.ownerPending, 0);
+    assert.doesNotMatch(JSON.stringify(snapshot), /must-not-appear/);
   } finally { child.kill('SIGKILL'); await closed; }
 });
 

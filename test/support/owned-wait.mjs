@@ -25,14 +25,14 @@ function readJson(file) {
 const fileTime = (file) => file ? attempt(() => fs.statSync(file).mtime.toISOString()) : null;
 
 export function observeOwnedChild(child, { root, runId, run = () => null, heartbeat,
-  pids = () => [], group = () => child.pid, spawnedAt = new Date().toISOString() } = {}) {
+  pids = () => [], group = () => child?.pid, spawnedAt = child ? new Date().toISOString() : null } = {}) {
   const times = { spawnedAt, spawnEventAt: null, exitAt: null, closeAt: null };
   let nativeError = null;
   let lastHeartbeat = null;
-  child.once('spawn', () => { times.spawnEventAt = new Date().toISOString(); });
-  child.once('error', (error) => { nativeError = pick(error, ['code', 'name']); });
-  child.once('exit', () => { times.exitAt = new Date().toISOString(); });
-  child.once('close', () => { times.closeAt = new Date().toISOString(); });
+  child?.once('spawn', () => { times.spawnEventAt = new Date().toISOString(); });
+  child?.once('error', (error) => { nativeError = pick(error, ['code', 'name']); });
+  child?.once('exit', () => { times.exitAt = new Date().toISOString(); });
+  child?.once('close', () => { times.closeAt = new Date().toISOString(); });
   const sample = () => {
     if (!heartbeat) return;
     attempt(() => {
@@ -50,7 +50,7 @@ export function observeOwnedChild(child, { root, runId, run = () => null, heartb
     const lock = root ? readLocalExecutionLock(root) : null;
     const currentRun = run();
     const members = process.platform === 'linux' ? attempt(() => liveGroupMembers(group())) : [];
-    const ownedPids = [...new Set([child.pid, ...pids(), lock?.pid, lock?.workspaceGuardian?.pid,
+    const ownedPids = [...new Set([child?.pid, ...pids(), lock?.pid, lock?.workspaceGuardian?.pid,
       ...(Array.isArray(members) ? members : [])].filter(Number.isSafeInteger))];
     const privateDir = runId && root ? path.join(root, 'runs/private', runId) : null;
     const terminals = privateDir ? attempt(() => fs.readdirSync(privateDir)
@@ -61,8 +61,9 @@ export function observeOwnedChild(child, { root, runId, run = () => null, heartb
           process: pick(record.process, ['exitCode', 'signal', 'closedAt', 'closeObserved']), committedAt: fileTime(file) };
       })) : { unavailable: 'not-applicable' };
     return {
-      child: { pid: child.pid ?? null, status: child.exitCode === null && child.signalCode === null ? 'still running' : 'exited',
-        exitCode: child.exitCode, signal: child.signalCode, nativeError, ...times },
+      child: { pid: child?.pid ?? null, status: !child ? 'not attached'
+        : child.exitCode === null && child.signalCode === null ? 'still running' : 'exited',
+        exitCode: child?.exitCode ?? null, signal: child?.signalCode ?? null, nativeError, ...times },
       processes: ownedPids.slice(0, 16).map((pid) => ({ pid, ...attempt(() => {
         const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
         const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
@@ -79,6 +80,33 @@ export function observeOwnedChild(child, { root, runId, run = () => null, heartb
       lock: pick(lock, ['pid', 'processGroup', 'createdAt']),
     };
   } };
+}
+
+// Observe the existing per-instance lifecycle hook without adding a product
+// accessor. The Docker attach client shares the test's group: never scan it.
+export function observeOwnedWorkspace(workspace, owner, { heartbeat } = {}) {
+  const job = { state: 'not started' };
+  let evidence = observeOwnedChild(null, { heartbeat, run: () => job });
+  const runPython = workspace.runPython.bind(workspace);
+  workspace.runPython = async (code, lifecycle) => {
+    job.state = 'running';
+    try {
+      const value = await runPython(code, { ...lifecycle, attached(child) {
+        evidence = observeOwnedChild(child, { heartbeat, run: () => job, group: () => null });
+        lifecycle.attached(child);
+      } });
+      job.state = 'completed';
+      return value;
+    } catch (error) {
+      job.state = 'failed';
+      // Classify only known structural outcomes; never include runtime streams.
+      job.reasonCode = /timed out after \d+ms/.test(error.message) ? 'workspace-timeout'
+        : /cancelled/.test(error.message) ? 'cancelled' : 'unknown';
+      throw error;
+    }
+  };
+  return { sample: () => evidence.sample(), snapshot: () => ({ ...evidence.snapshot(),
+    workspace: { timeoutMs: workspace.timeoutMs, ownerPending: owner.pending, reasonCode: job.reasonCode ?? null } }) };
 }
 
 export async function waitForOwnedObservation(predicate, label, evidence, baselineMs, { pollMs = 10, maxPolls,

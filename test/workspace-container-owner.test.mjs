@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WorkspaceSandbox } from '../src/core/workspace.mjs';
 import { createWorkspaceContainerOwner } from '../src/local/workspace-container-owner.mjs';
+import { observeOwnedWorkspace, waitForOwnedObservation } from './support/owned-wait.mjs';
 
 const enabled = Boolean(process.env.AVO_TEST_WORKSPACE_IMAGE);
 const heartbeatCode = `import pathlib, time
@@ -52,13 +53,18 @@ if(args[0] === ${JSON.stringify(mode === 'cancel-pause-overlap' ? 'rm' : 'create
       }
       const workspace = new WorkspaceSandbox({ root, gameId: mode, mode: 'isolated-python', containerRuntime: delayedRuntime ? runtime : 'docker', containerImage: image, timeoutMs: mode === 'paused-timeout' ? 3000 : 15000 });
       const heartbeat = path.join(workspace.root, 'heartbeat.txt');
+      const evidence = observeOwnedWorkspace(workspace, owner, { heartbeat });
+      const waitForHeartbeat = (predicate, label, observed = evidence) =>
+        waitForOwnedObservation(predicate, label, observed, 5000, { maxPolls: 500 });
+      let unrelatedEvidence;
       const signal = new AbortController();
       let run;
       try {
         if (mode === 'abort') {
           const unrelated = new WorkspaceSandbox({ root: path.join(root, 'unrelated'), gameId: 'fixture', mode: 'isolated-python', containerImage: image, timeoutMs: 15000 });
+          unrelatedEvidence = observeOwnedWorkspace(unrelated, unrelatedOwner, { heartbeat: unrelatedHeartbeat });
           unrelatedRun = unrelatedOwner.run(unrelated, heartbeatCode).catch(() => {});
-          await waitFor(() => fs.existsSync(unrelatedHeartbeat), 'unrelated fixture did not start');
+          await waitForHeartbeat(() => fs.existsSync(unrelatedHeartbeat), 'unrelated fixture did not start', unrelatedEvidence);
         }
         if (mode === 'paused-admission') await owner.pause();
         run = owner.run(workspace, heartbeatCode, { signal: signal.signal }).then((value) => ({ value }), (error) => ({ error }));
@@ -81,7 +87,7 @@ if(args[0] === ${JSON.stringify(mode === 'cancel-pause-overlap' ? 'rm' : 'create
           assert.equal(fs.existsSync(heartbeat), false, 'paused admission cannot execute code');
           await owner.resume();
         }
-        await waitFor(() => fs.existsSync(heartbeat), 'container did not start heartbeat');
+        await waitForHeartbeat(() => fs.existsSync(heartbeat), 'container did not start heartbeat');
         if (mode === 'cancel-pause-overlap') {
           signal.abort();
           await waitFor(() => fs.existsSync(creating), 'removal was not dispatched');
@@ -100,7 +106,7 @@ if(args[0] === ${JSON.stringify(mode === 'cancel-pause-overlap' ? 'rm' : 'create
         if (unrelatedRun) assert.notEqual(fs.readFileSync(unrelatedHeartbeat, 'utf8'), unrelatedBefore, 'unrelated container must not pause');
         if (mode !== 'paused-timeout') {
           await owner.resume();
-          await waitFor(() => fs.readFileSync(heartbeat, 'utf8') !== paused, 'resume did not resume writes');
+          await waitForHeartbeat(() => fs.readFileSync(heartbeat, 'utf8') !== paused, 'resume did not resume writes');
           if (mode === 'owner-close') await owner.close();
           else signal.abort();
         }
@@ -114,7 +120,7 @@ if(args[0] === ${JSON.stringify(mode === 'cancel-pause-overlap' ? 'rm' : 'create
         assert.equal(fs.readFileSync(heartbeat, 'utf8'), stopped, 'cleanup must stop later writes');
         if (unrelatedRun) {
           const other = fs.readFileSync(unrelatedHeartbeat, 'utf8');
-          await waitFor(() => fs.readFileSync(unrelatedHeartbeat, 'utf8') !== other, 'unrelated container must survive cleanup');
+          await waitForHeartbeat(() => fs.readFileSync(unrelatedHeartbeat, 'utf8') !== other, 'unrelated container must survive cleanup', unrelatedEvidence);
         }
       } finally {
         signal.abort();
