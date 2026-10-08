@@ -7,7 +7,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { CHECKOUT, DEFAULT_VENV, LAUNCHER } from '../src/general/browser-runtime.mjs';
-import { realRuntime, stackAbsent } from './support/general-browser.mjs';
+import { realRuntime, stackAbsent, testDirectory } from './support/general-browser.mjs';
 import { runProcess } from '../src/benchmark/process-runner.mjs';
 import { buildBrowserChildEnvironment } from '../src/local/child-environment.mjs';
 
@@ -52,7 +52,7 @@ test('two fresh wheel installations; manual loader roots pre-import; installed o
   });
   const inventories = [];
   for (let index = 0; index < 2; index++) {
-    const parent = fs.mkdtempSync(path.join(CHECKOUT, '.bt/i-'));
+    const parent = testDirectory('i-');
     fs.chmodSync(parent, 0o755);
     const venv = path.join(parent, 'venv');
     execFileSync('/usr/bin/python3.12', ['-I', '-m', 'venv', '--without-pip', venv], { timeout: 30000 });
@@ -107,7 +107,7 @@ test('tampered selected wheel rejected by hash-enforced pip without network', { 
   const wheelhouse = path.join(CHECKOUT, '.browser-wheels');
   if (!fs.existsSync(wheelhouse)) { t.skip('preprepared test wheel cache absent'); return; }
   const row = manifest.distributions.find((r) => r.name === 'aiofiles');
-  const root = fs.mkdtempSync(path.join(CHECKOUT, '.bt/hash-')); const wheels = path.join(root,'wheels'); fs.mkdirSync(wheels);
+  const root = testDirectory('hash-'); const wheels = path.join(root,'wheels'); fs.mkdirSync(wheels);
   fs.copyFileSync(path.join(wheelhouse,row.filename),path.join(wheels,row.filename)); fs.appendFileSync(path.join(wheels,row.filename),'synthetic tamper');
   const req = path.join(root,'requirements.txt'); fs.writeFileSync(req,`${row.name}==${row.version} --hash=sha256:${row.sha256}\n`);
   assert.throws(() => execFileSync(`${DEFAULT_VENV}/bin/python`,['-I','-m','pip','download','--no-index','--find-links',wheels,'--require-hashes','--only-binary=:all:','-r',req,'-d',path.join(root,'output')],{env:{PATH:'/usr/bin:/bin',PIP_CONFIG_FILE:'/dev/null'},timeout:20000,stdio:'pipe'}), /DO NOT MATCH THE HASHES/);

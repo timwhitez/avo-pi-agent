@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { generalEntry, parseGeneralArgs } from '../src/general/cli.mjs';
-import { fixtureRuntime } from './support/general-browser.mjs';
+import { fixtureRuntime, testTask } from './support/general-browser.mjs';
 import { withLoopback, sendToolCall } from './support/responses-loopback.mjs';
 import { providerEnvironment, providerCapabilities } from './support/provider.mjs';
 import { createPiSdkLoop } from '../src/loop/pi-sdk.mjs';
@@ -40,7 +40,7 @@ test('entry_cli_default_off and root account fail before browser/provider', asyn
 
 test('entry_pi_exec_readback_followup real Pi and owned stdin fixture', async () => {
   let runtime;
-  const task = path.resolve('.bt/task-fixture.txt'); fs.mkdirSync(path.dirname(task), { recursive: true }); fs.writeFileSync(task, 'Synthetic stdin/readback contract only.');
+  const task = testTask('Synthetic stdin/readback contract only.');
   const refs = [];
   await withLoopback((index, response, bodies) => {
     if (index === 1) sendToolCall(response, { responseId: 'r1', callId: 'exec1', name: 'browser_exec', args: { code: "print('HEAD' + 'x'*30000 + 'MIDDLE' + 'y'*30000 + 'TAIL')" } });
@@ -61,7 +61,7 @@ test('entry_pi_exec_readback_followup real Pi and owned stdin fixture', async ()
 });
 
 test('entry tool budget exposes finish only on next actual HTTP request', async () => {
-  const task = path.resolve('.bt/budget-task.txt'); fs.writeFileSync(task, 'Synthetic budget check.');
+  const task = testTask('Synthetic budget check.');
   await withLoopback((index, response) => sendToolCall(response, { responseId: `budget${index}`, callId: `b${index}`, name: index === 1 ? 'browser_exec' : 'finish', args: index === 1 ? { code: 'print("one")' } : { summary: 'budget complete' } }), async ({ url, bodies }) => {
     process.env.OPENAI_BASE_URL = url; process.env.OPENAI_MODEL = 'loopback-budget-model';
     const result = await generalEntry(['run', '--profile=general-browser-v1', `--task-file=${task}`, '--max-tools=1', '--browser-user=nobody'], { runtimeFactory: fixtureRuntime });
@@ -71,7 +71,7 @@ test('entry tool budget exposes finish only on next actual HTTP request', async 
 
 for (const bound of ['96000','1800']) test(`general image pruning and ref readback through actual HTTP (bound ${bound}; synthetic PNG)`, async () => {
   const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1cAAAAASUVORK5CYII=','base64');
-  const task=path.resolve('.bt/image-pruning-task.txt');fs.writeFileSync(task,'Synthetic image transport and ref recovery.');
+  const task=testTask('Synthetic image transport and ref recovery.');
   let runtime;let firstRef;
   const imageBlocks=(body)=>body.input.flatMap((i)=>i.content||(Array.isArray(i.output)?i.output:[])).filter((b)=>b.type==='input_image');
   await withLoopback((index,response)=>{
@@ -93,7 +93,7 @@ for (const bound of ['96000','1800']) test(`general image pruning and ref readba
 });
 
 test('general run deadline aborts actual Pi and active child without queued replay', async () => {
-  const task=path.resolve('.bt/cancel-task.txt');fs.writeFileSync(task,'Synthetic cancellation contract.');
+  const task=testTask('Synthetic cancellation contract.');
   let runtime;
   await withLoopback((index,response)=>sendToolCall(response,{responseId:`cancel${index}`,callId:`cancel${index}`,name:'browser_exec',args:{code:'import time; print("submitted",flush=True); time.sleep(10)'}}),async({url,bodies})=>{
     process.env.OPENAI_BASE_URL=url;process.env.OPENAI_MODEL='synthetic-cancel-model';

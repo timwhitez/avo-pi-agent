@@ -71,8 +71,14 @@ non-root runs share the current account. Traversable parents hold no task conten
 Chrome's
 singleton socket exceeded Unix path limits in the original deep temp path, so
 `<checkout>/.bt/g-<unique>/` is a separate 0700 account-owned temporary directory;
-it never shares another run's temporary files. A checkout too deep even for this
-short path fails clearly. Private logs/temp/artifacts are retained for inspection.
+it never shares another run's temporary files. After owned Chrome, daemon and exec
+children are proven closed, `close()` removes only that identity-checked directory.
+Contents are removed under the browser account with fd-relative, non-symlink-following
+operations; the host removes only the empty leaf in its host-owned parent. Unknown
+closure retains it and reports the reason with the existing cleanup-unknown/managed
+lock evidence. A directory identity change or removal failure also reports retained
+with a reason. A checkout too deep even for this short path fails clearly. Private
+run logs and artifacts remain retained for inspection.
 
 Production runs reuse the managed-run lock, process group and guardian. They
 serialize with ARC managed runs and each other. Within a runtime, exec/screenshot/
@@ -208,6 +214,11 @@ markers are exercised through real children. This covers the exercised Python
 paths, not native Chrome networking or arbitrary hostile Python. The ARC
 baseline/candidate Pi differential also initializes under contaminated browser
 settings; effective requests remain identical.
+
+Browser tests remove their own task fixtures, fresh installations, run roots and
+process-temp directories. Per-test teardown checks that owned temporary entries
+are gone; foreign `.bt/g-*` directories and symlinks remain untouched. The parent-death
+fixture removes its own retained temp only after the guardian proves group closure.
 
 ```bash
 node --test --test-concurrency=1 test/general-browser-entry.test.mjs \
