@@ -5,10 +5,11 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runProcess } from '../benchmark/process-runner.mjs';
-import { ensureAuthorityDirectory } from '../local/authority-directory.mjs';
+import { ensureAuthorityDirectory, acquireAuthorityDirectory } from '../local/authority-directory.mjs';
 import { readRegularFileEvidence, matchesRegularFileIdentity } from '../local/regular-file-evidence.mjs';
 import { buildBrowserChildEnvironment } from '../local/child-environment.mjs';
 import { fitsBound, readDetailEnvelope } from '../core/bounded-read.mjs';
+import { managedProcessGroup, liveGroupMembers } from '../local/process-group.mjs';
 
 export const CHECKOUT = fileURLToPath(new URL('../../', import.meta.url));
 export const LAUNCHER = path.join(CHECKOUT, 'scripts/browser-launch.py');
@@ -16,6 +17,42 @@ export const DEFAULT_VENV = path.join(CHECKOUT, '.venv-browser');
 export const HOST_AUTHORITY = 'Python has the selected account’s host file, subprocess and network authority. Privilege separation is not a sandbox; Chrome sandbox remains enabled.';
 const CAPTURE_LIMIT = 128 * 1024 * 1024;
 const dirs = ['browser', 'browser/profile', 'browser/home', 'browser/home/config', 'browser/home/cache', 'browser/home/data', 'browser/harness', 'browser/harness/config', 'browser/runtime', 'browser/tmp', 'browser/helper-workspace', 'browser/cwd', 'browser/downloads', 'artifacts'];
+
+export async function removeBrowserTemp(tmpRoot, identity, expected) {
+  let parent;
+  try {
+    parent = acquireAuthorityDirectory(path.join(CHECKOUT, '.bt'), { root: CHECKOUT });
+    const authority = fs.fstatSync(parent.fd);
+    if (authority.uid !== process.geteuid() || (authority.mode & 0o022)) throw new Error('process temp parent is not host-owned');
+    const check = () => {
+      parent.assertIdentity();
+      const stat = fs.lstatSync(tmpRoot, { bigint: true });
+      if (path.dirname(tmpRoot) !== path.join(CHECKOUT, '.bt') || !stat.isDirectory()
+          || String(stat.dev) !== expected.dev || String(stat.ino) !== expected.ino) throw new Error('process temp identity changed');
+    };
+    check();
+    // Never recurse as root inside an account-writable directory. Python's
+    // fd-relative rmtree rejects symlink substitution; unlink never follows it.
+    const result = await runProcess('/usr/bin/python3.12', ['-I', '-c', `import os,shutil,stat,sys
+fd=os.open(sys.argv[1], os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+ s=os.fstat(fd)
+ assert (str(s.st_dev),str(s.st_ino)) == tuple(sys.argv[2:4]), 'process temp identity changed'
+ assert shutil.rmtree.avoids_symlink_attacks
+ for name in os.listdir(fd):
+  if stat.S_ISDIR(os.stat(name,dir_fd=fd,follow_symlinks=False).st_mode): shutil.rmtree(name,dir_fd=fd)
+  else: os.unlink(name,dir_fd=fd)
+finally: os.close(fd)`, tmpRoot, expected.dev, expected.ino], {
+      ...identity, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, timeoutMs: 10000,
+      returnFailures: true, maxStdoutBytes: 4096, maxStderrBytes: 4096,
+    });
+    if (result.status !== 0 || !result.captureComplete) throw new Error('browser-account process temp removal failed');
+    check();
+    fs.rmdirSync(tmpRoot); // Only this leaf in the host-owned parent, never its contents.
+    return { state: 'removed' };
+  } catch (error) { return { state: 'retained', reason: error.message }; }
+  finally { if (parent) fs.closeSync(parent.fd); }
+}
 
 export function resolveBrowserIdentity(name = process.env.AVO_GENERAL_BROWSER_USER) {
   if (process.platform !== 'linux') throw new Error('general browser currently requires Linux');
@@ -75,25 +112,33 @@ export class BrowserRuntime {
     this.hostRoot = path.join(root, 'host');
     this.browserRoot = path.join(root, 'browser'); this.artifacts = new Map(); this.queue = Promise.resolve(); this.children = []; this.stored = 0; this.closed = false;
     this.deadline = Date.now() + timeoutMs;
+    this.group = managedProcessGroup(); this.childGroups = new Set();
     this.name = `g-${crypto.randomBytes(5).toString('hex')}`;
     const shortBase = ensureAuthorityDirectory(path.join(CHECKOUT, '.bt'), { root: CHECKOUT, mode: 0o711 });
+    const authority = fs.lstatSync(shortBase);
+    if (authority.uid !== process.geteuid() || (authority.mode & 0o022)) throw new Error('process temp parent is not host-owned');
+    if (Buffer.byteLength(path.join(shortBase, 'g-XXXXXX')) + 50 >= 104) throw new Error('Chrome temporary socket path requires a shorter checkout path');
+    if (Buffer.byteLength(path.join(this.browserRoot, 'runtime', 'bu.sock')) >= 104) throw new Error('private browser Unix socket path exceeds Linux limit; use a shorter checkout path');
     this.tmpRoot = fs.mkdtempSync(path.join(shortBase, 'g-'));
     const tmpFd = fs.openSync(this.tmpRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     try {
+      const stat = fs.fstatSync(tmpFd, { bigint: true });
+      this.tmpIdentity = { dev: String(stat.dev), ino: String(stat.ino) };
       fs.fchmodSync(tmpFd, 0o700);
       if (process.geteuid() === 0) fs.fchownSync(tmpFd, identity.uid, identity.gid);
     } finally { fs.closeSync(tmpFd); }
-    if (Buffer.byteLength(this.tmpRoot) + 50 >= 104) throw new Error('Chrome temporary socket path requires a shorter checkout path');
-    if (Buffer.byteLength(path.join(this.browserRoot, 'runtime', 'bu.sock')) >= 104) throw new Error('private browser Unix socket path exceeds Linux limit; use a shorter checkout path');
     this.env = buildBrowserChildEnvironment({ venv: this.venv, browserRoot: this.browserRoot, name: this.name, tmpRoot: this.tmpRoot });
   }
   async process(mode, { code = null, signal = this.signal, timeoutMs = this.toolTimeoutMs, ...options } = {}) {
-    return runProcess(path.join(this.venv, 'bin/python'), ['-I', LAUNCHER, mode], {
+    const result = await runProcess(path.join(this.venv, 'bin/python'), ['-I', LAUNCHER, mode], {
       cwd: path.join(this.browserRoot, 'cwd'), env: this.env, ...this.identity, stdin: code,
       outputEncoding: null, returnFailures: true, timeoutMs: Math.max(1, Math.min(timeoutMs, this.deadline - Date.now())),
       maxStdoutBytes: 16 * 1024 * 1024, maxStderrBytes: 4 * 1024 * 1024,
       cancellation: { executionId: crypto.randomUUID(), signal, policies: [{ kind: 'operator-cancel' }], drainTimeoutMs: 2000 }, ...options,
+      onSpawn: (child) => { if (!this.group) this.childGroups.add(child.pid); options.onSpawn?.(child); },
     });
+    this.executionCleanupUnknown ||= result.drainTimedOut;
+    return result;
   }
   async inventory() {
     if (!fs.existsSync(path.join(this.venv, 'receipt.json'))) throw new Error('private browser installation receipt missing; run explicit setup-browser.sh');
@@ -115,7 +160,7 @@ export class BrowserRuntime {
       stdoutFile: log, stderrFile: `${log}.err`, logRoot: this.hostRoot, outputEncoding: null, returnFailures: true,
       maxStdoutBytes: 1024 * 1024, maxStderrBytes: 1024 * 1024, timeoutMs: Math.max(1, this.deadline - Date.now()),
       cancellation: { executionId: crypto.randomUUID(), signal: this.signal ? AbortSignal.any([controller.signal, this.signal]) : controller.signal, policies: [{ kind: 'operator-cancel' }], drainTimeoutMs: 2000 },
-      onSpawn: (child) => { record.child = child; },
+      onSpawn: (child) => { record.child = child; if (!this.group) this.childGroups.add(child.pid); },
     }).then((r) => { record.done = true; record.result = r; return r; }, (e) => { record.done = true; record.error = e; return null; });
     this.children.push(record); return record;
   }
@@ -174,8 +219,10 @@ export class BrowserRuntime {
     // Reserve the worst serialized fixed facts before any effectful dispatch.
     const fixed = { ok: false, started: true, meaning: 'process-and-capture-completion-only', businessSuccess: 'unspecified', decoding: 'UTF-8 replacement in previews; saved byte hashes cover original bytes', effects: 'submitted', exitCode: Number.MAX_SAFE_INTEGER, signal: 'S'.repeat(32), timedOut: false, error: '\0'.repeat(256), processOutcome: 'completed', cancelled: false, cancellationReason: '\0'.repeat(80), captureComplete: false, drainTimedOut: false, observedBytes: { stdout: Number.MAX_SAFE_INTEGER, stderr: Number.MAX_SAFE_INTEGER }, refs, nextRequest, stdoutHead: '', stdout: '', stderr: '' };
     if (!fitsBound(fixed, this.B)) throw new Error('tool result bound cannot express process facts and refs before dispatch');
-    const options = { code, signal: signal && this.signal ? AbortSignal.any([signal, this.signal]) : signal || this.signal, stdoutFile: files[0], stderrFile: files[1], logRoot: this.hostRoot };
+    const options = { code, signal: signal && this.signal ? AbortSignal.any([signal, this.signal]) : signal || this.signal, stdoutFile: files[0], stderrFile: files[1], logRoot: this.hostRoot,
+      onSpawn: (child) => { if (!this.group) this.childGroups.add(child.pid); } };
     const r = this.transport ? await this.transport(code, options, this) : await this.process('exec', options);
+    this.executionCleanupUnknown ||= r.drainTimedOut;
     files.forEach((file, index) => this.register(file, 'text/plain', r.captureComplete === true, null, refs[index]));
     const receipt = r.terminal?.receipt;
     const cancelled = Boolean(receipt?.cancellation) || receipt?.processOutcome === 'censored';
@@ -240,7 +287,17 @@ export class BrowserRuntime {
     for (const record of this.children.toReversed()) record.controller.abort();
     await this.queue;
     await Promise.all(this.children.map((r) => r.promise));
-    if (this.children.some((r) => r.error || r.result?.drainTimedOut)) throw new Error('browser cleanup unknown; retain managed lock');
-    return { state: 'closed', children: this.children.map((r) => ({ pid: r.child?.pid, exitCode: r.result?.status, signal: r.result?.signal })) };
+    let reason;
+    try {
+      if (this.executionCleanupUnknown || this.children.some((r) => r.error || r.result?.drainTimedOut)) reason = 'owned-child closure unknown';
+      else if ([...(this.group ? [this.group] : this.childGroups)].some((group) => liveGroupMembers(group, { exclude: process.pid }).length)) reason = 'owned process group still has live children';
+    } catch { reason = 'owned process group closure check failed'; }
+    if (reason) {
+      throw Object.assign(new Error(`browser cleanup unknown; retain managed lock and process temp: ${reason}`), {
+        cleanup: { state: 'unknown', processTemp: { state: 'retained', reason } },
+      });
+    }
+    this.processTempCleanup ??= await removeBrowserTemp(this.tmpRoot, this.identity, this.tmpIdentity);
+    return { state: 'closed', processTemp: this.processTempCleanup, children: this.children.map((r) => ({ pid: r.child?.pid, exitCode: r.result?.status, signal: r.result?.signal })) };
   }
 }

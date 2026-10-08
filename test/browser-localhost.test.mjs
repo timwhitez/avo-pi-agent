@@ -5,10 +5,11 @@ import path from 'node:path';
 import http from 'node:http';
 import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { realRuntime, stackAbsent } from './support/general-browser.mjs';
+import { realRuntime, stackAbsent, testTask, testDirectory, trackTestDirectory } from './support/general-browser.mjs';
 import { withLoopback, sendToolCall } from './support/responses-loopback.mjs';
 import { providerEnvironment } from './support/provider.mjs';
 import { generalEntry } from '../src/general/cli.mjs';
+import { removeBrowserTemp, resolveBrowserIdentity } from '../src/general/browser-runtime.mjs';
 
 async function localhost(fn) {
   const server = http.createServer((req, res) => {
@@ -24,7 +25,10 @@ test('localhost_navigation_observe_input_js_cdp_wait_screenshot; raw False/error
     const r = realRuntime({ imageCapable: true });
     try {
       await r.start(); assert.equal((await r.doctor()).healthy, true);
-      assert.equal(r.receipt.python, '3.12.3'); assert.match(r.receipt.chrome, /154\.0\.8037\.92/);
+      assert.equal(r.receipt.python, '3.12.3');
+      const chromeVersion = execFileSync(r.chrome, ['--version'], { ...r.identity, cwd: path.join(r.browserRoot, 'cwd'), env: r.env, encoding: 'utf8', timeout: 10000 }).trim();
+      assert.equal(r.receipt.chrome, chromeVersion);
+      assert.match(r.receipt.chrome, /^Google Chrome(?: for Testing)? \d+\.\d+\.\d+\.\d+$/);
       const out = await r.exec(`import json\nprint(json.dumps(goto_url(${JSON.stringify(url)})))\nassert wait_for_element("#later", timeout=5)\nfill_input("#name", "synthetic input")\nprint(js("document.querySelector('#name').value"))\nprint(page_info())\nlocal_marker = 1`);
       assert.equal(out.details.ok, true, out.details.stderr); assert.match(out.details.stdout, /synthetic input/);
       const routing=await r.exec(`import sys\nprint(http_get(${JSON.stringify(url)}))\nassert 'fetch_use' not in sys.modules`); assert.equal(routing.details.ok,true,routing.details.stderr); assert.match(routing.details.stdout,/Local fixture/);
@@ -46,7 +50,7 @@ test('localhost_navigation_observe_input_js_cdp_wait_screenshot; raw False/error
 });
 
 for (const modality of ['text,image', 'text']) test(`localhost_pi_official_cli_end_to_end; actual next image HTTP bytes (${modality})`, { skip: stackAbsent }, async () => {
-  const task = path.resolve('.bt/localhost-task.txt'); fs.mkdirSync(path.dirname(task), { recursive: true }); fs.writeFileSync(task, 'Use only the synthetic localhost fixture.');
+  const task = testTask('Use only the synthetic localhost fixture.');
   let runtime;
   await localhost(async (url) => withLoopback((index, response) => {
     const calls = [
@@ -107,7 +111,7 @@ test('owned_daemon_chrome_pause_abort_parent_death with real guardian', { skip: 
   const { controlOwnedRun } = await import('../src/local/owned-run-control.mjs');
   const crypto = await import('node:crypto');
   for (const ending of ['SIGTERM', 'SIGKILL']) {
-    const directory = fs.mkdtempSync(path.resolve('.bt/owner-'));
+    const directory = testDirectory('owner-');
     const record = path.join(directory, 'identity.json');
     const child = spawn(process.execPath, ['test/support/general-owned-child.mjs', directory, `g-${crypto.randomBytes(5).toString('hex')}`, record], { env: { PATH:'/usr/bin:/bin', AVO_DISABLE_DOTENV:'1' }, stdio:['ignore','pipe','pipe'] });
     let stderr=''; child.stderr.on('data',(b)=>{stderr+=b;}); child.stdout.resume();
@@ -126,19 +130,23 @@ test('owned_daemon_chrome_pause_abort_parent_death with real guardian', { skip: 
       const deadline=Date.now()+10000;
       while(liveGroupMembers(identity.group).length && Date.now()<deadline) await delay(100);
       assert.deepEqual(liveGroupMembers(identity.group),[]);
+      trackTestDirectory(identity.root, identity.identity);
+      // SIGKILL prevents runtime.close(); the guardian's group closure is the
+      // authority for this test-owned parent's cleanup, never a production retry.
+      if (fs.existsSync(identity.tmpRoot)) assert.equal((await removeBrowserTemp(identity.tmpRoot, identity.identity, identity.tmpIdentity)).state, 'removed');
     } finally { if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL'); }
   }
 });
 
 test('production CLI owned run uses official stack and loopback Pi provider', { skip: stackAbsent }, async () => {
   const { runProcess } = await import('../src/benchmark/process-runner.mjs');
-  const task = path.resolve('.bt/production-cli-task.txt'); fs.writeFileSync(task, 'Synthetic localhost production-entry acceptance.');
+  const task = testTask('Synthetic localhost production-entry acceptance.');
   await localhost(async (url) => withLoopback((index, response) => sendToolCall(response, { responseId:`cli${index}`,callId:`cli${index}`,name:index===1?'browser_exec':'finish',args:index===1?{code:`goto_url(${JSON.stringify(url)})\nassert wait_for_element("#name", timeout=5)\nprint(page_info())`}:{summary:'fixture observed'} }), async ({ url: providerUrl, bodies }) => {
     const result = await runProcess(process.execPath,['src/general/cli.mjs','run','--profile=general-browser-v1',`--task-file=${task}`,'--browser-user=nobody'],{env:{PATH:'/usr/bin:/bin',AVO_DISABLE_DOTENV:'1',OPENAI_BASE_URL:providerUrl,OPENAI_API_KEY:'x'.repeat(32),OPENAI_MODEL:'synthetic-cli-model',...providerEnvironment()},timeoutMs:120000});
     assert.equal(result.status,0,result.stderr); const report=JSON.parse(result.stdout); assert.equal(report.finished,true); assert.equal(report.toolCalls,1); assert.equal(bodies.length,2);
     assert.doesNotMatch(result.stdout,/Local fixture|fixture observed|DevTools|ws:\/\//);
     assert.match(result.stderr,/Privilege separation is not a sandbox/);
-    const root = path.resolve('runs/private/general', report.runId);
+    const root = trackTestDirectory(path.resolve('runs/private/general', report.runId), resolveBrowserIdentity('nobody'));
     assert.equal(fs.statSync(root).uid, process.geteuid());
     assert.equal(fs.statSync(path.join(root, 'host/manifest.json')).uid, process.geteuid());
     const doctor = await generalEntry(['doctor', `--run-id=${report.runId}`, '--json', '--browser-user=nobody']);

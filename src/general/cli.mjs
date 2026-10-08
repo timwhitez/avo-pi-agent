@@ -56,8 +56,10 @@ export async function generalEntry(args, { runtimeFactory = (options) => new Bro
     // Strict doctor needs only this exact named IPC, never an endpoint or discovery.
     const { buildBrowserChildEnvironment } = await import('../local/child-environment.mjs');
     runtime.env = buildBrowserChildEnvironment({ venv: runtime.venv, browserRoot: runtime.browserRoot, name: runtime.name });
-    await runtime.inventory();
-    return { report: await runtime.doctor(), ownership: 'not established by doctor' };
+    try {
+      await runtime.inventory();
+      return { report: await runtime.doctor(), ownership: 'not established by doctor' };
+    } finally { await runtime.close(); }
   }
   if (options.command === 'run' && owned) {
     const { enterOwnedRun } = await import('../local/owned-run.mjs');
