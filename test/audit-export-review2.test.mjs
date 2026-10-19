@@ -24,6 +24,67 @@ import { contextReceiptsFor } from './support/context-receipts.mjs';
 // complete a run. Synthetic, redacted fixtures only.
 
 const CLI = 'scripts/export-trajectory-audit.mjs';
+
+test('INDEX validates the exact run set after its MANIFEST digest is updated (#395)', () => {
+  const fixture = setup(['index-a', 'index-b'].map((runId) => ({
+    runId, report: { runId, games: [] },
+  })));
+  try {
+    exportTrajectoryAudit({ manifestFile: fixture.manifestFile, outputDir: fixture.output });
+    const indexPath = path.join(fixture.output, 'INDEX.json');
+    const manifestPath = path.join(fixture.output, 'MANIFEST.json');
+    const original = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    const rewrite = (runs) => {
+      const bytes = Buffer.from(JSON.stringify({ ...original, runs }));
+      fs.writeFileSync(indexPath, bytes);
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      manifest.files = manifest.files.map((entry) => (entry.path === 'INDEX.json'
+        ? { ...entry, bytes: bytes.length, sha256: sha256(bytes) } : entry));
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    };
+    for (const sourceRoot of [null, fixture.source]) {
+      for (const runs of [original.runs, [...original.runs].reverse()]) {
+        rewrite(runs);
+        const result = validateTrajectoryAudit(fixture.output, { sourceRoot });
+        assert.equal(result.ok, true, JSON.stringify(result.errors));
+        assert.deepEqual(result.runs.map((run) => run.runId).sort(), ['index-a', 'index-b']);
+        const args = [CLI, '--validate-output', fixture.output];
+        if (sourceRoot) args.push('--source-root', sourceRoot);
+        const cli = spawnSync(process.execPath, args, { encoding: 'utf8' });
+        assert.equal(cli.error, undefined);
+        assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+        assert.equal(JSON.parse(cli.stdout).ok, true);
+      }
+      for (const runs of [
+        [original.runs[0], original.runs[0]],
+        [original.runs[0]],
+        [...original.runs, { ...original.runs[0], runId: 'index-c' }],
+        null, {}, 'ab', [null, original.runs[1]],
+        [{ ...original.runs[0], runId: 1 }, original.runs[1]],
+        [{ ...original.runs[0], runId: '' }, original.runs[1]],
+      ]) {
+        rewrite(runs);
+        const result = validateTrajectoryAudit(fixture.output, { sourceRoot });
+        assert.equal(result.ok, false, `accepted ${JSON.stringify(runs)}`);
+        assert.ok(result.errors.some((error) => error.file === 'INDEX.json'
+          && error.reason.startsWith('INDEX_')), JSON.stringify(result.errors));
+        assert.ok(!result.errors.some((error) => error.reason === 'FILE_HASH_MISMATCH'));
+        const args = [CLI, '--validate-output', fixture.output];
+        if (sourceRoot) args.push('--source-root', sourceRoot);
+        const cli = spawnSync(process.execPath, args, { encoding: 'utf8' });
+        assert.equal(cli.error, undefined);
+        assert.equal(cli.status, 1, cli.stdout + cli.stderr);
+        assert.equal(JSON.parse(cli.stdout).ok, false);
+      }
+    }
+    rewrite([original.runs[0], original.runs[0]]);
+    const duplicate = validateTrajectoryAudit(fixture.output);
+    assert.ok(duplicate.errors.some((error) => error.reason === 'INDEX_RUN_DUPLICATE'));
+    assert.ok(duplicate.errors.some((error) => error.reason === 'INDEX_RUN_SET_MISMATCH'));
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 const RECEIPTS_SCHEMA = 'avo.trajectory-audit-receipts.v1';
 const RECEIPT_SCHEMA = 'avo.execution-terminal.v1';
 

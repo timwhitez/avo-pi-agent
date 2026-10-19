@@ -1597,7 +1597,15 @@ export function validateTrajectoryAudit(outputDir, { sourceRoot = null } = {}) {
   }
   try {
     const index = readJsonFileEvidence(path.join(root, 'INDEX.json'), { root, purpose: 'audit index' }).value;
-    for (const entry of index.runs ?? []) {
+    const seen = new Set();
+    if (!Array.isArray(index.runs)) fail('INDEX.json', 'runs', 'INDEX_RUNS_INVALID');
+    for (const entry of Array.isArray(index.runs) ? index.runs : []) {
+      if (typeof entry?.runId !== 'string' || !SAFE_ID.test(entry.runId)) {
+        fail('INDEX.json', 'runs', 'INDEX_RUN_ID_INVALID');
+        continue;
+      }
+      if (seen.has(entry.runId)) fail('INDEX.json', `runs.${entry.runId}`, 'INDEX_RUN_DUPLICATE');
+      seen.add(entry.runId);
       const run = runIds.get(entry.runId);
       if (!run) {
         fail('INDEX.json', `runs.${entry.runId}`, 'INDEX_RUN_MISSING');
@@ -1608,7 +1616,9 @@ export function validateTrajectoryAudit(outputDir, { sourceRoot = null } = {}) {
         fail('INDEX.json', `runs.${entry.runId}`, 'INDEX_MISMATCH');
       }
     }
-    if ((index.runs ?? []).length !== runIds.size) fail('INDEX.json', 'runs', 'INDEX_MISMATCH');
+    if (seen.size !== runIds.size || [...runIds.keys()].some((id) => !seen.has(id))) {
+      fail('INDEX.json', 'runs', 'INDEX_RUN_SET_MISMATCH');
+    }
   } catch {
     fail('INDEX.json', null, 'INDEX_MISSING_OR_INVALID');
   }
