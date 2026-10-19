@@ -156,6 +156,12 @@ cannot fit, the loop stops before provider dispatch; it does not silently omit
 a fresh result. Image pruning/degradation still keeps the allowed current
 representation and registered artifact ref recovery. The generic bound helper's
 legacy default and anchored ARC policy retain their separate contracts.
+The shared selector's source fingerprint changes from
+`2ce3c7ce3f0e0f8e29655f3894eced63b53d2b1f94937128a98c76c11283676d`
+to `967486e5522516a1f8abfefd9887a470dfe768ed9e47a3d289e0f7dbcedbc40a`.
+Capsules retain this honest source change even for default ARC runs; historical
+evidence is not rewritten. Default selection and actual ARC wire requests are
+compared against the pre-general and temporal baselines.
 
 ## Doctor and dependency records
 

@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { effectiveAvoToolContract } from '../src/core/avo-agent-base.mjs';
 import { POLICY_PROFILE_NAMES, policySystemPrompt, normalizePolicyProfile } from '../src/core/policy-profile.mjs';
-import { runtimeStatusMessage, runtimeStatusTemplate, transcriptPolicySource, pruneGeneralImages } from '../src/loop/pi-sdk.mjs';
+import { runtimeStatusMessage, runtimeStatusTemplate, transcriptPolicySource, pruneGeneralImages, boundTranscript } from '../src/loop/pi-sdk.mjs';
 import { withLoopback } from './support/responses-loopback.mjs';
 import { scripted, environment, runAgent } from './support/pi-agent-run.mjs';
 import { testDirectory } from './support/general-browser.mjs';
@@ -20,7 +21,7 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
     return base;
   }
 
-  test(`arc_baseline_contract_bytes_all_profiles_modes (${revision.slice(0, 7)}); unchanged policy digest and honest source changes`, async () => {
+  test(`arc_baseline_contract_bytes_all_profiles_modes (${revision.slice(0, 7)}); general-only policy fingerprint change and default behavior parity`, async () => {
     const base = prepareBaseline();
     const policy = await import(pathToFileURL(path.join(base, 'src/core/policy-profile.mjs')));
     const agent = await import(pathToFileURL(path.join(base, 'src/core/avo-agent-base.mjs')));
@@ -35,7 +36,23 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
         for (const mode of ['disabled', 'files-only', 'isolated-python']) assert.deepEqual(effectiveAvoToolContract(mode, profile, temporal), agent.effectiveAvoToolContract(mode, profile, temporal));
       }
     }
-    assert.equal(transcriptPolicySource(), pi.transcriptPolicySource());
+    // #394 changes the shared selector's source via an explicit default-false
+    // general option. Preserve the honest capsule fingerprint change and prove
+    // default ARC selection parity separately; never mask changed source bytes.
+    const digest = (source) => createHash('sha256').update(source).digest('hex');
+    assert.equal(digest(pi.transcriptPolicySource()), '2ce3c7ce3f0e0f8e29655f3894eced63b53d2b1f94937128a98c76c11283676d');
+    assert.equal(digest(transcriptPolicySource()), '967486e5522516a1f8abfefd9887a470dfe768ed9e47a3d289e0f7dbcedbc40a');
+    assert.notEqual(transcriptPolicySource(), pi.transcriptPolicySource());
+    const task = { role: 'user', content: [{ type: 'text', text: 'synthetic ARC task' }] };
+    const group = (id) => [{ role: 'assistant', content: [{ type: 'toolCall', id, name: 'workspace_read', arguments: { path: `${id}.txt` } }] }, { role: 'toolResult', toolCallId: id, toolName: 'workspace_read', content: [{ type: 'text', text: `${id} result` }] }];
+    const messages = [task, ...group('old'), ...group('fresh'), runtimeStatusMessage(status, { outerTurns: 1, maxOuterTurns: 10, policyProfile: 'minimal-v1' })];
+    const original = structuredClone(messages);
+    for (const maxMessages of [4, 5, 160]) {
+      const options = { maxMessages, maxTokens: 120000 };
+      assert.deepEqual(boundTranscript(messages, options), pi.boundTranscript(messages, options));
+      assert.deepEqual(boundTranscript(messages, { ...options, requireFreshToolTurn: false }), pi.boundTranscript(messages, options));
+    }
+    assert.deepEqual(messages, original);
     assert.notEqual(fs.readFileSync('src/loop/pi-sdk.mjs', 'utf8'), fs.readFileSync(path.join(base, 'src/loop/pi-sdk.mjs'), 'utf8'));
     assert.doesNotMatch(JSON.stringify(RUN_CAPSULE_COMPONENT_FILES), /general\/|requirements\/browser/);
   });
