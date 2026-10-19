@@ -21,7 +21,7 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
     return base;
   }
 
-  test(`arc_baseline_contract_bytes_all_profiles_modes (${revision.slice(0, 7)}); general-only policy fingerprint change and default behavior parity`, async () => {
+  test(`arc_baseline_contract_bytes_all_profiles_modes (${revision.slice(0, 7)}); general-only policy fingerprint change and default behavior parity`, async (t) => {
     const base = prepareBaseline();
     const policy = await import(pathToFileURL(path.join(base, 'src/core/policy-profile.mjs')));
     const agent = await import(pathToFileURL(path.join(base, 'src/core/avo-agent-base.mjs')));
@@ -47,6 +47,9 @@ for (const revision of ['e8257c32b1f4c1d9a3ffdf2f2ebdd6dced3a34d1', 'fc1827fc5ac
     const group = (id) => [{ role: 'assistant', content: [{ type: 'toolCall', id, name: 'workspace_read', arguments: { path: `${id}.txt` } }] }, { role: 'toolResult', toolCallId: id, toolName: 'workspace_read', content: [{ type: 'text', text: `${id} result` }] }];
     const messages = [task, ...group('old'), ...group('fresh'), runtimeStatusMessage(status, { outerTurns: 1, maxOuterTurns: 10, policyProfile: 'minimal-v1' })];
     const original = structuredClone(messages);
+    // Both selectors create the same host notice using their ambient clock.
+    // Freeze that explicit volatile boundary; compare every result field intact.
+    t.mock.method(Date, 'now', () => 1_800_000_000_000);
     for (const maxMessages of [4, 5, 160]) {
       const options = { maxMessages, maxTokens: 120000 };
       assert.deepEqual(boundTranscript(messages, options), pi.boundTranscript(messages, options));
