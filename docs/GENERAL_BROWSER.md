@@ -147,6 +147,16 @@ readback. Image-capable Pi requests contain the actual PNG data URL. Text-only m
 receive `ref-only; image bytes not sent`. Historical images are pruned; context
 pressure drops pixels with ref recovery. Screenshots never become ARC frames.
 
+General requests do not carry an ARC observation anchor. Before hard compaction,
+the original task, latest runtime status and latest completed tool turn are the
+required set: the assistant call and every matching result in a multi-tool turn
+reach the next model request together. They are measured against both message
+and actual context-token bounds before optional notice/history. If that set
+cannot fit, the loop stops before provider dispatch; it does not silently omit
+a fresh result. Image pruning/degradation still keeps the allowed current
+representation and registered artifact ref recovery. The generic bound helper's
+legacy default and anchored ARC policy retain their separate contracts.
+
 ## Doctor and dependency records
 
 `doctor --json` checks installed closure, Python ABI, selected Chrome version,
