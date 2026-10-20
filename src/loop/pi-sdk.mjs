@@ -682,6 +682,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         let bounded = boundTranscript(withStatus, {
           ...transcriptOptions,
           currentAnchor: status.anchor ?? undefined,
+          requireFreshToolTurn: general,
         });
         if (general) bounded = bounded.map((m) => m[HOST_MESSAGE_FIELD] === 'compaction-notice'
           ? { ...m, content: [{ type: 'text', text: 'Earlier context was compacted. Recover registered output/PNG refs with artifact_read; never replay effects.' }] } : m);
@@ -1546,6 +1547,7 @@ export function boundTranscript(messages, {
   estimateContextTokens = null,
   onCompaction = () => {},
   currentAnchor = undefined,
+  requireFreshToolTurn = false,
 } = {}) {
   if (!Array.isArray(messages)) return messages;
   if (!Number.isInteger(maxMessages) || maxMessages <= 0) throw new Error('maxMessages must be a positive integer');
@@ -1644,6 +1646,7 @@ export function boundTranscript(messages, {
     estimateContextTokens: estimate,
     onCompaction,
     anchor,
+    requireFreshToolTurn,
   });
 }
 
@@ -1653,6 +1656,7 @@ function hardBoundTranscript(messages, {
   estimateContextTokens,
   onCompaction,
   anchor,
+  requireFreshToolTurn,
 }) {
   // Retain whole tool turns: Pi synthesizes error results for any retained
   // call whose real result was trimmed. Keep reasoning blocks with their turn.
@@ -1689,12 +1693,16 @@ function hardBoundTranscript(messages, {
       ? 'transcript bounds cannot preserve the original task and the runtime status with the current observation anchor'
       : 'transcript bounds cannot preserve the original task and current runtime status');
   }
-  // A completed result must reach the next model request. The verified host
-  // anchor can recover older current text, but it cannot substitute a new read.
-  if (anchor && freshIndexes.length) {
+  // A completed result must reach the next model request. General browser
+  // explicitly requires first delivery without manufacturing an ARC anchor.
+  // The verified host anchor can recover older current text, but cannot
+  // substitute a new read. Notice/history use only the remaining capacity.
+  if ((anchor || requireFreshToolTurn) && freshIndexes.length) {
     const withFresh = includeGroups([...selected, ...freshIndexes]);
     if (!fits(withFresh)) {
-      throw new Error('transcript bounds cannot preserve the latest completed tool turn with the task and current observation anchor');
+      throw new Error(anchor
+        ? 'transcript bounds cannot preserve the latest completed tool turn with the task and current observation anchor'
+        : 'transcript bounds cannot preserve the latest completed tool turn with the task and current runtime status');
     }
     for (const index of withFresh) selected.add(index);
   }
