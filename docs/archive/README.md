@@ -5,6 +5,7 @@ statuses, commands, model choices and workflow requirements are not current inst
 Use [issues.md](../../issues.md) for active work and [VALIDATION.md](../../VALIDATION.md)
 for present checks.
 
+- [Issue ledger before the 2026-10-21 convergence](issues-through-2026-10-21.md).
 - [Issue/PR audit through 2026-09-08](issues-through-2026-09-08.md).
 - [Earlier validation results](validation-results-2026-08.md).
 - [Earlier reproduction status](reproduction-status-2026-08.md).
