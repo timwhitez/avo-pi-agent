@@ -65,6 +65,13 @@ Runtime knobs are defined by [config](../src/config.mjs),
 `AVO_TRANSCRIPT_MAX_TOKENS`, `AVO_WORKSPACE_MODE`, `AVO_GAME_CONCURRENCY` and
 `AVO_GAME_ATTEMPTS`. Keep their values fixed within a run.
 
+A recognized provider reset hint (`reset_seconds`, `reset in Ns`) is a lower
+bound for the next request. Within an attempt the loop waits for it while the
+cumulative wait fits `AVO_TRANSIENT_TURN_RECOVERIES` x 60 s; otherwise the
+attempt ends with its error, and the next attempt starts no earlier than the
+hint and after waiting at most 10 minutes. A longer cooldown stops the game
+without a checkpoint, so a later resume replays it.
+
 The default transcript-token budget is the smaller of 120,000 and the declared
 context minus output and safety reserve. An explicit transcript budget may use
 the remaining safe capacity; the message-count limit is separate. Inspect actual

@@ -5,14 +5,22 @@
 // The local wait cap only decides whether this game waits or stops; a game that
 // stops keeps its error and is not checkpointed, so a later resume replays it.
 
-// The largest existing backoff between attempts, kept as the longest wait.
-export const GAME_RETRY_MAX_WAIT_MS = 120_000;
+// The largest existing backoff between attempts (unchanged).
+export const ATTEMPT_BACKOFF_MAX_MS = 120_000;
+
+// The longest this game waits for a provider cooldown before its next attempt.
+// It is at least the default in-attempt cooldown budget (5 recoveries x 60 s),
+// so a hint the loop could have waited for is not dropped only because it was
+// handed over. Minute-scale rate-limit windows and model cooldowns fit; a quota
+// reset measured in hours or days stops the game for a later resume instead of
+// holding its slot.
+export const PROVIDER_COOLDOWN_MAX_WAIT_MS = 600_000;
 
 export function attemptBackoffMs(attempt) {
-  return Math.min(30_000 * attempt * attempt, GAME_RETRY_MAX_WAIT_MS);
+  return Math.min(30_000 * attempt * attempt, ATTEMPT_BACKOFF_MAX_MS);
 }
 
-export function nextAttemptDelay({ attempt, nowMs, providerRetryNotBeforeMs = null, maxWaitMs = GAME_RETRY_MAX_WAIT_MS }) {
+export function nextAttemptDelay({ attempt, nowMs, providerRetryNotBeforeMs = null, maxWaitMs = PROVIDER_COOLDOWN_MAX_WAIT_MS }) {
   if (typeof providerRetryNotBeforeMs === 'number' && !Number.isSafeInteger(providerRetryNotBeforeMs)) {
     // A hint too large to represent is still a hint: never retry before it.
     return { retry: false, cooldownMs: null };
@@ -40,9 +48,11 @@ export async function retryAfterFailedAttempt({
   sleep,
   now = Date.now,
   log = console.log,
-  redact = String,
-  maxWaitMs = GAME_RETRY_MAX_WAIT_MS,
+  redact,
+  maxWaitMs = PROVIDER_COOLDOWN_MAX_WAIT_MS,
 }) {
+  // The failure text reaches the run log, so the caller must say how to redact it.
+  if (typeof redact !== 'function') throw new TypeError('retryAfterFailedAttempt requires redact');
   if (attempt >= maxAttempts || result.actions >= actionBudgetTotal || result.outerTurns >= maxOuterTurns) return false;
   const next = nextAttemptDelay({
     attempt,

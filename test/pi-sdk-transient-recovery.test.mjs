@@ -7,7 +7,13 @@ import { pathToFileURL } from 'node:url';
 import { providerCapabilities } from './support/provider.mjs';
 import { OfflineDemoEnvironment } from '../src/arc/offline-demo.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
-import { attemptBackoffMs, GAME_RETRY_MAX_WAIT_MS, nextAttemptDelay, retryAfterFailedAttempt } from '../src/benchmark/attempt-retry.mjs';
+import {
+  ATTEMPT_BACKOFF_MAX_MS,
+  attemptBackoffMs,
+  nextAttemptDelay,
+  PROVIDER_COOLDOWN_MAX_WAIT_MS,
+  retryAfterFailedAttempt,
+} from '../src/benchmark/attempt-retry.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
 
 // Builds a scoped fake Pi SDK whose Agent fails `continue()` with the given
@@ -306,6 +312,14 @@ test('providerResetHintMs returns the full recognized hint without truncation', 
     Number.POSITIVE_INFINITY,
     'an unrepresentable hint is still a hint',
   );
+  // A fractional or exponent hint is rounded up, never shortened or dropped.
+  assert.equal(mod.providerResetHintMs('"reset_seconds":59.9'), 59_900);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":0.5'), 500);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":0.0001'), 1);
+  assert.equal(mod.providerResetHintMs('model is cooling down, reset in 1.5s'), 1_500);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":1e3'), 1_000_000);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":1e400'), Number.POSITIVE_INFINITY);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":0.0'), 0);
   assert.equal(mod.PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS, 60_000);
 });
 
@@ -370,6 +384,18 @@ test('the in-attempt wait budget is cumulative and also shrinks with the recover
   }
 });
 
+test('a hint equal to the remaining in-attempt budget is still waited in full', async () => {
+  const clock = fakeClock();
+  const { result, continues } = await runLoop([cooldownError(100), null], 2, {
+    promptError: cooldownError(200),
+    clock,
+  });
+  assert.deepEqual(clock.sleeps, [200_000, 100_000], 'the second hint uses exactly the remaining 100 s');
+  assert.equal(continues, 2);
+  assert.equal(result.transientRecoveries, 2);
+  assert.equal(result.error, null);
+});
+
 test('a reset hint within the local wait is honored in full before the continuation', async () => {
   const clock = fakeClock();
   const { result, continues, continueAt } = await runLoop([null], 1, {
@@ -422,15 +448,45 @@ test('the cooldown wait receives the run signal', async () => {
   assert.equal(clock.signals[0], controller.signal);
 });
 
-test('a cooldown wait beyond the timer limit neither ends early nor ignores abort', async () => {
+test('a cooldown wait beyond the timer limit runs to its exact end and cleans up', async (t) => {
   const { cooldownSleep } = await import('../src/loop/pi-sdk.mjs');
-  const controller = new AbortController();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const fakeSignal = () => {
+    const listeners = new Set();
+    return {
+      listeners,
+      aborted: false,
+      addEventListener: (type, listener) => listeners.add(listener),
+      removeEventListener: (type, listener) => listeners.delete(listener),
+    };
+  };
+
+  const signal = fakeSignal();
   let settled = null;
-  const waiting = cooldownSleep(2 ** 31 + 5_000, controller.signal).then((value) => { settled = value; return value; });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(settled, null, 'a delay above 2^31 - 1 ms must not fire at once');
-  controller.abort();
-  assert.equal(await waiting, false);
+  const waiting = cooldownSleep(2 ** 31 + 5_000, signal).then((value) => { settled = value; });
+  t.mock.timers.tick(2 ** 31 - 1);
+  await flush();
+  assert.equal(settled, null, 'a delay above 2^31 - 1 ms does not end after the first timer');
+  t.mock.timers.tick(5_000);
+  await flush();
+  assert.equal(settled, null, 'the second timer covers the remaining 5001 ms');
+  t.mock.timers.tick(1);
+  await waiting;
+  assert.equal(settled, true);
+  assert.equal(signal.listeners.size, 0, 'a completed wait removes its abort listener');
+
+  const aborting = fakeSignal();
+  let aborted = null;
+  const interrupted = cooldownSleep(2 ** 31 + 5_000, aborting).then((value) => { aborted = value; });
+  t.mock.timers.tick(2 ** 31 - 1);
+  await flush();
+  for (const listener of aborting.listeners) listener();
+  await interrupted;
+  assert.equal(aborted, false, 'an abort during a later timer still ends the wait');
+  t.mock.timers.tick(5_001);
+  await flush();
+  assert.equal(aborted, false);
 });
 
 test('the system cooldown sleep ends as soon as its signal aborts', async () => {
@@ -452,13 +508,22 @@ test('the outer retry never starts an attempt before the loop not-before', () =>
   assert.equal(nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs + 100_000 }).delayMs, 100_000);
   assert.equal(nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs - 1 }).delayMs, 30_000);
   assert.deepEqual(
-    nextAttemptDelay({ attempt: 2, nowMs, providerRetryNotBeforeMs: nowMs + GAME_RETRY_MAX_WAIT_MS }),
-    { retry: true, cooldownMs: GAME_RETRY_MAX_WAIT_MS, delayMs: GAME_RETRY_MAX_WAIT_MS },
+    nextAttemptDelay({ attempt: 2, nowMs, providerRetryNotBeforeMs: nowMs + PROVIDER_COOLDOWN_MAX_WAIT_MS }),
+    { retry: true, cooldownMs: PROVIDER_COOLDOWN_MAX_WAIT_MS, delayMs: PROVIDER_COOLDOWN_MAX_WAIT_MS },
   );
   assert.deepEqual(
-    nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs + GAME_RETRY_MAX_WAIT_MS + 1 }),
-    { retry: false, cooldownMs: GAME_RETRY_MAX_WAIT_MS + 1 },
+    nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs + PROVIDER_COOLDOWN_MAX_WAIT_MS + 1 }),
+    { retry: false, cooldownMs: PROVIDER_COOLDOWN_MAX_WAIT_MS + 1 },
   );
+});
+
+test('the outer cooldown cap covers the default in-attempt budget and leaves the backoff unchanged', async () => {
+  const { PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS } = await import('../src/loop/pi-sdk.mjs');
+  assert.equal(PROVIDER_COOLDOWN_MAX_WAIT_MS, 600_000);
+  // Default AVO_TRANSIENT_TURN_RECOVERIES is 5: a hint the loop could wait for is never dropped when handed over.
+  assert.ok(PROVIDER_COOLDOWN_MAX_WAIT_MS >= 5 * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS);
+  assert.equal(ATTEMPT_BACKOFF_MAX_MS, 120_000);
+  assert.deepEqual([1, 2, 3].map(attemptBackoffMs), [30_000, 120_000, 120_000]);
 });
 
 test('the outer retry settles an errored attempt from the agent result', async () => {
@@ -467,7 +532,7 @@ test('the outer retry settles an errored attempt from the agent result', async (
   const settle = (agentResult, overrides = {}) => retryAfterFailedAttempt({
     attempt: 1,
     maxAttempts: 3,
-    result: { error: 'model_cooldown', actions: 2, outerTurns: 3 },
+    result: { error: 'model_cooldown key=sk-secret', actions: 2, outerTurns: 3 },
     agentResult,
     actionBudgetTotal: 10,
     maxOuterTurns: 40,
@@ -475,29 +540,36 @@ test('the outer retry settles an errored attempt from the agent result', async (
     sleep: async (ms) => { sleeps.push(ms); },
     now: () => 1_000_000,
     log: (line) => logs.push(line),
+    redact: (text) => text.replace('sk-secret', '[redacted]'),
     ...overrides,
   });
   assert.equal(await settle({ providerRetryNotBeforeMs: null }), true);
   assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 100_000 }), true);
   assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 100_000 }, { attempt: 2 }), true);
-  assert.deepEqual(sleeps, [30_000, 100_000, 120_000], 'backoff never shortens the remaining cooldown');
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 600_000 }), true);
+  assert.deepEqual(sleeps, [30_000, 100_000, 120_000, 600_000], 'backoff never shortens the remaining cooldown');
   assert.match(logs[1], /retrying in 100s/);
 
-  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 121_000 }), false);
-  assert.match(logs.at(-1), /provider cooldown 121s exceeds the 120s retry wait, stopping this game/);
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 601_000 }), false);
+  assert.match(logs.at(-1), /provider cooldown 601s exceeds the 600s retry wait, stopping this game/);
+  assert.equal(logs.length, 5);
+  assert.ok(logs.every((line) => line.includes('[redacted]') && !line.includes('sk-secret')), 'every failure line is redacted');
   for (const overrides of [
     { attempt: 3 },
     { result: { error: 'x', actions: 10, outerTurns: 3 } },
     { result: { error: 'x', actions: 2, outerTurns: 40 } },
   ]) assert.equal(await settle({ providerRetryNotBeforeMs: null }, overrides), false);
-  assert.equal(sleeps.length, 3, 'no wait when the game stops');
+  assert.equal(sleeps.length, 4, 'no wait when the game stops');
+  await assert.rejects(settle({ providerRetryNotBeforeMs: null }, { redact: undefined }), TypeError, 'redaction is required');
+  assert.equal(sleeps.length, 4);
 });
 
 test('the loop not-before reaches the outer retry decision through the real agent wrapper', async () => {
-  // One recovery leaves a 60 s in-attempt budget, so both hints go to the outer owner.
+  // One recovery leaves a 60 s in-attempt budget, so every hint goes to the outer
+  // owner: it waits for the hint up to the 600 s cap and stops the game beyond it.
   process.env.AVO_TRANSIENT_TURN_RECOVERIES = '1';
   try {
-  for (const [seconds, expected] of [[100, { retry: true, delayMs: 100_000 }], [180, { retry: false }]]) {
+  for (const [seconds, expected] of [[100, { retry: true, delayMs: 100_000 }], [180, { retry: true, delayMs: 180_000 }], [601, { retry: false }]]) {
     const clock = fakeClock();
     const { mod, cleanup } = await loadLoopWith({
       steps: [null], continues: 0, stopAfter: 5, promptError: cooldownError(seconds), clock, continueAt: [],
@@ -529,6 +601,7 @@ test('the loop not-before reaches the outer retry decision through the real agen
         sleep: async (ms) => { sleeps.push(ms); },
         now: () => clock.now(),
         log: () => {},
+        redact: (text) => text,
       });
       assert.equal(retried, expected.retry);
       if (expected.retry) {

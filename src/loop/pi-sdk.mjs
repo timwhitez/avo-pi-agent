@@ -1364,12 +1364,13 @@ export const PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS = 60_000;
  */
 export function providerResetHintMs(error) {
   const text = String(error || '');
-  const match = /reset_seconds[^0-9]{0,8}(\d+)/i.exec(text)
-    ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+)\s*s\b/i.exec(text);
+  const match = /reset_seconds[^0-9]{0,8}(\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(text)
+    ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+(?:\.\d+)?)\s*s\b/i.exec(text);
   if (!match) return 0;
   const parsed = Number(match[1]);
   if (parsed === 0) return 0;
-  const ms = parsed * 1000;
+  // Round up: a fractional second must never shorten the hint.
+  const ms = Math.ceil(parsed * 1000);
   return Number.isSafeInteger(ms) ? ms : Number.POSITIVE_INFINITY;
 }
 
