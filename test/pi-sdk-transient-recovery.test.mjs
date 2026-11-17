@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { providerCapabilities } from './support/provider.mjs';
 import { OfflineDemoEnvironment } from '../src/arc/offline-demo.mjs';
 import { AvoArcAgent } from '../src/core/avo-agent.mjs';
-import { attemptBackoffMs, GAME_RETRY_MAX_WAIT_MS, nextAttemptDelay } from '../src/benchmark/attempt-retry.mjs';
+import { attemptBackoffMs, GAME_RETRY_MAX_WAIT_MS, nextAttemptDelay, retryAfterFailedAttempt } from '../src/benchmark/attempt-retry.mjs';
 import { temporaryDirectory } from './support/temp-directories.mjs';
 
 // Builds a scoped fake Pi SDK whose Agent fails `continue()` with the given
@@ -138,7 +138,7 @@ const baseConfig = {
   maxOuterTurns: 40,
 };
 
-async function runLoop(steps, stopAfterContinues, { maxOuterTurns, promptError, shouldStop, clock } = {}) {
+async function runLoop(steps, stopAfterContinues, { maxOuterTurns, promptError, shouldStop, clock, signal } = {}) {
   const { mod, cleanup } = await loadLoopWith({
     steps, continues: 0, stopAfter: stopAfterContinues, promptError, clock, continueAt: [],
   });
@@ -153,6 +153,7 @@ async function runLoop(steps, stopAfterContinues, { maxOuterTurns, promptError, 
       tools: [],
       initialPrompt: 'go',
       shouldStop: shouldStop ?? (() => (globalThis.__avoPlan.continues >= globalThis.__avoPlan.stopAfter) || ++guard > 200),
+      ...(signal ? { signal } : {}),
       runtimeStatus: () => ({
         state: 'ACTIVE',
         environmentActions: globalThis.__avoPlan.continues,
@@ -174,9 +175,11 @@ function fakeClock({ interruptAfterMs = null } = {}) {
     start: 1_000_000,
     nowMs: 1_000_000,
     sleeps: [],
+    signals: [],
     now: () => clock.nowMs,
-    async sleep(ms) {
+    async sleep(ms, signal) {
       clock.sleeps.push(ms);
+      clock.signals.push(signal);
       if (interruptAfterMs !== null) {
         clock.nowMs += interruptAfterMs;
         return false;
@@ -297,6 +300,12 @@ test('providerResetHintMs returns the full recognized hint without truncation', 
   assert.equal(mod.providerResetHintMs('model is cooling down, reset in 90s'), 90_000);
   assert.equal(mod.providerResetHintMs('model is cooling down'), 0, 'no reset hint means no extra wait');
   assert.equal(mod.providerResetHintMs(null), 0);
+  assert.equal(mod.providerResetHintMs('"reset_seconds":0'), 0);
+  assert.equal(
+    mod.providerResetHintMs('"reset_seconds":99999999999999999999'),
+    Number.POSITIVE_INFINITY,
+    'an unrepresentable hint is still a hint',
+  );
   assert.equal(mod.PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS, 60_000);
 });
 
@@ -390,6 +399,40 @@ test('an interrupted cooldown never continues and counts no recovery', async () 
   assert.equal(result.providerRetryNotBeforeMs, clock.start + 30_000);
 });
 
+test('an unrepresentable reset hint is handed to the outer owner and never retried early', async () => {
+  const clock = fakeClock();
+  const { result, continues } = await runLoop([null], 5, {
+    maxOuterTurns: 5,
+    promptError: 'Error Code 429: model_cooldown, "reset_seconds":99999999999999999999',
+    shouldStop: () => false,
+    clock,
+  });
+  assert.equal(continues, 0);
+  assert.deepEqual(clock.sleeps, []);
+  assert.equal(result.providerRetryNotBeforeMs, Number.MAX_SAFE_INTEGER);
+  assert.equal(nextAttemptDelay({ attempt: 1, nowMs: clock.now(), providerRetryNotBeforeMs: result.providerRetryNotBeforeMs }).retry, false);
+  assert.deepEqual(nextAttemptDelay({ attempt: 1, nowMs: clock.now(), providerRetryNotBeforeMs: 2 ** 60 }), { retry: false, cooldownMs: null });
+});
+
+test('the cooldown wait receives the run signal', async () => {
+  const clock = fakeClock();
+  const controller = new AbortController();
+  await runLoop([null], 1, { promptError: cooldownError(45), clock, signal: controller.signal });
+  assert.deepEqual(clock.sleeps, [45_000]);
+  assert.equal(clock.signals[0], controller.signal);
+});
+
+test('a cooldown wait beyond the timer limit neither ends early nor ignores abort', async () => {
+  const { cooldownSleep } = await import('../src/loop/pi-sdk.mjs');
+  const controller = new AbortController();
+  let settled = null;
+  const waiting = cooldownSleep(2 ** 31 + 5_000, controller.signal).then((value) => { settled = value; return value; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settled, null, 'a delay above 2^31 - 1 ms must not fire at once');
+  controller.abort();
+  assert.equal(await waiting, false);
+});
+
 test('the system cooldown sleep ends as soon as its signal aborts', async () => {
   const { cooldownSleep } = await import('../src/loop/pi-sdk.mjs');
   assert.equal(await cooldownSleep(5), true);
@@ -418,6 +461,38 @@ test('the outer retry never starts an attempt before the loop not-before', () =>
   );
 });
 
+test('the outer retry settles an errored attempt from the agent result', async () => {
+  const sleeps = [];
+  const logs = [];
+  const settle = (agentResult, overrides = {}) => retryAfterFailedAttempt({
+    attempt: 1,
+    maxAttempts: 3,
+    result: { error: 'model_cooldown', actions: 2, outerTurns: 3 },
+    agentResult,
+    actionBudgetTotal: 10,
+    maxOuterTurns: 40,
+    gameId: 'g01',
+    sleep: async (ms) => { sleeps.push(ms); },
+    now: () => 1_000_000,
+    log: (line) => logs.push(line),
+    ...overrides,
+  });
+  assert.equal(await settle({ providerRetryNotBeforeMs: null }), true);
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 100_000 }), true);
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 100_000 }, { attempt: 2 }), true);
+  assert.deepEqual(sleeps, [30_000, 100_000, 120_000], 'backoff never shortens the remaining cooldown');
+  assert.match(logs[1], /retrying in 100s/);
+
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 121_000 }), false);
+  assert.match(logs.at(-1), /provider cooldown 121s exceeds the 120s retry wait, stopping this game/);
+  for (const overrides of [
+    { attempt: 3 },
+    { result: { error: 'x', actions: 10, outerTurns: 3 } },
+    { result: { error: 'x', actions: 2, outerTurns: 40 } },
+  ]) assert.equal(await settle({ providerRetryNotBeforeMs: null }, overrides), false);
+  assert.equal(sleeps.length, 3, 'no wait when the game stops');
+});
+
 test('the loop not-before reaches the outer retry decision through the real agent wrapper', async () => {
   // One recovery leaves a 60 s in-attempt budget, so both hints go to the outer owner.
   process.env.AVO_TRANSIENT_TURN_RECOVERIES = '1';
@@ -442,15 +517,25 @@ test('the loop not-before reaches the outer retry decision through the real agen
       assert.match(String(agentResult.error), /model_cooldown/);
       assert.equal(globalThis.__avoPlan.continues, 0);
       assert.equal(agentResult.providerRetryNotBeforeMs, clock.start + seconds * 1000);
-      const next = nextAttemptDelay({
+      const sleeps = [];
+      const retried = await retryAfterFailedAttempt({
         attempt: 1,
-        nowMs: clock.now(),
-        providerRetryNotBeforeMs: agentResult.providerRetryNotBeforeMs,
+        maxAttempts: 3,
+        result: agentResult,
+        agentResult,
+        actionBudgetTotal: 100,
+        maxOuterTurns: 5,
+        gameId: environment.gameId,
+        sleep: async (ms) => { sleeps.push(ms); },
+        now: () => clock.now(),
+        log: () => {},
       });
-      assert.equal(next.retry, expected.retry);
+      assert.equal(retried, expected.retry);
       if (expected.retry) {
-        assert.equal(next.delayMs, expected.delayMs, 'the 30 s backoff cannot bypass the hint');
-        assert.ok(next.delayMs > attemptBackoffMs(1));
+        assert.deepEqual(sleeps, [expected.delayMs], 'the 30 s backoff cannot bypass the hint');
+        assert.ok(expected.delayMs > attemptBackoffMs(1));
+      } else {
+        assert.deepEqual(sleeps, [], 'no new attempt before an over-long cooldown');
       }
     } finally {
       cleanup();

@@ -32,7 +32,7 @@ import {
 } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
 import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
-import { attemptBackoffMs, GAME_RETRY_MAX_WAIT_MS, nextAttemptDelay } from './benchmark/attempt-retry.mjs';
+import { attemptBackoffMs, retryAfterFailedAttempt } from './benchmark/attempt-retry.mjs';
 import {
   evaluateScorecardCoverage,
   hashExecutionId,
@@ -429,22 +429,18 @@ async function runPublic(args) {
           if (!result.error || isWinState(result.state)) break;
           // A transient provider fault must not sacrifice the whole game:
           // durable memory persists across attempts, so a retry re-grounds.
-          if (attempt < maxAttempts
-              && result.actions < actionBudget.total
-              && result.outerTurns < gameConfig.maxOuterTurns) {
-            const next = nextAttemptDelay({
-              attempt,
-              nowMs: Date.now(),
-              providerRetryNotBeforeMs: agentResult.providerRetryNotBeforeMs,
-            });
-            const failure = redactText(String(result.error)).slice(0, 200);
-            if (!next.retry) {
-              console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); provider cooldown ${Math.ceil(next.cooldownMs / 1000)}s exceeds the ${GAME_RETRY_MAX_WAIT_MS / 1000}s retry wait, stopping this game`);
-              break;
-            }
-            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); retrying in ${Math.round(next.delayMs / 1000)}s`);
-            await sleep(next.delayMs);
-          }
+          // A provider cooldown hint is a lower bound for the next attempt.
+          if (!(await retryAfterFailedAttempt({
+            attempt,
+            maxAttempts,
+            result,
+            agentResult,
+            actionBudgetTotal: actionBudget.total,
+            maxOuterTurns: gameConfig.maxOuterTurns,
+            gameId,
+            sleep,
+            redact: redactText,
+          }))) break;
         }
         results[index] = result;
         // Never checkpoint an errored attempt: a resume must replay it, not

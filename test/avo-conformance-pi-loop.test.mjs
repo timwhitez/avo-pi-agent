@@ -36,6 +36,10 @@ test('Pi wrapper continues dynamically and records outer-turn exhaustion', () =>
   assert.match(cliSource, /\[avo-workspace-failure\]/);
   assert.match(cliSource, /privateProviderIncidentEvidence/);
   assert.match(cliSource, /\[avo-provider-incident\]/);
+  // #398: an errored attempt is settled by the shared decision with the agent's
+  // provider not-before; the CLI keeps no backoff of its own for that branch.
+  assert.match(cliSource, /if \(!\(await retryAfterFailedAttempt\(\{[^}]*\bagentResult,[^}]*\bsleep,[^}]*\bredact: redactText,[^}]*\}\)\)\) break;/s);
+  assert.doesNotMatch(cliSource, /30_000 \* attempt/);
 });
 
 test('runtime model is configured from the explicit effective capability manifest', () => {

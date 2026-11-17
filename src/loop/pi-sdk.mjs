@@ -827,7 +827,8 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         const sessionError = agent.state.errorMessage;
         if (sessionError) {
           const resetHintMs = providerResetHintMs(sessionError);
-          providerRetryNotBeforeMs = resetHintMs > 0 ? clock.now() + resetHintMs : null;
+          // A hint too large to represent stays a hint: never sooner than the safe maximum.
+          providerRetryNotBeforeMs = resetHintMs > 0 ? Math.min(clock.now() + resetHintMs, Number.MAX_SAFE_INTEGER) : null;
           const recoverable = !shouldStop()
             && !innerTurnNoActionLimitReached
             && outerTurns < config.maxOuterTurns
@@ -1357,15 +1358,23 @@ function wireVisibility(prepared, payload) {
 // instead of being shortened.
 export const PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS = 60_000;
 
-/** The full recognized provider reset hint in ms, or 0 when none is recognized. */
+/**
+ * The full recognized provider reset hint in ms, 0 when none is recognized, or
+ * Infinity when a recognized hint is too large to represent.
+ */
 export function providerResetHintMs(error) {
   const text = String(error || '');
   const match = /reset_seconds[^0-9]{0,8}(\d+)/i.exec(text)
     ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+)\s*s\b/i.exec(text);
-  const parsed = Number(match?.[1]);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return 0;
-  return parsed * 1000;
+  if (!match) return 0;
+  const parsed = Number(match[1]);
+  if (parsed === 0) return 0;
+  const ms = parsed * 1000;
+  return Number.isSafeInteger(ms) ? ms : Number.POSITIVE_INFINITY;
 }
+
+// setTimeout fires immediately for delays above 2^31 - 1 ms, so long waits are chunked.
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** Resolves true after ms, or false as soon as signal aborts. */
 export function cooldownSleep(ms, signal) {
@@ -1374,15 +1383,26 @@ export function cooldownSleep(ms, signal) {
       resolve(false);
       return;
     }
+    let remaining = ms;
+    let timer;
     const onAbort = () => {
       clearTimeout(timer);
       resolve(false);
     };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve(true);
-    }, ms);
+    const arm = () => {
+      const step = Math.min(remaining, MAX_TIMER_MS);
+      timer = setTimeout(() => {
+        remaining -= step;
+        if (remaining > 0) {
+          arm();
+          return;
+        }
+        signal?.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, step);
+    };
     signal?.addEventListener('abort', onAbort, { once: true });
+    arm();
   });
 }
 
