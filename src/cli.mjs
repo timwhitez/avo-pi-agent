@@ -21,7 +21,7 @@ import {
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
-import { createPiSdkLoop } from './loop/pi-sdk.mjs';
+import { createPiSdkLoop, inAttemptCooldownBudgetMs } from './loop/pi-sdk.mjs';
 import { bindCliReceipt, buildAuditGap, receiptLogLine } from './trajectory/audit-events.mjs';
 import {
   privateProviderIncidentEvidence,
@@ -32,7 +32,7 @@ import {
 } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
 import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
-import { attemptBackoffMs, retryAfterFailedAttempt } from './benchmark/attempt-retry.mjs';
+import { attemptBackoffMs, outerCooldownMaxWaitMs, retryAfterFailedAttempt } from './benchmark/attempt-retry.mjs';
 import {
   evaluateScorecardCoverage,
   hashExecutionId,
@@ -440,6 +440,7 @@ async function runPublic(args) {
             gameId,
             sleep,
             redact: redactText,
+            maxWaitMs: outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()),
           }))) break;
         }
         results[index] = result;

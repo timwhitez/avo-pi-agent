@@ -803,7 +803,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       // turn in place keeps every prior action; a whole-game retry would
       // replay them all. Only an explicit transient allowlist recovers, and
       // only up to a bounded number of times per game.
-      const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
+      const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', DEFAULT_TRANSIENT_TURN_RECOVERIES);
       // A prose-only assistant turn is a protocol deviation, not a terminal
       // state: nudge with the runtime status and continue, bounded by
       // consecutive deviations. A tool-calling turn re-arms the allowance, so
@@ -1357,6 +1357,12 @@ function wireVisibility(prepared, payload) {
 // truncation. A hint beyond the remaining allowance ends the continuation
 // instead of being shortened.
 export const PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS = 60_000;
+export const DEFAULT_TRANSIENT_TURN_RECOVERIES = 5;
+
+/** The cumulative in-attempt cooldown wait for the configured recovery limit. */
+export function inAttemptCooldownBudgetMs() {
+  return positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', DEFAULT_TRANSIENT_TURN_RECOVERIES) * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS;
+}
 
 /**
  * The full recognized provider reset hint in ms, 0 when none is recognized, or

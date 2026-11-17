@@ -9,12 +9,18 @@
 export const ATTEMPT_BACKOFF_MAX_MS = 120_000;
 
 // The longest this game waits for a provider cooldown before its next attempt.
-// It is at least the default in-attempt cooldown budget (5 recoveries x 60 s),
-// so a hint the loop could have waited for is not dropped only because it was
-// handed over. Minute-scale rate-limit windows and model cooldowns fit; a quota
-// reset measured in hours or days stops the game for a later resume instead of
+// Minute-scale rate-limit windows and model cooldowns fit; a quota reset
+// measured in hours or days stops the game for a later resume instead of
 // holding its slot.
 export const PROVIDER_COOLDOWN_MAX_WAIT_MS = 600_000;
+
+/**
+ * The outer cooldown wait is never below the in-attempt budget, so a hint the
+ * loop could have waited for is not dropped only because it was handed over.
+ */
+export function outerCooldownMaxWaitMs(inAttemptBudgetMs) {
+  return Math.max(PROVIDER_COOLDOWN_MAX_WAIT_MS, inAttemptBudgetMs);
+}
 
 export function attemptBackoffMs(attempt) {
   return Math.min(30_000 * attempt * attempt, ATTEMPT_BACKOFF_MAX_MS);

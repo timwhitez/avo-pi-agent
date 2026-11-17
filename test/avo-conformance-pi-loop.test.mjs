@@ -50,6 +50,7 @@ test('Pi wrapper continues dynamically and records outer-turn exhaustion', () =>
       'gameId',
       'maxAttempts',
       'maxOuterTurns: gameConfig.maxOuterTurns',
+      'maxWaitMs: outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs())',
       'redact: redactText',
       'result',
       'sleep',

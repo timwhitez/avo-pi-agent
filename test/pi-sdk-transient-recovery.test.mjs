@@ -11,6 +11,7 @@ import {
   ATTEMPT_BACKOFF_MAX_MS,
   attemptBackoffMs,
   nextAttemptDelay,
+  outerCooldownMaxWaitMs,
   PROVIDER_COOLDOWN_MAX_WAIT_MS,
   retryAfterFailedAttempt,
 } from '../src/benchmark/attempt-retry.mjs';
@@ -377,6 +378,8 @@ test('the in-attempt wait budget is cumulative and also shrinks with the recover
       clock: small,
     });
     assert.deepEqual(small.sleeps, [], 'one recovery allows at most 60 s of waiting');
+    const { inAttemptCooldownBudgetMs } = await import('../src/loop/pi-sdk.mjs');
+    assert.equal(inAttemptCooldownBudgetMs(), 60_000, 'the outer owner reads the same budget');
     assert.equal(limited.continues, 0);
     assert.equal(limited.result.providerRetryNotBeforeMs, small.start + 61_000);
   } finally {
@@ -454,12 +457,14 @@ test('a cooldown wait beyond the timer limit runs to its exact end and cleans up
   const flush = () => new Promise((resolve) => setImmediate(resolve));
   const fakeSignal = () => {
     const listeners = new Set();
-    return {
+    const fake = {
       listeners,
+      removals: 0,
       aborted: false,
       addEventListener: (type, listener) => listeners.add(listener),
-      removeEventListener: (type, listener) => listeners.delete(listener),
+      removeEventListener: (type, listener) => { fake.removals += 1; listeners.delete(listener); },
     };
+    return fake;
   };
 
   const signal = fakeSignal();
@@ -487,6 +492,7 @@ test('a cooldown wait beyond the timer limit runs to its exact end and cleans up
   t.mock.timers.tick(5_001);
   await flush();
   assert.equal(aborted, false);
+  assert.equal(aborting.removals, 0, 'the timer pending at abort is cleared and never fires');
 });
 
 test('the system cooldown sleep ends as soon as its signal aborts', async () => {
@@ -517,11 +523,17 @@ test('the outer retry never starts an attempt before the loop not-before', () =>
   );
 });
 
-test('the outer cooldown cap covers the default in-attempt budget and leaves the backoff unchanged', async () => {
-  const { PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS } = await import('../src/loop/pi-sdk.mjs');
+test('the outer cooldown cap is never below the in-attempt budget and leaves the backoff unchanged', async () => {
+  const { DEFAULT_TRANSIENT_TURN_RECOVERIES, inAttemptCooldownBudgetMs, PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS } = await import('../src/loop/pi-sdk.mjs');
   assert.equal(PROVIDER_COOLDOWN_MAX_WAIT_MS, 600_000);
-  // Default AVO_TRANSIENT_TURN_RECOVERIES is 5: a hint the loop could wait for is never dropped when handed over.
-  assert.ok(PROVIDER_COOLDOWN_MAX_WAIT_MS >= 5 * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS);
+  assert.equal(inAttemptCooldownBudgetMs(), DEFAULT_TRANSIENT_TURN_RECOVERIES * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS);
+  assert.equal(outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()), PROVIDER_COOLDOWN_MAX_WAIT_MS, 'the default budget fits the 10-minute cap');
+  process.env.AVO_TRANSIENT_TURN_RECOVERIES = '20';
+  try {
+    assert.equal(outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()), 1_200_000, 'a larger recovery limit raises the outer wait with it');
+  } finally {
+    delete process.env.AVO_TRANSIENT_TURN_RECOVERIES;
+  }
   assert.equal(ATTEMPT_BACKOFF_MAX_MS, 120_000);
   assert.deepEqual([1, 2, 3].map(attemptBackoffMs), [30_000, 120_000, 120_000]);
 });
@@ -560,6 +572,9 @@ test('the outer retry settles an errored attempt from the agent result', async (
     { result: { error: 'x', actions: 2, outerTurns: 40 } },
   ]) assert.equal(await settle({ providerRetryNotBeforeMs: null }, overrides), false);
   assert.equal(sleeps.length, 4, 'no wait when the game stops');
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 700_000 }, { maxWaitMs: 1_200_000 }), true);
+  assert.equal(sleeps.at(-1), 700_000, 'the outer wait follows a larger in-attempt budget');
+  sleeps.pop();
   await assert.rejects(settle({ providerRetryNotBeforeMs: null }, { redact: undefined }), TypeError, 'redaction is required');
   assert.equal(sleeps.length, 4);
 });
