@@ -14,12 +14,15 @@ export const ATTEMPT_BACKOFF_MAX_MS = 120_000;
 // holding its slot.
 export const PROVIDER_COOLDOWN_MAX_WAIT_MS = 600_000;
 
+// setTimeout fires at once beyond 2^31 - 1 ms, so no single outer wait may exceed it.
+export const MAX_ATTEMPT_WAIT_MS = 2 ** 31 - 1;
+
 /**
  * The outer cooldown wait is never below the in-attempt budget, so a hint the
  * loop could have waited for is not dropped only because it was handed over.
  */
 export function outerCooldownMaxWaitMs(inAttemptBudgetMs) {
-  return Math.max(PROVIDER_COOLDOWN_MAX_WAIT_MS, inAttemptBudgetMs);
+  return Math.min(Math.max(PROVIDER_COOLDOWN_MAX_WAIT_MS, inAttemptBudgetMs), MAX_ATTEMPT_WAIT_MS);
 }
 
 export function attemptBackoffMs(attempt) {
@@ -34,7 +37,7 @@ export function nextAttemptDelay({ attempt, nowMs, providerRetryNotBeforeMs = nu
   const cooldownMs = Number.isSafeInteger(providerRetryNotBeforeMs)
     ? Math.max(0, providerRetryNotBeforeMs - nowMs)
     : 0;
-  if (cooldownMs > maxWaitMs) return { retry: false, cooldownMs };
+  if (cooldownMs > Math.min(maxWaitMs, MAX_ATTEMPT_WAIT_MS)) return { retry: false, cooldownMs };
   return { retry: true, cooldownMs, delayMs: Math.max(attemptBackoffMs(attempt), cooldownMs) };
 }
 
@@ -69,7 +72,7 @@ export async function retryAfterFailedAttempt({
   const failure = redact(String(result.error)).slice(0, 200);
   if (!next.retry) {
     const cooldown = next.cooldownMs === null ? 'beyond any representable time' : `${Math.ceil(next.cooldownMs / 1000)}s`;
-    log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); provider cooldown ${cooldown} exceeds the ${maxWaitMs / 1000}s retry wait, stopping this game`);
+    log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); provider cooldown ${cooldown} exceeds the ${Math.min(maxWaitMs, MAX_ATTEMPT_WAIT_MS) / 1000}s retry wait, stopping this game`);
     return false;
   }
   log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); retrying in ${Math.round(next.delayMs / 1000)}s`);

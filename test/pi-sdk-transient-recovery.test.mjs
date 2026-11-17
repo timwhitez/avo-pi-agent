@@ -10,6 +10,7 @@ import { AvoArcAgent } from '../src/core/avo-agent.mjs';
 import {
   ATTEMPT_BACKOFF_MAX_MS,
   attemptBackoffMs,
+  MAX_ATTEMPT_WAIT_MS,
   nextAttemptDelay,
   outerCooldownMaxWaitMs,
   PROVIDER_COOLDOWN_MAX_WAIT_MS,
@@ -531,6 +532,9 @@ test('the outer cooldown cap is never below the in-attempt budget and leaves the
   process.env.AVO_TRANSIENT_TURN_RECOVERIES = '20';
   try {
     assert.equal(outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()), 1_200_000, 'a larger recovery limit raises the outer wait with it');
+    process.env.AVO_TRANSIENT_TURN_RECOVERIES = '35792';
+    assert.ok(inAttemptCooldownBudgetMs() > MAX_ATTEMPT_WAIT_MS);
+    assert.equal(outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()), MAX_ATTEMPT_WAIT_MS, 'one outer wait never exceeds the timer limit');
   } finally {
     delete process.env.AVO_TRANSIENT_TURN_RECOVERIES;
   }
@@ -575,6 +579,11 @@ test('the outer retry settles an errored attempt from the agent result', async (
   assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + 700_000 }, { maxWaitMs: 1_200_000 }), true);
   assert.equal(sleeps.at(-1), 700_000, 'the outer wait follows a larger in-attempt budget');
   sleeps.pop();
+  // A wait past the timer limit would fire at once, so it stops the game instead.
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + MAX_ATTEMPT_WAIT_MS + 1 }, { maxWaitMs: 2 ** 40 }), false);
+  assert.match(logs.at(-1), /exceeds the 2147483.647s retry wait, stopping this game/);
+  assert.equal(await settle({ providerRetryNotBeforeMs: 1_000_000 + MAX_ATTEMPT_WAIT_MS }, { maxWaitMs: 2 ** 40 }), true);
+  assert.equal(sleeps.pop(), MAX_ATTEMPT_WAIT_MS);
   await assert.rejects(settle({ providerRetryNotBeforeMs: null }, { redact: undefined }), TypeError, 'redaction is required');
   assert.equal(sleeps.length, 4);
 });
