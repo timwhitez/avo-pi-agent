@@ -522,6 +522,11 @@ test('the outer retry never starts an attempt before the loop not-before', () =>
     nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs + PROVIDER_COOLDOWN_MAX_WAIT_MS + 1 }),
     { retry: false, cooldownMs: PROVIDER_COOLDOWN_MAX_WAIT_MS + 1 },
   );
+  assert.equal(
+    nextAttemptDelay({ attempt: 1, nowMs, providerRetryNotBeforeMs: nowMs + 10_000, maxWaitMs: Number.NaN }).retry,
+    false,
+    'an invalid cap stops instead of waiting',
+  );
 });
 
 test('the outer cooldown cap is never below the in-attempt budget and leaves the backoff unchanged', async () => {

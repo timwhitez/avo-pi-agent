@@ -18,8 +18,9 @@ export const PROVIDER_COOLDOWN_MAX_WAIT_MS = 600_000;
 export const MAX_ATTEMPT_WAIT_MS = 2 ** 31 - 1;
 
 /**
- * The outer cooldown wait is never below the in-attempt budget, so a hint the
- * loop could have waited for is not dropped only because it was handed over.
+ * The outer cooldown wait is never below the in-attempt budget (up to the timer
+ * limit), so a hint the loop could have waited for is not dropped only because
+ * it was handed over.
  */
 export function outerCooldownMaxWaitMs(inAttemptBudgetMs) {
   return Math.min(Math.max(PROVIDER_COOLDOWN_MAX_WAIT_MS, inAttemptBudgetMs), MAX_ATTEMPT_WAIT_MS);
@@ -37,7 +38,8 @@ export function nextAttemptDelay({ attempt, nowMs, providerRetryNotBeforeMs = nu
   const cooldownMs = Number.isSafeInteger(providerRetryNotBeforeMs)
     ? Math.max(0, providerRetryNotBeforeMs - nowMs)
     : 0;
-  if (cooldownMs > Math.min(maxWaitMs, MAX_ATTEMPT_WAIT_MS)) return { retry: false, cooldownMs };
+  // Written as a negated <= so that an invalid (NaN) cap stops instead of waiting.
+  if (!(cooldownMs <= Math.min(maxWaitMs, MAX_ATTEMPT_WAIT_MS))) return { retry: false, cooldownMs };
   return { retry: true, cooldownMs, delayMs: Math.max(attemptBackoffMs(attempt), cooldownMs) };
 }
 
