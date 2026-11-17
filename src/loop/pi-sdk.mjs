@@ -89,7 +89,7 @@ export const THINKING_ELISION_POLICY_SHA256 = crypto
   .createHash('sha256')
   .update(THINKING_ELISION_POLICY)
   .digest('hex');
-export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: externalOnPayload = undefined } = {}) {
+export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: externalOnPayload = undefined, clock = systemCooldownClock } = {}) {
   let Agent;
   let estimateContextTokens;
   let createModels;
@@ -803,7 +803,7 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       // turn in place keeps every prior action; a whole-game retry would
       // replay them all. Only an explicit transient allowlist recovers, and
       // only up to a bounded number of times per game.
-      const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', 5);
+      const maxTransientRecoveries = positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', DEFAULT_TRANSIENT_TURN_RECOVERIES);
       // A prose-only assistant turn is a protocol deviation, not a terminal
       // state: nudge with the runtime status and continue, bounded by
       // consecutive deviations. A tool-calling turn re-arms the allowance, so
@@ -813,22 +813,37 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
       const maxNoToolContinuations = positiveEnvInt('AVO_NO_TOOL_CONTINUATIONS', 3);
       const TRANSIENT_SESSION_ERROR = /stream disconnected|stream closed|request_timeout|server_is_overloaded|terminated|fetch failed|ECONNRESET|ECONNREFUSED|socket hang up|underlying connection|model_cooldown|cooling down|rate limit|HTTP 429|\b429\b/i;
       let transientRecoveries = 0;
+      // A recognized provider reset hint is a not-before for the next provider
+      // request, whoever sends it. The local wait budget only decides whether
+      // this loop pauses or hands the unresolved error and its not-before to the
+      // outer retry owner; it never authorizes an earlier request. The budget is
+      // the wait the earlier truncated loop could already spend in one attempt
+      // (one 60 s wait per allowed recovery), so in-game coverage is kept while
+      // no request is sent before the hint.
+      let providerRetryNotBeforeMs = null;
+      const cooldownBudgetMs = maxTransientRecoveries * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS;
+      let cooldownWaitedMs = 0;
       for (;;) {
         const sessionError = agent.state.errorMessage;
         if (sessionError) {
+          const resetHintMs = providerResetHintMs(sessionError);
+          // A hint too large to represent stays a hint: never sooner than the safe maximum.
+          providerRetryNotBeforeMs = resetHintMs > 0 ? Math.min(clock.now() + resetHintMs, Number.MAX_SAFE_INTEGER) : null;
           const recoverable = !shouldStop()
             && !innerTurnNoActionLimitReached
             && outerTurns < config.maxOuterTurns
             && transientRecoveries < maxTransientRecoveries
             && TRANSIENT_SESSION_ERROR.test(String(sessionError));
-          if (!recoverable) break;
-          const cooldownMs = cooldownWaitMs(sessionError);
-          if (cooldownMs > 0) await sleep(cooldownMs);
+          if (!recoverable || resetHintMs > cooldownBudgetMs - cooldownWaitedMs) break;
+          // An interrupted wait never continues early.
+          if (resetHintMs > 0 && !(await clock.sleep(resetHintMs, signal))) break;
+          cooldownWaitedMs += resetHintMs;
           // Recheck after the wait: a stop that became effective during the
           // cooldown must not clear the unresolved provider error or count a
           // continuation that was never attempted.
           if (shouldStop() || innerTurnNoActionLimitReached || outerTurns >= config.maxOuterTurns) break;
           transientRecoveries += 1;
+          providerRetryNotBeforeMs = null;
           agent.state.errorMessage = undefined;
           // Provider recovery has its own budget. An errored assistant turn
           // neither spends a prose nudge nor re-arms a preceding prose streak.
@@ -904,6 +919,9 @@ export async function createPiSdkLoop(config, { onEvent = () => {}, onPayload: e
         outerTurns,
         exhaustedOuterTurns,
         transientRecoveries,
+        // Epoch ms before which the outer owner must not send the next request
+        // for this unresolved error; null when no recognized hint applies.
+        providerRetryNotBeforeMs: error ? providerRetryNotBeforeMs : null,
         noToolContinuations,
         mechanismMetrics: finishRunTelemetry(runTelemetry, messages, {
           transientRecoveries,
@@ -1335,18 +1353,67 @@ function wireVisibility(prepared, payload) {
   };
 }
 
-export function cooldownWaitMs(error, { capMs = 60_000 } = {}) {
-  const text = String(error || '');
-  const match = /reset_seconds[^0-9]{0,8}(\d+)/i.exec(text)
-    ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+)\s*s\b/i.exec(text);
-  const parsed = Number(match?.[1]);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return Math.min(parsed * 1000, capMs);
+// In-attempt wait allowance per transient recovery: the earlier per-wait 60 s
+// truncation. A hint beyond the remaining allowance ends the continuation
+// instead of being shortened.
+export const PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS = 60_000;
+export const DEFAULT_TRANSIENT_TURN_RECOVERIES = 5;
+
+/** The cumulative in-attempt cooldown wait for the configured recovery limit. */
+export function inAttemptCooldownBudgetMs() {
+  return positiveEnvInt('AVO_TRANSIENT_TURN_RECOVERIES', DEFAULT_TRANSIENT_TURN_RECOVERIES) * PROVIDER_COOLDOWN_WAIT_PER_RECOVERY_MS;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * The full recognized provider reset hint in ms, 0 when none is recognized, or
+ * Infinity when a recognized hint is too large to represent.
+ */
+export function providerResetHintMs(error) {
+  const text = String(error || '');
+  const match = /reset_seconds[^0-9]{0,8}(\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(text)
+    ?? /(?:cooling down|reset in)[^0-9]{0,8}(\d+(?:\.\d+)?)\s*s\b/i.exec(text);
+  if (!match) return 0;
+  const parsed = Number(match[1]);
+  if (parsed === 0) return 0;
+  // Round up: a fractional second must never shorten the hint.
+  const ms = Math.ceil(parsed * 1000);
+  return Number.isSafeInteger(ms) ? ms : Number.POSITIVE_INFINITY;
 }
+
+// setTimeout fires immediately for delays above 2^31 - 1 ms, so long waits are chunked.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** Resolves true after ms, or false as soon as signal aborts. */
+export function cooldownSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(false);
+      return;
+    }
+    let remaining = ms;
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const arm = () => {
+      const step = Math.min(remaining, MAX_TIMER_MS);
+      timer = setTimeout(() => {
+        remaining -= step;
+        if (remaining > 0) {
+          arm();
+          return;
+        }
+        signal?.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, step);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    arm();
+  });
+}
+
+const systemCooldownClock = Object.freeze({ now: () => Date.now(), sleep: cooldownSleep });
 
 function positiveEnvInt(name, fallback) {
   const raw = process.env[name];

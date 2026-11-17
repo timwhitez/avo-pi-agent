@@ -21,7 +21,7 @@ import {
 import { AvoArcAgent } from './core/avo-agent.mjs';
 import { effectiveAvoToolNames } from './core/avo-agent-base.mjs';
 import { createPortablePiLoop } from './loop/portable-pi.mjs';
-import { createPiSdkLoop } from './loop/pi-sdk.mjs';
+import { createPiSdkLoop, inAttemptCooldownBudgetMs } from './loop/pi-sdk.mjs';
 import { bindCliReceipt, buildAuditGap, receiptLogLine } from './trajectory/audit-events.mjs';
 import {
   privateProviderIncidentEvidence,
@@ -32,6 +32,7 @@ import {
 } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
 import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
+import { attemptBackoffMs, outerCooldownMaxWaitMs, retryAfterFailedAttempt } from './benchmark/attempt-retry.mjs';
 import {
   evaluateScorecardCoverage,
   hashExecutionId,
@@ -389,7 +390,7 @@ async function runPublic(args) {
             env = await openEnvironment(versionedGameId);
           } catch (error) {
             if (attempt >= maxAttempts) throw error;
-            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
+            const delayMs = attemptBackoffMs(attempt);
             console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(error?.message || error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
             await sleep(delayMs);
             continue;
@@ -428,13 +429,19 @@ async function runPublic(args) {
           if (!result.error || isWinState(result.state)) break;
           // A transient provider fault must not sacrifice the whole game:
           // durable memory persists across attempts, so a retry re-grounds.
-          if (attempt < maxAttempts
-              && result.actions < actionBudget.total
-              && result.outerTurns < gameConfig.maxOuterTurns) {
-            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
-            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(result.error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
-            await sleep(delayMs);
-          }
+          // A provider cooldown hint is a lower bound for the next attempt.
+          if (!(await retryAfterFailedAttempt({
+            attempt,
+            maxAttempts,
+            result,
+            agentResult,
+            actionBudgetTotal: actionBudget.total,
+            maxOuterTurns: gameConfig.maxOuterTurns,
+            gameId,
+            sleep,
+            redact: redactText,
+            maxWaitMs: outerCooldownMaxWaitMs(inAttemptCooldownBudgetMs()),
+          }))) break;
         }
         results[index] = result;
         // Never checkpoint an errored attempt: a resume must replay it, not
