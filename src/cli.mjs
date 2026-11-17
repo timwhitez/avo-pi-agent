@@ -32,6 +32,7 @@ import {
 } from './redaction.mjs';
 import { redactText } from './benchmark/redaction.mjs';
 import { aggregateAttemptProgress, aggregateAttemptTelemetry } from './benchmark/report.mjs';
+import { attemptBackoffMs, GAME_RETRY_MAX_WAIT_MS, nextAttemptDelay } from './benchmark/attempt-retry.mjs';
 import {
   evaluateScorecardCoverage,
   hashExecutionId,
@@ -389,7 +390,7 @@ async function runPublic(args) {
             env = await openEnvironment(versionedGameId);
           } catch (error) {
             if (attempt >= maxAttempts) throw error;
-            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
+            const delayMs = attemptBackoffMs(attempt);
             console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(error?.message || error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
             await sleep(delayMs);
             continue;
@@ -431,9 +432,18 @@ async function runPublic(args) {
           if (attempt < maxAttempts
               && result.actions < actionBudget.total
               && result.outerTurns < gameConfig.maxOuterTurns) {
-            const delayMs = Math.min(30_000 * attempt * attempt, 120_000);
-            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${redactText(String(result.error)).slice(0, 200)}); retrying in ${Math.round(delayMs / 1000)}s`);
-            await sleep(delayMs);
+            const next = nextAttemptDelay({
+              attempt,
+              nowMs: Date.now(),
+              providerRetryNotBeforeMs: agentResult.providerRetryNotBeforeMs,
+            });
+            const failure = redactText(String(result.error)).slice(0, 200);
+            if (!next.retry) {
+              console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); provider cooldown ${Math.ceil(next.cooldownMs / 1000)}s exceeds the ${GAME_RETRY_MAX_WAIT_MS / 1000}s retry wait, stopping this game`);
+              break;
+            }
+            console.log(`\n${gameId}: attempt ${attempt}/${maxAttempts} failed (${failure}); retrying in ${Math.round(next.delayMs / 1000)}s`);
+            await sleep(next.delayMs);
           }
         }
         results[index] = result;

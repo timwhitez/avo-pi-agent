@@ -1517,6 +1517,8 @@ export class AvoArcAgent {
       terminationReason: !this.executionError && !this.lastResult?.error && this.levelBudgetExhausted()
         ? 'level-action-budget' : this.lastResult?.terminationReason ?? null,
       outerTurns: this.lastResult?.outerTurns ?? null,
+      // Lower bound for the outer retry owner; only a loop error carries one.
+      providerRetryNotBeforeMs: this.executionError ? null : this.lastResult?.providerRetryNotBeforeMs ?? null,
       mechanismMetrics,
       hypothesisJournal: {
         proposals: this.memory.journal.proposals.length,
